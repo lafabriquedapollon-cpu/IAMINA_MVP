@@ -1,0 +1,1053 @@
+import 'dart:async';
+import 'dart:developer' as developer;
+
+import 'package:drift/drift.dart' as drift;
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/theme/app_theme.dart';
+import '../../core/widgets/mobile_page_header.dart';
+import '../../data/drift/database.dart';
+import '../../data/drift/patient_treatment_declaration_store.dart';
+import '../../l10n/app_localizations.dart';
+import '../../services/auth_service.dart';
+import '../../services/country_choices.dart';
+import '../../services/locale_preference_service.dart';
+import '../../services/sync_service.dart';
+import '../profile/medical_treatment_declaration_v1.dart';
+import '../profile/medical_treatment_multi_selector.dart';
+
+String _preferencesCopy(
+  BuildContext context, {
+  required String fr,
+  required String en,
+  required String ar,
+}) {
+  return switch (Localizations.localeOf(context).languageCode) {
+    'fr' => fr,
+    'ar' => ar,
+    _ => en,
+  };
+}
+
+class OnboardingChatScreen extends StatefulWidget {
+  final bool preferencesOnly;
+
+  const OnboardingChatScreen({
+    super.key,
+    this.preferencesOnly = false,
+  });
+
+  @override
+  State<OnboardingChatScreen> createState() => _OnboardingChatScreenState();
+}
+
+class _OnboardingChatScreenState extends State<OnboardingChatScreen> {
+  static const _persistenceTimeout = Duration(seconds: 10);
+
+  String? _language;
+  String? _country;
+  String? _diabetesType;
+  String? _treatment; // existing optional legacy scalar; never inferred
+  D7TreatmentDeclaration _declaredTreatments = D7TreatmentDeclaration.later();
+  bool _treatmentTouched = false;
+  // D8: new patients choose their meter unit explicitly.
+  // Existing preferences are read unchanged in preferencesOnly.
+  String? _unit;
+  bool _saving = false;
+  bool _preferencesInitialized = false;
+  bool _countrySuggestionRequested = false;
+  bool _countryTouched = false;
+  bool _countrySuggestedByIp = false;
+
+  // Isolated from W01 PR #1128: reveal the next question only after an
+  // explicit user action, never after an asynchronous country suggestion.
+  final GlobalKey _countryStepKey = GlobalKey(debugLabel: 'onboarding-country');
+  final GlobalKey _typeStepKey = GlobalKey(debugLabel: 'onboarding-type');
+  final GlobalKey _treatmentStepKey = GlobalKey(debugLabel: 'onboarding-treatment');
+  final GlobalKey _unitStepKey = GlobalKey(debugLabel: 'onboarding-unit');
+
+  AppLocalizations get l10n => AppLocalizations.of(context)!;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (widget.preferencesOnly && !_preferencesInitialized) {
+      final localeService = context.read<LocalePreferenceService>();
+      final profile = context.read<PatientProfileData?>();
+      _language = localeService.locale.languageCode;
+      _country = countryByCode(localeService.country)?.code;
+      _diabetesType = profile?.diabetesType;
+      _treatment = profile?.treatment;
+      _unit = profile?.unitPreference ?? _unit;
+      _preferencesInitialized = true;
+    }
+    if (!_countrySuggestionRequested) {
+      _countrySuggestionRequested = true;
+      if (_country == null) unawaited(_suggestCountryFromIp());
+    }
+  }
+
+  Future<void> _suggestCountryFromIp() async {
+    final code = await context.read<LocalePreferenceService>().suggestCountryFromIp();
+    if (!mounted || _countryTouched || _country != null) return;
+    final choice = countryByCode(code);
+    if (choice == null) return;
+    setState(() {
+      _country = choice.code;
+      _countrySuggestedByIp = true;
+    });
+  }
+
+  void _selectCountry(String country) {
+    setState(() {
+      _country = country;
+      _countryTouched = true;
+      _countrySuggestedByIp = false;
+    });
+    if (!widget.preferencesOnly) _revealStep(_typeStepKey);
+  }
+
+  void _confirmSuggestedCountry() {
+    if (_country == null || !_countrySuggestedByIp) return;
+    setState(() {
+      _countryTouched = true;
+      _countrySuggestedByIp = false;
+    });
+    if (!widget.preferencesOnly) _revealStep(_typeStepKey);
+  }
+
+  void _clearCountry() {
+    if (_country == null && _countryTouched) return;
+    setState(() {
+      _country = null;
+      _countryTouched = true;
+      _countrySuggestedByIp = false;
+    });
+  }
+
+  void _selectLanguage(String value) {
+    // W01 #1128: show the following question without waiting for Web storage.
+    setState(() => _language = value);
+    unawaited(
+      context.read<LocalePreferenceService>().setLanguageOnly(value).catchError(
+        (Object error, StackTrace stackTrace) {
+          developer.log(
+            'Language preference persistence failed.',
+            name: 'iamina.onboarding.language',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        },
+      ),
+    );
+    _revealStep(_countryStepKey);
+  }
+
+  void _selectDiabetesType(String value) {
+    setState(() => _diabetesType = value);
+    _revealStep(_treatmentStepKey);
+  }
+
+  void _revealStep(GlobalKey stepKey) {
+    // Desktop already shows the full form; forcing an alignment would clip
+    // the intro at 1280x900 (verified BEFORE/AFTER Chrome #40793238189).
+    if (MediaQuery.sizeOf(context).width >= 900) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final target = stepKey.currentContext;
+      if (!mounted || target == null) return;
+      final reduceMotion = MediaQuery.of(context).disableAnimations;
+      unawaited(Scrollable.ensureVisible(
+        target,
+        duration: reduceMotion
+            ? Duration.zero
+            : const Duration(milliseconds: 320),
+        curve: Curves.easeOutCubic,
+        alignment: 0.12,
+      ));
+    });
+  }
+
+  Future<void> _finish() async {
+    if (_language == null ||
+        _country == null ||
+        _countrySuggestedByIp ||
+        (!widget.preferencesOnly && _unit == null)) return;
+    setState(() => _saving = true);
+
+    try {
+      final localeService = context.read<LocalePreferenceService>();
+      await localeService
+          .setExperience(
+            language: _language!,
+            country: _country!,
+            tone: 'neutral',
+          )
+          .timeout(_persistenceTimeout);
+
+      if (!mounted) return;
+      if (widget.preferencesOnly) {
+        final router = GoRouter.of(context);
+        if (router.canPop()) {
+          router.pop();
+        } else {
+          router.go('/profile');
+        }
+        return;
+      }
+
+      final db = context.read<AppDatabase>();
+      // Scoped physical vault selects the owner; Firebase hashCode is neither
+      // stable nor an authenticated patient identifier.
+      final userId = db.activeProfileRowId;
+      final profile = PatientProfilesCompanion.insert(
+        userId: drift.Value(userId),
+        preferredLanguage: drift.Value(_language!),
+        updatedAt: DateTime.now(),
+        diabetesType: drift.Value(_diabetesType),
+        treatment: drift.Value(_treatment),
+        unitPreference: drift.Value(_unit!),
+        // D22 Gate A: legacy SQL defaults remain untrusted until
+        // a separate, governed provenance migration is approved.
+      );
+
+      await db
+          .into(db.patientProfiles)
+          .insertOnConflictUpdate(profile)
+          .timeout(_persistenceTimeout);
+
+      // A fresh authenticated device starts without a local profile. Never
+      // fabricate one just to restore clinical declarations: first-use remains
+      // explicit. Once the patient has saved this real profile, recover only
+      // a server-explicit declaration and only if the patient made no new
+      // treatment choice on this device.
+      if (!_treatmentTouched && mounted &&
+          db.patientVaultScope?.nativeDjangoUserId != null &&
+          context.read<AuthService>().hasRemoteApiCredential) {
+        // Remote restoration is best-effort and must not hold the patient
+        // inside first-use if the network is down. The vault-bound sync
+        // service verifies the auth epoch before accepting the response.
+        unawaited(
+          context.read<SyncService>().restorePatientTreatmentDeclaration(),
+        );
+      }
+      if (_treatmentTouched && db.patientVaultScope != null) {
+        await PatientTreatmentDeclarationStore(db).write(
+          state: d7StateCode(_declaredTreatments.state),
+          codes: _declaredTreatments.codes,
+        ).timeout(_persistenceTimeout);
+        // Keep any offline choice in the patient vault. The native upload
+        // uses conditional CAS and generation-scoped ACK, never legacy PATCH.
+        if (mounted && db.patientVaultScope?.nativeDjangoUserId != null &&
+            context.read<AuthService>().hasRemoteApiCredential) {
+          final mirrored = await context.read<SyncService>()
+              .sendPendingTreatmentDeclaration()
+              .timeout(_persistenceTimeout, onTimeout: () => false);
+          if (!mirrored && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(_preferencesCopy(context,
+                fr: 'Traitements enregistrés localement. Synchronisation non confirmée.',
+                en: 'Treatments saved locally. Remote sync not confirmed.',
+                ar: 'تم حفظ العلاجات محليًا. لم يتم تأكيد المزامنة.',
+              )),
+            ));
+          }
+        }
+      }
+
+      if (mounted) context.go('/dashboard');
+    } on TimeoutException catch (error, stackTrace) {
+      developer.log(
+        'Onboarding local persistence timed out.',
+        name: 'iamina.onboarding.finish',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (mounted) setState(() => _saving = false);
+    } catch (error, stackTrace) {
+      developer.log(
+        'Onboarding local persistence failed.',
+        name: 'iamina.onboarding.finish',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final preferenceSteps = <Widget>[
+      _Question(
+        title: l10n.onboardingChooseLanguage,
+        keyboardOrderExplicit: true,
+        children: [
+          _Choice(
+            label: 'Français',
+            selected: _language == 'fr',
+            onTap: () => _selectLanguage('fr'),
+          ),
+          _Choice(
+            label: 'English',
+            selected: _language == 'en',
+            onTap: () => _selectLanguage('en'),
+          ),
+          _Choice(
+            label: 'العربية',
+            selected: _language == 'ar',
+            onTap: () => _selectLanguage('ar'),
+          ),
+        ],
+      ),
+      _Question(
+        key: _countryStepKey,
+        title: l10n.onboardingChooseCountry,
+        children: [
+          _CountrySearchField(
+            code: _country,
+            proposedFromIp: _countrySuggestedByIp,
+            onConfirmed: _confirmSuggestedCountry,
+            onSelected: _selectCountry,
+            onCleared: _clearCountry,
+          ),
+        ],
+      ),
+    ];
+
+    final onboardingSteps = <Widget>[
+      _Question(
+        title: l10n.onboardingChooseLanguage,
+        keyboardOrderExplicit: true,
+        children: [
+          _Choice(
+            label: 'Français',
+            selected: _language == 'fr',
+            onTap: () => _selectLanguage('fr'),
+          ),
+          _Choice(
+            label: 'English',
+            selected: _language == 'en',
+            onTap: () => _selectLanguage('en'),
+          ),
+          _Choice(
+            label: 'العربية',
+            selected: _language == 'ar',
+            onTap: () => _selectLanguage('ar'),
+          ),
+        ],
+      ),
+      if (_language != null)
+        _Question(
+          key: _countryStepKey,
+          title: l10n.onboardingChooseCountry,
+          children: [
+            _CountrySearchField(
+              code: _country,
+              proposedFromIp: _countrySuggestedByIp,
+              onConfirmed: _confirmSuggestedCountry,
+              onSelected: _selectCountry,
+              onCleared: _clearCountry,
+            ),
+          ],
+        ),
+      if (_country != null && !_countrySuggestedByIp)
+        _Question(
+          key: _typeStepKey,
+          title: l10n.onboardingTypeQuestion,
+          children: [
+            _Choice(
+              label: l10n.diabetesType1,
+              selected: _diabetesType == 'type1',
+              onTap: () => _selectDiabetesType('type1'),
+            ),
+            _Choice(
+              label: l10n.diabetesType2,
+              selected: _diabetesType == 'type2',
+              onTap: () => _selectDiabetesType('type2'),
+            ),
+            _Choice(
+              label: l10n.diabetesGestational,
+              selected: _diabetesType == 'gestational',
+              onTap: () => _selectDiabetesType('gestational'),
+            ),
+            _Choice(
+              label: l10n.diabetesPreDiabetes,
+              selected: _diabetesType == 'pre',
+              onTap: () => _selectDiabetesType('pre'),
+            ),
+            _Choice(
+              label: _preferencesCopy(context,
+                fr: 'Autre diagnostic déclaré',
+                en: 'Another declared condition',
+                ar: 'تشخيص آخر مصرّح به',
+              ),
+              selected: _diabetesType == 'other',
+              onTap: () => _selectDiabetesType('other'),
+            ),
+            _Choice(
+              label: _preferencesCopy(context,
+                fr: 'Je ne sais pas / plus tard',
+                en: 'Not sure / later',
+                ar: 'لا أعرف / لاحقًا',
+              ),
+              selected: _diabetesType == 'unknown',
+              onTap: () => _selectDiabetesType('unknown'),
+            ),
+          ],
+        ),
+      if (_country != null && !_countrySuggestedByIp)
+        _Question(
+          key: _treatmentStepKey,
+          title: _preferencesCopy(context,
+            fr: 'Quels traitements suivez-vous actuellement ? (facultatif)',
+            en: 'Which treatments do you currently follow? (optional)',
+            ar: 'ما العلاجات التي تتبعها حاليًا؟ (اختياري)',
+          ),
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                MedicalTreatmentMultiSelector(
+                  diabetesType: _diabetesType,
+                  value: _declaredTreatments,
+                  onChanged: (value) => setState(() {
+                    _declaredTreatments = value;
+                    _treatmentTouched = true;
+                  }),
+                ),
+                const SizedBox(height: 8),
+                // Multi-choice is patient-driven: never jump after one chip.
+                // The patient explicitly advances when finished or skips it.
+                if (MediaQuery.sizeOf(context).width < 900)
+                  TextButton.icon(
+                    key: const Key('onboarding-treatment-next'),
+                  onPressed: () => _revealStep(_unitStepKey),
+                  icon: const Icon(Icons.arrow_downward_rounded, size: 18),
+                  label: Text(_preferencesCopy(context,
+                    fr: 'Continuer vers les unités',
+                    en: 'Continue to units',
+                    ar: 'المتابعة إلى الوحدات',
+                  )),
+                ),
+              ],
+            ),
+          ],
+        ),
+      if (_country != null && !_countrySuggestedByIp)
+        _Question(
+          key: _unitStepKey,
+          title: l10n.onboardingUnitQuestion,
+          children: [
+            _Choice(
+              label: l10n.onboardingUnitMg,
+              selected: _unit == 'mg/dL',
+              onTap: () => setState(() => _unit = 'mg/dL'),
+            ),
+            _Choice(
+              label: l10n.onboardingUnitMmol,
+              selected: _unit == 'mmol/L',
+              onTap: () => setState(() => _unit = 'mmol/L'),
+            ),
+            if (_unit == null)
+              SizedBox(
+                width: double.infinity,
+                child: Text(
+                  _preferencesCopy(context,
+                    fr: 'Choisissez l’unité indiquée sur votre lecteur avant de continuer.',
+                    en: 'Choose the unit shown on your meter before continuing.',
+                    ar: 'اختر الوحدة المعروضة على جهاز القياس قبل المتابعة.',
+                  ),
+                  key: const Key('onboarding-unit-required-hint'),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AminaTheme.textSecondary(context),
+                  ),
+                ),
+              ),
+          ],
+        ),
+    ];
+
+    final steps = widget.preferencesOnly ? preferenceSteps : onboardingSteps;
+    final onboardingProgress = widget.preferencesOnly
+        ? null
+        : _onboardingProgress(
+            language: _language,
+            country: _countrySuggestedByIp ? null : _country,
+            diabetesType: _diabetesType,
+            treatment: _treatmentTouched ? d7StateCode(_declaredTreatments.state) : null,
+          );
+
+    // D8: confirmed country and explicit unit are required for first use.
+    // Diagnosis/treatments remain optional, and preferencesOnly is unchanged.
+    final hasCountry =
+        _language != null && _country != null && !_countrySuggestedByIp;
+    final ready = hasCountry && (widget.preferencesOnly || _unit != null);
+
+    final assistantLabel = widget.preferencesOnly
+        ? _preferencesCopy(
+            context,
+            fr: 'Langue et pays',
+            en: 'Language & country',
+            ar: 'اللغة والبلد',
+          )
+        : l10n.onboardingAssistantLabel;
+    final welcome = widget.preferencesOnly
+        ? _preferencesCopy(
+            context,
+            fr: 'Choisissez la langue de l’application et votre pays d’utilisation.',
+            en: 'Choose your app language and country of use.',
+            ar: 'اختر لغة التطبيق وبلد الاستخدام.',
+          )
+        : l10n.onboardingWelcome;
+    final readyLabel = widget.preferencesOnly
+        ? _preferencesCopy(
+            context,
+            fr: 'Préférences prêtes',
+            en: 'Preferences ready',
+            ar: 'التفضيلات جاهزة',
+          )
+        : l10n.onboardingReady;
+    final finishLabel = widget.preferencesOnly
+        ? _preferencesCopy(
+            context,
+            fr: 'Enregistrer',
+            en: 'Save',
+            ar: 'حفظ',
+          )
+        : l10n.onboardingStart;
+
+    final compact = MediaQuery.sizeOf(context).width < 900;
+
+    return Scaffold(
+      backgroundColor: AminaTheme.surfaceMuted,
+      bottomNavigationBar: compact && hasCountry
+          ? SafeArea(
+              top: false,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: AminaTheme.surfaceMuted,
+                  border: Border(
+                    top: BorderSide(color: Theme.of(context).dividerColor),
+                  ),
+                ),
+                padding: const EdgeInsetsDirectional.fromSTEB(20, 10, 20, 12),
+                child: SizedBox(
+                  height: 52,
+                  child: FilledButton(
+                    key: const Key('onboarding-sticky-start'),
+                    onPressed: _saving || !ready ? null : _finish,
+                    child: Text(_saving ? l10n.onboardingSaving : finishLabel),
+                  ),
+                ),
+              ),
+            )
+          : null,
+      appBar: AppBar(
+        leading: widget.preferencesOnly
+            ? const AminaPageExitButton(fallbackRoute: '/profile')
+            : null,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Image.asset(
+              'assets/images/iamina_logo_horizontal.png',
+              width: 148,
+              height: 34,
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
+              semanticLabel: 'IAMINA',
+              color: AminaTheme.isDark(context) ? Colors.white : null,
+              colorBlendMode: BlendMode.srcIn,
+            ),
+            Text(
+              assistantLabel,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final desktop = constraints.maxWidth >= 900;
+            final questions = _OnboardingQuestions(
+              welcome: welcome,
+              steps: steps,
+              ready: ready,
+              readyLabel: readyLabel,
+              saving: _saving,
+              savingLabel: l10n.onboardingSaving,
+              startLabel: finishLabel,
+              onFinish: _finish,
+              progress: onboardingProgress,
+              showInlineFinish: !compact,
+            );
+
+            if (!desktop) {
+              return ListView(
+                padding: const EdgeInsets.all(20),
+                children: [questions],
+              );
+            }
+
+            return SingleChildScrollView(
+              padding: const EdgeInsetsDirectional.fromSTEB(28, 28, 28, 40),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight: constraints.maxHeight > 68
+                      ? constraints.maxHeight - 68
+                      : 0,
+                ),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 1040),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(
+                          flex: 4,
+                          child: _DesktopWelcomePanel(
+                            title: 'IAmina',
+                            subtitle: assistantLabel,
+                            body: welcome,
+                          ),
+                        ),
+                        const SizedBox(width: 28),
+                        Expanded(
+                          flex: 6,
+                          child: Container(
+                            padding: const EdgeInsetsDirectional.fromSTEB(
+                              30,
+                              28,
+                              30,
+                              30,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Theme.of(context).cardColor,
+                              borderRadius: BorderRadius.circular(24),
+                              border: Border.all(color: AminaTheme.ink100),
+                              boxShadow: AminaTheme.shadowClinicalLg,
+                            ),
+                            child: questions,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+({int current, int total}) _onboardingProgress({
+  required String? language,
+  required String? country,
+  required String? diabetesType,
+  required String? treatment,
+}) {
+  var current = 1;
+  if (language != null) current = 2;
+  if (country != null) current = 3;
+  if (diabetesType != null) current = 4;
+  if (treatment != null) current = 5;
+  return (current: current, total: 5);
+}
+
+class _OnboardingQuestions extends StatelessWidget {
+  final String welcome;
+  final List<Widget> steps;
+  final bool ready;
+  final String readyLabel;
+  final bool saving;
+  final String savingLabel;
+  final String startLabel;
+  final VoidCallback onFinish;
+  final ({int current, int total})? progress;
+  final bool showInlineFinish;
+
+  const _OnboardingQuestions({
+    required this.welcome,
+    required this.steps,
+    required this.ready,
+    required this.readyLabel,
+    required this.saving,
+    required this.savingLabel,
+    required this.startLabel,
+    required this.onFinish,
+    this.progress,
+    this.showInlineFinish = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          welcome,
+          style: Theme.of(
+            context,
+          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        if (progress != null) ...[
+          const SizedBox(height: 14),
+          Semantics(
+            label: _preferencesCopy(
+              context,
+              fr: 'Étape ${progress!.current} sur ${progress!.total}',
+              en: 'Step ${progress!.current} of ${progress!.total}',
+              ar: 'الخطوة ${progress!.current} من ${progress!.total}',
+            ),
+            child: ExcludeSemantics(
+              child: Row(
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(
+                        minHeight: 7,
+                        value: progress!.current / progress!.total,
+                        backgroundColor: AminaTheme.ink100,
+                        color: AminaTheme.teal500,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    _preferencesCopy(
+                      context,
+                      fr: 'Étape ${progress!.current}/${progress!.total} · ~1 min',
+                      en: 'Step ${progress!.current}/${progress!.total} · ~1 min',
+                      ar: 'الخطوة ${progress!.current}/${progress!.total} · نحو دقيقة',
+                    ),
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: AminaTheme.textSecondary(context),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+        const SizedBox(height: 20),
+        ...steps,
+        if (ready && showInlineFinish) ...[
+          const SizedBox(height: 4),
+          Text(readyLabel),
+          const SizedBox(height: 16),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final desktop = MediaQuery.sizeOf(context).width >= 900;
+              return SizedBox(
+                width: desktop ? 240 : constraints.maxWidth,
+                child: FilledButton(
+                  onPressed: saving ? null : onFinish,
+                  child: Text(saving ? savingLabel : startLabel),
+                ),
+              );
+            },
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _DesktopWelcomePanel extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final String body;
+
+  const _DesktopWelcomePanel({
+    required this.title,
+    required this.subtitle,
+    required this.body,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsetsDirectional.fromSTEB(28, 30, 28, 30),
+      decoration: BoxDecoration(
+        gradient: AminaTheme.heroGradient,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: AminaTheme.shadowClinicalLg,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Semantics(
+            label: title,
+            image: true,
+            child: Image.asset(
+              'assets/images/iamina_logo_horizontal.png',
+              width: 235,
+              height: 62,
+              alignment: AlignmentDirectional.centerStart,
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
+              color: Colors.white,
+              colorBlendMode: BlendMode.srcIn,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            subtitle,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: .78),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 24),
+          Text(
+            body,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: .94),
+              fontSize: 16,
+              height: 1.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Question extends StatelessWidget {
+  final String title;
+  final List<Widget> children;
+  final bool keyboardOrderExplicit;
+
+  const _Question({
+    super.key,
+    required this.title,
+    required this.children,
+    this.keyboardOrderExplicit = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // NotoSansArabic is now rendered rather than a missing-glyph fallback.
+    // Its taller language chip must not push the desktop CTA under the fold.
+    // Mobile sticky CTA and taller desktop layouts are unchanged.
+    final size = MediaQuery.sizeOf(context);
+    final compactDesktop = size.width >= 900 && size.height <= 900;
+    return Padding(
+      padding: EdgeInsets.only(bottom: compactDesktop ? 16 : 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+          ),
+          const SizedBox(height: 10),
+          if (keyboardOrderExplicit)
+            // D5: explicit reversibility for physical keyboard traversal
+            // of the language chips, including FR and Arabic RTL.
+            FocusTraversalGroup(
+              policy: OrderedTraversalPolicy(),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (var index = 0; index < children.length; index++)
+                    FocusTraversalOrder(
+                      order: NumericFocusOrder(index.toDouble()),
+                      child: children[index],
+                    ),
+                ],
+              ),
+            )
+          else
+            Wrap(spacing: 8, runSpacing: 8, children: children),
+        ],
+      ),
+    );
+  }
+}
+
+/// Editable, offline country suggestions. Free text alone is never saved.
+class _CountrySearchField extends StatefulWidget {
+  final String? code;
+  final bool proposedFromIp;
+  final VoidCallback onConfirmed;
+  final ValueChanged<String> onSelected;
+  final VoidCallback onCleared;
+  const _CountrySearchField({
+    required this.code,
+    required this.proposedFromIp,
+    required this.onConfirmed,
+    required this.onSelected,
+    required this.onCleared,
+  });
+
+  @override
+  State<_CountrySearchField> createState() => _CountrySearchFieldState();
+}
+
+class _CountrySearchFieldState extends State<_CountrySearchField> {
+  final TextEditingController _controller = TextEditingController();
+  bool _updating = false;
+  String? _displayedLanguage;
+
+  String get _lang => Localizations.localeOf(context).languageCode;
+
+  void _setText(String text) {
+    _updating = true;
+    _controller.value = TextEditingValue(
+      text: text, selection: TextSelection.collapsed(offset: text.length),
+    );
+    _updating = false;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_onTextChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final language = _lang;
+    if (widget.code != null &&
+        (_controller.text.isEmpty || _displayedLanguage != language)) {
+      final choice = countryByCode(widget.code);
+      if (choice != null) _setText(choice.label(language));
+    }
+    _displayedLanguage = language;
+  }
+
+  @override
+  void didUpdateWidget(covariant _CountrySearchField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.code != null && widget.code != oldWidget.code) {
+      final choice = countryByCode(widget.code);
+      if (choice != null) _setText(choice.label(_lang));
+    }
+  }
+
+  void _onTextChanged() {
+    if (_updating) return;
+    // A person typing in an empty field overrides a pending network estimate.
+    // Otherwise the late IP response could replace an in-progress manual entry.
+    if (widget.code == null) {
+      if (_controller.text.trim().isNotEmpty) widget.onCleared();
+      return;
+    }
+    final selected = countryByCode(widget.code);
+    if (selected != null && _controller.text != selected.label(_lang)) {
+      widget.onCleared(); // Unsuggested typing cannot silently keep old choice.
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lang = _lang;
+    final entries = countryChoices
+        .map((option) => DropdownMenuEntry<CountryChoice>(
+              value: option,
+              label: option.label(lang),
+            ))
+        .toList()
+      ..sort((a, b) => a.label.compareTo(b.label));
+    final width = (MediaQuery.sizeOf(context).width - 80).clamp(240.0, 520.0).toDouble();
+    return SizedBox(
+      width: width,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          DropdownMenu<CountryChoice>(
+            key: const Key('onboarding-country-search'),
+            controller: _controller,
+            enableFilter: true,
+            enableSearch: true,
+            menuHeight: 260,
+            requestFocusOnTap: true,
+            expandedInsets: EdgeInsets.zero,
+            leadingIcon: const Icon(Icons.search),
+            label: Text(_preferencesCopy(context,
+              fr: 'Rechercher un pays',
+              en: 'Search for a country',
+              ar: 'ابحث عن بلد',
+            )),
+            hintText: _preferencesCopy(context,
+              fr: 'Saisissez le nom du pays',
+              en: 'Type a country name',
+              ar: 'اكتب اسم البلد',
+            ),
+            dropdownMenuEntries: entries,
+            onSelected: (value) {
+              if (value != null) widget.onSelected(value.code);
+            },
+          ),
+          const SizedBox(height: 6),
+          Text(
+            widget.proposedFromIp
+                ? _preferencesCopy(context,
+                    fr: 'Proposé selon votre connexion Internet. Vérifiez ou modifiez le pays.',
+                    en: 'Suggested from your Internet connection. Check or change the country.',
+                    ar: 'مقترح حسب اتصال الإنترنت. تحقق من البلد أو غيّره.',
+                  )
+                : _preferencesCopy(context,
+                    fr: 'Choisissez votre pays d’utilisation. La localisation IP est indicative.',
+                    en: 'Choose your country of use. IP location is only an estimate.',
+                    ar: 'اختر بلد الاستخدام. تحديد البلد حسب IP تقريبي فقط.',
+                  ),
+            style: TextStyle(fontSize: 12, color: AminaTheme.textSecondary(context)),
+          ),
+          if (widget.proposedFromIp) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              key: const Key('onboarding-confirm-suggested-country'),
+              onPressed: widget.onConfirmed,
+              icon: const Icon(Icons.check_circle_outline),
+              label: Text(_preferencesCopy(context,
+                fr: 'Confirmer ce pays',
+                en: 'Confirm this country',
+                ar: 'تأكيد هذا البلد',
+              )),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _Choice extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _Choice({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) => ChoiceChip(
+    label: Text(label),
+    selected: selected,
+    onSelected: (_) => onTap(),
+  );
+}

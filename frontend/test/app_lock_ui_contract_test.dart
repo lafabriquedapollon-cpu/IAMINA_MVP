@@ -1,0 +1,141 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('patient enrollment continues into strong app-lock setup', () {
+    final enrollment = File(
+      'lib/features/auth/local_device_enrollment_screen.dart',
+    ).readAsStringSync();
+    final router = File('lib/routes/app_router.dart').readAsStringSync();
+
+    expect(enrollment, contains("context.go('/app-lock/setup')"));
+    expect(router, contains("path: '/app-lock/setup'"));
+    expect(router, contains("path: '/app-lock/unlock'"));
+    expect(router, contains('activeLock.recoveryRequired'));
+    expect(router, contains('!activeLock.isConfigured'));
+    expect(router, contains('!activeLock.isUnlocked'));
+  });
+
+  test('app-lock opt-out is an explicit fresh-vault decision, never a recovery bypass', () {
+    final setup = File(
+      'lib/features/auth/app_lock_setup_screen.dart',
+    ).readAsStringSync();
+    final unlock = File(
+      'lib/features/auth/app_lock_unlock_screen.dart',
+    ).readAsStringSync();
+    final service = File(
+      'lib/services/app_lock_service.dart',
+    ).readAsStringSync();
+
+    expect(setup, contains("Key('d30-skip-app-lock')"));
+    expect(setup, contains("Key('d30-confirm-no-lock')"));
+    expect(setup, contains('continueWithoutAppLock()'));
+    expect(service, contains("protected_vault_cannot_skip_lock"));
+    expect(service, contains("existing_local_data_requires_lock"));
+    expect(service, contains("patient_vault_identity_required"));
+    expect(service, contains("_choiceOwnerKey"));
+    expect(service, contains("owner == scope?.databaseName"));
+    // Device re-verification cannot be replaced by password/PIN shortcuts.
+    expect(unlock.toLowerCase(), isNot(contains('code pin')));
+    expect(unlock.toLowerCase(), isNot(contains('forgot')));
+    expect(unlock.toLowerCase(), isNot(contains('skip')));
+    expect(unlock, contains('if (!recovery)'));
+    expect(unlock, contains('recoveryRequired'));
+    expect(unlock, contains("appLockPreview'] == 'recovery'"));
+    expect(unlock, contains('appLockRecoveryReauthenticate'));
+    expect(unlock, contains('appLockRecoveryReenroll'));
+    expect(unlock, contains('recoverWithVerifiedRemoteAccount()'));
+  });
+
+  test('D30 profile exposes reversible optional lock control', () {
+    final profile = File('lib/features/profile/profile_screen.dart')
+        .readAsStringSync();
+    final presentation = File(
+      'lib/features/profile/profile_screen_presentation.dart',
+    ).readAsStringSync();
+    final service = File('lib/services/app_lock_service.dart')
+        .readAsStringSync();
+
+    expect(presentation, contains("ValueKey('d30-profile-lock-preference')"));
+    expect(presentation, contains('Activer le verrouillage'));
+    expect(presentation, contains('Désactiver le verrouillage'));
+    expect(profile, contains('disableForCurrentVault()'));
+    expect(profile, contains('enableForCurrentVault()'));
+    expect(profile, contains("Key('d30-confirm-profile-lock-choice')"));
+    expect(service, contains('final proof = await _authenticator.unlock(credential);'));
+    expect(service, contains('await _storage.write(key: _ownerChoiceKey(owner)'));
+    expect(service, contains('_ownerChoiceKey(scope.databaseName)'));
+  });
+
+  test('missing app-lock state is cross-checked against all local patient state', () {
+    final mainSource = File('lib/main.dart').readAsStringSync();
+    final serviceSource = File(
+      'lib/services/app_lock_service.dart',
+    ).readAsStringSync();
+
+    expect(mainSource, contains('protectedLocalStateProbe:'));
+    expect(mainSource, contains('authService.isAuthenticated'));
+    // D7 extraction: the presence check now lives in a separate security
+    // helper; inspecting only main.dart would miss the real protection.
+    final vaultProbe = File(
+      'lib/services/medical_vault_protected_state.dart',
+    ).readAsStringSync();
+    expect(mainSource, contains('hasProtectedMedicalVaultRows('));
+    expect(mainSource, contains('AppDatabase.forPatientVault(scope)'));
+    expect(mainSource, contains('legacyProtected || currentVaultProtected'));
+    for (final table in <String>[
+      'patientProfiles',
+      'logEntries',
+      'chatMessages',
+      'medicationEvents',
+      'reminders',
+    ]) {
+      expect(vaultProbe, contains('db.$table'));
+    }
+    expect(vaultProbe, contains('patient_treatment_declarations_v1'));
+    expect(serviceSource, contains('await _hasProtectedLocalState()'));
+    expect(serviceSource, contains('_recoveryRequired = true;'));
+    expect(serviceSource, contains('return true;'));
+  });
+
+  test('WebAuthn bridge requires local user verification and exact binding', () {
+    final source = File('web/iamina_app_lock.js').readAsStringSync();
+
+    expect(source, contains("userVerification: 'required'"));
+    expect(source, contains("authenticatorAttachment: 'platform'"));
+    expect(source, contains("attestation: 'none'"));
+    expect(source, contains("parsed.origin !== location.origin"));
+    expect(source, contains("stored.origin !== location.origin"));
+    expect(source, contains("stored.rpId !== location.hostname"));
+    expect(source, contains('rp_id_hash_mismatch'));
+    expect(source, contains('user_presence_missing'));
+    expect(source, contains('user_verification_missing'));
+    expect(source, contains('crypto.subtle.verify'));
+    expect(source, contains('signature_counter_rollback'));
+  });
+
+  test('WebAuthn bridge has no application-network primitive', () {
+    final source = File('web/iamina_app_lock.js').readAsStringSync();
+
+    expect(source, isNot(contains('fetch(')));
+    expect(source, isNot(contains('XMLHttpRequest')));
+    expect(source, isNot(contains('WebSocket')));
+    expect(source, isNot(contains('EventSource')));
+  });
+
+  test('audit preview is compile-time and loopback constrained', () {
+    final setup = File(
+      'lib/features/auth/app_lock_setup_screen.dart',
+    ).readAsStringSync();
+    final auditPolicy = File(
+      'lib/services/audit_access_policy.dart',
+    ).readAsStringSync();
+
+    expect(setup, contains('AuditAccessPolicy.isAllowed(Uri.base)'));
+    expect(auditPolicy, contains("'IAMINA_AUDIT_ACCESS'"));
+    expect(auditPolicy, contains("defaultValue: false"));
+    expect(auditPolicy, contains("host == 'localhost'"));
+    expect(auditPolicy, contains("host == '127.0.0.1'"));
+  });
+}

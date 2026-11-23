@@ -1,0 +1,391 @@
+// IAmina — ConsentScreen
+// Explicit AI processing consent gate bound to one exact notice version/hash/locale.
+//
+// Routes:
+//   Accept  → exact server receipt → secure local evidence → Drift gate → dashboard
+//   Decline → dashboard (external AI features remain unavailable)
+import 'package:amina/l10n/app_localizations.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
+import '../../core/theme/app_theme.dart';
+import '../../data/drift/database.dart';
+import '../../services/api_client.dart';
+import '../../services/app_lock_service.dart';
+import '../../services/consent_api_extension.dart';
+import '../../services/consent_evidence_store.dart';
+import '../../services/consent_notice_contract.dart';
+import '../../services/consent_service.dart';
+
+class ConsentScreen extends StatefulWidget {
+  const ConsentScreen({super.key});
+
+  @override
+  State<ConsentScreen> createState() => _ConsentScreenState();
+}
+
+class _ConsentScreenState extends State<ConsentScreen> {
+  bool _isLoading = false;
+
+  String _localeText({required String fr, required String ar, required String en}) {
+    return switch (Localizations.localeOf(context).languageCode) {
+      'fr' => fr,
+      'ar' => ar,
+      _ => en,
+    };
+  }
+
+  void _showLockRequired() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      behavior: SnackBarBehavior.floating,
+      content: Text(_localeText(
+        fr: 'Pour accepter le traitement IA, activez d’abord le verrouillage sécurisé du profil, ou continuez sans IA.',
+        ar: 'للموافقة على معالجة الذكاء الاصطناعي، فعّل قفل الملف الشخصي الآمن أولاً أو تابع بدون ذكاء اصطناعي.',
+        en: 'Enable the secure profile lock before consenting to AI processing, or continue without AI.',
+      )),
+    ));
+  }
+
+  void _openLockSetup() {
+    if (context.read<AppLockService?>()?.isExplicitlySkipped != true) return;
+    // Explicit user navigation to the existing WebAuthn enrollment flow;
+    // accepting AI and enrolling a device lock remain separate actions.
+    context.go('/app-lock/setup');
+  }
+
+  void _showConsentFailure() {
+    if (!mounted) return;
+    final message = switch (Localizations.localeOf(context).languageCode) {
+      'fr' => 'Consentement non enregistré. Vérifiez votre connexion et '
+          'le verrouillage du profil, ou continuez sans IA.',
+      'ar' => 'لم يتم حفظ الموافقة. تحقق من الاتصال وقفل الملف الشخصي، '
+          'أو تابع بدون ذكاء اصطناعي.',
+      _ => 'Consent was not saved. Check your connection and profile '
+          'lock, or continue without AI.',
+    };
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  Future<void> _accept() async {
+    final lock = context.read<AppLockService?>();
+    // Missing security provider is NOT proof of an unlocked patient vault.
+    // Refuse consent fail-closed instead of treating null as permission.
+    if (lock == null || !lock.isUnlocked) {
+      _showLockRequired();
+      return;
+    }
+    setState(() => _isLoading = true);
+    final api = context.read<ApiClient>();
+    final db = context.read<AppDatabase>();
+    final evidenceStore = context.read<ConsentEvidenceStore>();
+    final consent = context.read<ConsentService>();
+    final claim = ConsentNoticeContract.forLocale(
+      Localizations.localeOf(context).toLanguageTag(),
+    );
+    try {
+      final accepted = await api.giveVersionedConsent(claim);
+      if (!accepted) {
+        _showConsentFailure();
+        return;
+      }
+
+      // The UI gate only opens after the exact server response is verified and
+      // the same evidence is durably persisted locally.
+      // A new explicit grant supersedes any previously pending withdrawal.
+      await evidenceStore.write(claim);
+      await db.setAiConsent(granted: true);
+      // Clear the persistent stop marker ONLY once the server receipt and
+      // all local evidence are durable; otherwise a reload must stay denied.
+      await evidenceStore.clearWithdrawalPending();
+      consent.markVerifiedConsent();
+      if (mounted) context.go('/dashboard');
+    } catch (_) {
+      // Fail closed, but never leave an apparently unresponsive action.
+      _showConsentFailure();
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _declineWithoutAI() {
+    context.read<ConsentService>().declineLocally();
+    context.go('/dashboard');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final dark = AminaTheme.isDark(context);
+    final appLock = context.watch<AppLockService?>();
+    final skippedLock = appLock?.isExplicitlySkipped == true;
+
+    return Scaffold(
+      backgroundColor: AminaTheme.bg(context),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compactHeight = constraints.maxHeight <= 600;
+            final desktop = constraints.maxWidth >= 900;
+            final iconSize = compactHeight ? 48.0 : 72.0;
+
+            return Center(
+              child: SingleChildScrollView(
+                padding: EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: compactHeight ? 14 : 28,
+                ),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 480),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: iconSize,
+                          height: iconSize,
+                          decoration: BoxDecoration(
+                            gradient: AminaTheme.heroGradient,
+                            borderRadius: BorderRadius.circular(
+                              compactHeight ? 16 : 22,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: AminaTheme.teal500.withValues(
+                                  alpha: 0.28,
+                                ),
+                                blurRadius: compactHeight ? 12 : 20,
+                                offset: Offset(0, compactHeight ? 4 : 8),
+                              ),
+                            ],
+                          ),
+                          child: Icon(
+                            Icons.shield_outlined,
+                            color: Colors.white,
+                            size: compactHeight ? 24 : 32,
+                          ),
+                        ),
+                      ),
+                      SizedBox(height: compactHeight ? 10 : 24),
+                      Text(
+                        l10n.consentTitle,
+                        style: TextStyle(
+                          fontSize: compactHeight ? 11.5 : 13,
+                          fontWeight: FontWeight.w700,
+                          color: AminaTheme.teal600,
+                          letterSpacing: 0.5,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                      SizedBox(height: compactHeight ? 4 : 8),
+                      Text(
+                        l10n.consentHeadline,
+                        style: TextStyle(
+                          fontSize: compactHeight ? 18 : 22,
+                          fontWeight: FontWeight.w800,
+                          color: AminaTheme.textPrimary(context),
+                          letterSpacing: -0.4,
+                          height: compactHeight ? 1.18 : 1.3,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                      SizedBox(height: compactHeight ? 14 : 24),
+                      Container(
+                        padding: EdgeInsets.all(compactHeight ? 12 : 20),
+                        decoration: BoxDecoration(
+                          color: AminaTheme.surface(context),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: AminaTheme.divider(context),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _DataPoint(
+                              l10n.consentDataPoint1,
+                              compact: compactHeight,
+                            ),
+                            SizedBox(height: compactHeight ? 6 : 12),
+                            _DataPoint(
+                              l10n.consentDataPoint2,
+                              compact: compactHeight,
+                            ),
+                            SizedBox(height: compactHeight ? 6 : 12),
+                            _DataPoint(
+                              l10n.consentDataPoint3,
+                              compact: compactHeight,
+                            ),
+                          ],
+                        ),
+                      ),
+                      SizedBox(height: compactHeight ? 12 : 20),
+                      Container(
+                        padding: EdgeInsets.all(compactHeight ? 12 : 16),
+                        decoration: BoxDecoration(
+                          color: AminaTheme.teal500.withValues(alpha: 0.055),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: AminaTheme.teal500.withValues(alpha: 0.16),
+                          ),
+                        ),
+                        child: Text(
+                          l10n.consentBody,
+                          style: TextStyle(
+                            fontSize: compactHeight ? 11.5 : 13.25,
+                            color: AminaTheme.textSecondary(context),
+                            height: compactHeight ? 1.38 : 1.52,
+                          ),
+                        ),
+                      ),
+                      if (skippedLock) ...[
+                        SizedBox(height: compactHeight ? 12 : 16),
+                        Text(
+                          _localeText(
+                            fr: 'Vous avez choisi de continuer sans verrouillage. Pour activer les services IA externes, sécurisez d’abord votre profil.',
+                            ar: 'اخترت المتابعة بدون قفل. لتفعيل خدمات الذكاء الاصطناعي الخارجية، أمّن ملفك الشخصي أولاً.',
+                            en: 'You chose to continue without a lock. To enable external AI services, secure your profile first.',
+                          ),
+                          key: const Key('consent-lock-required-note'),
+                          style: TextStyle(
+                            color: AminaTheme.textSecondary(context),
+                            fontSize: compactHeight ? 12 : 13,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        OutlinedButton.icon(
+                          key: const Key('consent-enable-app-lock'),
+                          onPressed: _isLoading ? null : _openLockSetup,
+                          icon: const Icon(Icons.lock_outline),
+                          label: Text(_localeText(
+                            fr: 'Activer le verrouillage',
+                            ar: 'تفعيل قفل الملف الشخصي',
+                            en: 'Enable profile lock',
+                          )),
+                        ),
+                      ],
+                      SizedBox(height: compactHeight ? 14 : 24),
+                      Align(
+                        alignment: Alignment.center,
+                        child: SizedBox(
+                          width: desktop ? 300 : double.infinity,
+                          child: FilledButton(
+                            onPressed: _isLoading ? null : _accept,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: AminaTheme.teal500,
+                              padding: EdgeInsets.symmetric(
+                                vertical: compactHeight ? 12 : 16,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(
+                                  AminaTheme.radiusXL,
+                                ),
+                              ),
+                            ),
+                            child: _isLoading
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                : Text(
+                                    l10n.consentAccept,
+                                    style: TextStyle(
+                                      fontSize: compactHeight ? 13.5 : 15,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                          ),
+                        ),
+                      ),
+                      SizedBox(height: compactHeight ? 8 : 10),
+                      Align(
+                        alignment: Alignment.center,
+                        child: SizedBox(
+                          width: desktop ? 300 : double.infinity,
+                          child: OutlinedButton(
+                            onPressed: _isLoading ? null : _declineWithoutAI,
+                            style: OutlinedButton.styleFrom(
+                              padding: EdgeInsets.symmetric(
+                                vertical: compactHeight ? 11 : 14,
+                              ),
+                              foregroundColor: AminaTheme.textPrimary(context),
+                              side: BorderSide(
+                                color: AminaTheme.divider(context),
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(
+                                  AminaTheme.radiusXL,
+                                ),
+                              ),
+                            ),
+                            child: Text(
+                              l10n.consentDeclineWithoutAI,
+                              style: TextStyle(
+                                fontSize: compactHeight ? 12 : 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      SizedBox(height: compactHeight ? 10 : 24),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.lock_outline,
+                            size: 12,
+                            color: dark ? AminaTheme.dark300 : AminaTheme.ink400,
+                          ),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(
+                              l10n.dataPrivacyNote,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: compactHeight ? 9.5 : 11,
+                                color: dark
+                                    ? AminaTheme.dark300
+                                    : AminaTheme.ink400,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _DataPoint extends StatelessWidget {
+  final String text;
+  final bool compact;
+
+  const _DataPoint(this.text, {this.compact = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: TextStyle(
+        fontSize: compact ? 12 : 14,
+        fontWeight: FontWeight.w600,
+        color: AminaTheme.textPrimary(context),
+        height: compact ? 1.28 : 1.4,
+      ),
+    );
+  }
+}

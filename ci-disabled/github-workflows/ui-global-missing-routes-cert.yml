@@ -1,0 +1,76 @@
+name: UI global missing routes certification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'frontend/lib/features/auth/**'
+      - 'frontend/lib/features/companion/**'
+      - 'frontend/lib/features/import/cgm_screen.dart'
+      - 'frontend/lib/features/journal/edit_log_screen.dart'
+      - 'frontend/lib/ui_global_desktop_missing_audit_main.dart'
+      - '.github/workflows/ui-global-missing-routes-cert.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/lib/features/auth/**'
+      - 'frontend/lib/features/companion/**'
+      - 'frontend/lib/features/import/cgm_screen.dart'
+      - 'frontend/lib/features/journal/edit_log_screen.dart'
+      - 'frontend/lib/ui_global_desktop_missing_audit_main.dart'
+      - '.github/workflows/ui-global-missing-routes-cert.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser-cert:
+    name: Missing product routes 390 + 768 + 1280
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.0'
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze missing-route audit entrypoint
+        run: flutter analyze --no-fatal-infos lib/ui_global_desktop_missing_audit_main.dart
+
+      - name: Build isolated missing-route audit
+        run: flutter build web --release -t lib/ui_global_desktop_missing_audit_main.dart
+
+      - name: Capture real Chrome missing product routes
+        run: |
+          set -euo pipefail
+          # A pinned browser avoids host Chrome DevTools port startup races.
+          python3 -m pip install --quiet playwright==1.58.0
+          python3 -m playwright install --with-deps chromium
+          python3 -m py_compile ../scripts/ui_global_missing_routes_capture.py
+          python3 ../scripts/ui_global_missing_routes_capture.py
+
+      - name: Upload missing-route browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iamina-ui-global-missing-routes-cert
+          path: |
+            ui-global-missing-routes-cert/*.png
+            ui-global-missing-routes-cert/proof.json
+          if-no-files-found: warn
+          retention-days: 14

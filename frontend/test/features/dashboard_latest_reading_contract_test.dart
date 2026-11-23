@@ -1,0 +1,101 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('Dashboard latest reading is not limited to a 21-day window', () {
+    final source = File(
+      'lib/features/dashboard/dashboard_premium_screen.dart',
+    ).readAsStringSync();
+
+    expect(source, contains('db.watchRecentLogs(limit: 1)'));
+    expect(source, isNot(contains('watchLogsInRange(start, now)')));
+    expect(source, isNot(contains('Duration(days: 21)')));
+  });
+
+  test('Dashboard latest reading exposes exact timestamp and freshness', () {
+    final source = File(
+      'lib/features/dashboard/dashboard_premium_screen.dart',
+    ).readAsStringSync();
+
+    expect(source, contains('_latestReadingFreshnessLabel'));
+    expect(source, contains('DateTime.now().difference(latestAt)'));
+    expect(source, contains("ValueKey('dashboard-latest-reading-timestamp')"));
+    expect(source, contains("ValueKey('dashboard-latest-reading-freshness')"));
+    expect(source, contains('dashboardLatestKnownReading'));
+  });
+
+  test(
+    'Dashboard fails closed when a reading timestamp is materially future-dated',
+    () {
+      final source = File(
+        'lib/features/dashboard/dashboard_premium_screen.dart',
+      ).readAsStringSync();
+      final localizedCopy = File(
+        'lib/core/localization/dashboard_localized_copy.dart',
+      ).readAsStringSync();
+
+      expect(
+        source,
+        contains('const _futureTimestampTolerance = Duration(minutes: 5)'),
+      );
+      expect(source, contains('_readingTimestampNeedsReview'));
+      expect(source, contains('DateTime.now().add(_futureTimestampTolerance)'));
+      expect(source, contains('dashboardTimestampNeedsReview'));
+      expect(source, contains('Icons.warning_amber_rounded'));
+      expect(localizedCopy, contains("en: 'timestamp to check'"));
+      expect(localizedCopy, contains("fr: 'horodatage à vérifier'"));
+      expect(localizedCopy, contains("ar: 'تحقق من وقت القياس'"));
+    },
+  );
+
+  test('Dashboard target status fails closed without a configured profile', () {
+    final source = File(
+      'lib/features/dashboard/dashboard_premium_screen.dart',
+    ).readAsStringSync();
+    final localizedCopy = File(
+      'lib/core/localization/dashboard_localized_copy.dart',
+    ).readAsStringSync();
+
+    expect(source, isNot(contains('targetRangeLow ?? 70.0')));
+    expect(source, isNot(contains('targetRangeHigh ?? 180.0')));
+    expect(source, contains('const double? low = null;'));
+    expect(source, contains('const double? high = null;'));
+    expect(source, isNot(contains('final low = profile?.targetRangeLow;')));
+    expect(source, contains('final hasTarget = low != null && high != null'));
+    expect(source, contains(': !hasTarget'));
+    expect(source, contains('dashboardTargetNotConfigured'));
+    expect(source, contains('targetConfigured: hasTarget'));
+    expect(localizedCopy, contains('dashboardTargetNotConfigured'));
+    expect(localizedCopy, contains("en: 'Target not configured'"));
+    expect(localizedCopy, contains("fr: 'Cible non configurée'"));
+    expect(localizedCopy, contains("ar: 'النطاق المستهدف غير مضبوط'"));
+  });
+
+  test('Dashboard normalizes locale before Intl date formatting', () {
+    final source = File(
+      'lib/features/dashboard/dashboard_premium_screen.dart',
+    ).readAsStringSync();
+
+    expect(source, contains('_dashboardDateLocale'));
+    expect(source, contains("'fr' => 'fr-FR'"));
+    expect(source, contains("'ar' => 'ar-MA'"));
+    expect(source, contains("'en' => 'en-US'"));
+    expect(source, contains('final locale = _dashboardDateLocale(context);'));
+  });
+
+  test('Dashboard retains target-specific view code behind its disabled authority gate', () {
+    final source = File(
+      'lib/features/dashboard/dashboard_premium_screen.dart',
+    ).readAsStringSync();
+
+    expect(source, contains('const double? low = null;'));
+    expect(source, contains('const double? high = null;'));
+    expect(source, contains('latest.bloodSugar >= low!'));
+    expect(source, contains('latest.bloodSugar <= high!'));
+    expect(source, contains('latest.bloodSugar > high!'));
+    expect(source, contains("'Dans votre cible'"));
+    expect(source, contains("'Au-dessus de la cible'"));
+    expect(source, contains("'Sous la cible'"));
+  });
+}

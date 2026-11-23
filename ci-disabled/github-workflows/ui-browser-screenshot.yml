@@ -1,0 +1,267 @@
+name: UI browser screenshot certification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'frontend/lib/features/**'
+      - 'frontend/lib/modules/**'
+      - 'frontend/lib/routes/**'
+      - 'frontend/lib/core/widgets/**'
+      - 'frontend/lib/core/theme/**'
+      - 'frontend/lib/core/motion/**'
+      - 'frontend/lib/core/localization/**'
+      - 'frontend/lib/l10n/**'
+      - 'frontend/lib/main.dart'
+      - 'frontend/lib/ui_browser_audit_main.dart'
+      - 'frontend/lib/ui_browser_next_action_ar_main.dart'
+      - 'frontend/assets/**'
+      - 'frontend/pubspec.yaml'
+      - '.github/workflows/ui-browser-screenshot.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/lib/features/**'
+      - 'frontend/lib/modules/**'
+      - 'frontend/lib/routes/**'
+      - 'frontend/lib/core/widgets/**'
+      - 'frontend/lib/core/theme/**'
+      - 'frontend/lib/core/motion/**'
+      - 'frontend/lib/core/localization/**'
+      - 'frontend/lib/l10n/**'
+      - 'frontend/lib/main.dart'
+      - 'frontend/lib/ui_browser_audit_main.dart'
+      - 'frontend/lib/ui_browser_next_action_ar_main.dart'
+      - 'frontend/assets/**'
+      - 'frontend/pubspec.yaml'
+      - '.github/workflows/ui-browser-screenshot.yml'
+
+permissions:
+  contents: read
+
+# CI capacity: replace obsolete runs of this workflow for the same PR only.
+# Keep dispatch and main branch certifications non-cancelable.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  browser-cert:
+    name: Real Chrome patient surfaces mobile + desktop
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { width: 390, height: 844, mobile: true }
+          - { width: 430, height: 932, mobile: true }
+          - { width: 768, height: 1024, mobile: false }
+          - { width: 1280, height: 900, mobile: false }
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.0'
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze isolated browser audit entrypoint
+        run: flutter analyze --no-fatal-infos lib/ui_browser_audit_main.dart
+
+      - name: Build isolated browser audit
+        run: flutter build web --release -t lib/ui_browser_audit_main.dart
+
+      - name: Capture real Chrome surfaces
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ui-browser-cert"
+          python3 -m pip install --quiet websocket-client
+          python3 -m http.server 7358 --directory build/web >/tmp/iamina-ui-browser-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          READY=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:7358 >/dev/null; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+          test "$READY" = "1"
+          curl -fsSI http://127.0.0.1:7358/sqlite3.wasm >/dev/null
+          curl -fsSI http://127.0.0.1:7358/drift_worker.js >/dev/null
+
+          CHROME="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
+          test -n "$CHROME"
+
+          cleanup_chrome() {
+            local chrome_pid="$1"
+            local profile_dir="$2"
+            kill "$chrome_pid" 2>/dev/null || true
+            for _ in $(seq 1 10); do
+              if ! kill -0 "$chrome_pid" 2>/dev/null; then
+                break
+              fi
+              sleep 0.2
+            done
+            kill -9 "$chrome_pid" 2>/dev/null || true
+            wait "$chrome_pid" 2>/dev/null || true
+            rm -rf "$profile_dir" 2>/dev/null || true
+          }
+
+          cat > /tmp/capture_cdp.py <<'PY'
+          import base64
+          import json
+          import sys
+          import time
+          import urllib.request
+          from websocket import create_connection
+
+          target = sys.argv[1]
+          width = int(sys.argv[2])
+          height = int(sys.argv[3])
+          mobile = sys.argv[4].lower() == 'true'
+          endpoint = 'http://127.0.0.1:9222/json/list'
+          pages = json.load(urllib.request.urlopen(endpoint))
+          page = next(item for item in pages if item.get('type') == 'page')
+          ws = create_connection(page['webSocketDebuggerUrl'], timeout=20)
+          counter = 0
+
+          def call(method, params=None):
+              global counter
+              counter += 1
+              ws.send(json.dumps({'id': counter, 'method': method, 'params': params or {}}))
+              while True:
+                  response = json.loads(ws.recv())
+                  if response.get('id') == counter:
+                      return response
+
+          call('Page.enable')
+          call('Emulation.setDeviceMetricsOverride', {
+              'width': width,
+              'height': height,
+              'deviceScaleFactor': 1,
+              'mobile': mobile,
+          })
+          call('Page.reload', {'ignoreCache': True})
+          time.sleep(12)
+          shot = call('Page.captureScreenshot', {
+              'format': 'png',
+              'captureBeyondViewport': False,
+              'fromSurface': True,
+          })
+          data = shot.get('result', {}).get('data')
+          if not data:
+              raise RuntimeError(f'No screenshot payload: {shot}')
+          with open(target, 'wb') as fh:
+              fh.write(base64.b64decode(data))
+          ws.close()
+          PY
+
+          surfaces=(dashboard trend kpi insight next-action companion companion-unavailable amina-chat summary profile journal importer document-import add-log add-log-meal meal-picker medications reminders notifications notifications-ar)
+          viewports=("${{ matrix.width }} ${{ matrix.height }} ${{ matrix.mobile }}")
+
+          for viewport in "${viewports[@]}"; do
+            read -r width height mobile <<< "$viewport"
+            for surface in "${surfaces[@]}"; do
+              target="$GITHUB_WORKSPACE/ui-browser-cert/${surface}-${width}x${height}.png"
+              # Only D2 RTL capture selects Arabic; all existing surfaces stay FR.
+              browser_url="http://127.0.0.1:7358/?surface=${surface}"
+              if [ "$surface" = "notifications" ]; then
+                browser_url="http://127.0.0.1:7358/?surface=notifications&locale=fr&seed=0"
+              elif [ "$surface" = "notifications-ar" ]; then
+                browser_url="http://127.0.0.1:7358/?surface=notifications&locale=ar&seed=0"
+              fi
+              # On GitHub runners Chromium can fail to expose DevTools during
+              # cold startup. Retry with a fresh profile, never skip a screenshot.
+              # The full surface set, including D2 FR+AR, is always captured.
+              DEVTOOLS=0
+              for launch_attempt in 1 2 3; do
+                profile_dir="$(mktemp -d)"
+                chrome_log="/tmp/iamina-chrome-${surface}-${width}x${height}-try${launch_attempt}.log"
+                "$CHROME" \
+                  --headless=new \
+                  --no-sandbox \
+                  --disable-dev-shm-usage \
+                  --disable-background-networking \
+                  --disable-extensions \
+                  --no-first-run \
+                  --no-default-browser-check \
+                  --enable-unsafe-swiftshader \
+                  --hide-scrollbars \
+                  --remote-allow-origins='*' \
+                  --remote-debugging-port=9222 \
+                  --user-data-dir="$profile_dir" \
+                  --window-size=${width},${height} \
+                  "$browser_url" \
+                  >"$chrome_log" 2>&1 &
+                CHROME_PID=$!
+
+                for _ in $(seq 1 45); do
+                  if curl -fsS --connect-timeout 1 --max-time 2 http://127.0.0.1:9222/json/list >/dev/null 2>&1; then
+                    DEVTOOLS=1
+                    break
+                  fi
+                  if ! kill -0 "$CHROME_PID" 2>/dev/null; then
+                    break
+                  fi
+                  sleep 1
+                done
+                if [ "$DEVTOOLS" = "1" ]; then
+                  break
+                fi
+
+                echo "Chrome DevTools unavailable for ${surface} ${width}x${height} (launch ${launch_attempt}/3)" >&2
+                tail -n 35 "$chrome_log" >&2 || true
+                cleanup_chrome "$CHROME_PID" "$profile_dir"
+              done
+              if [ "$DEVTOOLS" != "1" ]; then
+                echo "FAIL: real browser capture unavailable after 3 launches (${surface} ${width}x${height})" >&2
+                exit 1
+              fi
+
+              if ! python3 /tmp/capture_cdp.py "$target" "$width" "$height" "$mobile"; then
+                cleanup_chrome "$CHROME_PID" "$profile_dir"
+                exit 1
+              fi
+              cleanup_chrome "$CHROME_PID" "$profile_dir"
+
+              test -s "$target"
+              bytes="$(stat -c%s "$target")"
+              if [ "$bytes" -lt 10000 ]; then
+                echo "Capture ${surface}-${width}x${height} is suspiciously small (${bytes} bytes)" >&2
+                exit 1
+              fi
+            done
+
+            count="$(find "$GITHUB_WORKSPACE/ui-browser-cert" -name "*-${width}x${height}.png" | wc -l)"
+            test "$count" -eq "${#surfaces[@]}"
+            unique="$(sha256sum "$GITHUB_WORKSPACE"/ui-browser-cert/*-${width}x${height}.png | awk '{print $1}' | sort -u | wc -l)"
+            if [ "$unique" -lt 15 ]; then
+              echo "Browser certification at ${width}x${height} produced only ${unique} distinct renders" >&2
+              exit 1
+            fi
+          done
+
+          total="$(find "$GITHUB_WORKSPACE/ui-browser-cert" -name '*.png' | wc -l)"
+          test "$total" -eq "${#surfaces[@]}"
+
+      - name: Upload real browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iamina-ui-browser-cert-${{ matrix.width }}x${{ matrix.height }}
+          path: ui-browser-cert/*.png
+          if-no-files-found: warn
+          retention-days: 7

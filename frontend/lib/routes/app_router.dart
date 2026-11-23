@@ -1,0 +1,445 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import '../core/motion/amina_motion.dart';
+import '../features/auth/app_lock_setup_screen.dart';
+import '../features/auth/app_lock_unlock_screen.dart';
+import '../features/auth/consent_screen.dart';
+import '../features/auth/login_screen.dart';
+import '../features/auth/onboarding_chat_screen.dart';
+import '../features/auth/reset_password_screen.dart';
+import '../features/navigation/main_shell.dart';
+import '../features/profile/profile_screen.dart';
+import '../modules/module_registry.dart';
+import '../services/app_lock_service.dart';
+import '../services/auth_service.dart';
+import '../services/consent_service.dart';
+
+final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>();
+final GlobalKey<NavigatorState> _shellNavigatorKey =
+    GlobalKey<NavigatorState>();
+
+bool hostedRemoteLoginRequired({
+  required bool remoteAccountEnrollmentEnabled,
+  required bool isLoggedIn,
+  required bool isAuditSession,
+  required bool hasRemoteApiCredential,
+}) {
+  // Remote accounts are available but never mandatory for a local vault.
+  // Native API access still requires a validated remote credential.
+  return false;
+}
+
+bool shouldApplyAppLockGate({
+  required bool isLoggedIn,
+  required bool requiresHostedRemoteLogin,
+  required bool isAuditSession,
+  required bool hasLockService,
+}) {
+  return isLoggedIn &&
+      !requiresHostedRemoteLogin &&
+      !isAuditSession &&
+      hasLockService;
+}
+
+bool shouldApplyConsentGate({
+  required bool isLoggedIn,
+  required bool isAnonymous,
+  required bool requiresHostedRemoteLogin,
+  required bool hasConsentService,
+}) {
+  return isLoggedIn &&
+      !isAnonymous &&
+      !requiresHostedRemoteLogin &&
+      hasConsentService;
+}
+
+/// A local-only device has no remote clinical identity and cannot send
+/// governed AI data. Do not interrupt local glucose recording with an AI
+/// consent prompt; keep the existing consent gate for remote-capable sessions.
+bool shouldRequireRemoteAIConsentGate({
+  required bool isLoggedIn,
+  required bool isAnonymous,
+  required bool requiresHostedRemoteLogin,
+  required bool hasConsentService,
+  required bool hasRemoteApiCredential,
+}) {
+  return hasRemoteApiCredential &&
+      shouldApplyConsentGate(
+        isLoggedIn: isLoggedIn,
+        isAnonymous: isAnonymous,
+        requiresHostedRemoteLogin: requiresHostedRemoteLogin,
+        hasConsentService: hasConsentService,
+      );
+}
+
+bool shouldApplyOnboardingGate({
+  required bool isLoggedIn,
+  required bool isAnonymous,
+  required bool requiresHostedRemoteLogin,
+  required bool hasCompletedOnboarding,
+  required bool hasProfileState,
+}) {
+  return isLoggedIn &&
+      !isAnonymous &&
+      !requiresHostedRemoteLogin &&
+      hasProfileState &&
+      !hasCompletedOnboarding;
+}
+
+
+class AppRouterHolder {
+  final GoRouter router;
+
+  AppRouterHolder._(this.router);
+
+  void dispose() => router.dispose();
+}
+
+AppRouterHolder createAppRouterHolder({
+  required AuthService authService,
+  ConsentService? consentService,
+  AppLockService? appLockService,
+}) {
+  final consent = consentService;
+  final lock = appLockService;
+  final refreshables = <Listenable>[
+    authService,
+    if (consent != null) consent,
+    if (lock != null) lock,
+  ];
+
+  final router = GoRouter(
+    navigatorKey: _rootNavigatorKey,
+    initialLocation: _homeRoute(),
+    refreshListenable: refreshables.length == 1
+        ? refreshables.first
+        : Listenable.merge(refreshables),
+    redirect: (context, state) {
+      final isLoggedIn = authService.isAuthenticated;
+      final isAnonymous = authService.isAnonymous;
+      final path = state.uri.path;
+      final isLoginPage = path == '/login';
+      final isPasswordResetPage = path == '/reset-password';
+      final isConsentPage = path == '/consent';
+      final isOnboardingPage = path == '/onboarding';
+      final isAppLockSetupPage = path == '/app-lock/setup';
+      final isAppLockUnlockPage = path == '/app-lock/unlock';
+      final isAppLockPage = isAppLockSetupPage || isAppLockUnlockPage;
+
+      if (!authService.isInitialized ||
+          (lock != null && !lock.isInitialized)) {
+        return null;
+      }
+
+      // Password-reset links belong to the optional remote account path and
+      // must remain reachable without a local session.
+      if (isPasswordResetPage) return null;
+
+      // ── Local enrollment gate ─────────────────────────────────────────────
+      if (!isLoggedIn && !isLoginPage) return '/login';
+
+      // Hosted DEV/TEST builds with remote account enrollment enabled must not
+      // treat a local-only enrollment marker as sufficient for backend-gated
+      // flows. Require a native IAMINA bearer before any app-lock routing.
+      final requiresHostedRemoteLogin = hostedRemoteLoginRequired(
+        remoteAccountEnrollmentEnabled: kRemoteAccountEnrollmentEnabled,
+        isLoggedIn: isLoggedIn,
+        isAuditSession: authService.isAuditSession,
+        hasRemoteApiCredential: authService.hasRemoteApiCredential,
+      );
+      if (requiresHostedRemoteLogin && !isLoginPage) {
+        return '/login';
+      }
+
+      // Audit access is compile-time + loopback constrained. It may render the
+      // lock screens for visual certification but never changes patient state.
+      if (authService.isAuditSession && isAppLockPage) return null;
+
+      // ── Strong local app-lock gate ────────────────────────────────────────
+      final activeLock = lock;
+      if (activeLock != null &&
+          shouldApplyAppLockGate(
+            isLoggedIn: isLoggedIn,
+            requiresHostedRemoteLogin: requiresHostedRemoteLogin,
+            isAuditSession: authService.isAuditSession,
+            hasLockService: true,
+          ) &&
+          !activeLock.isExplicitlySkipped) {
+        if (activeLock.recoveryRequired) {
+          if (!isAppLockUnlockPage) return '/app-lock/unlock';
+        } else if (!activeLock.isConfigured) {
+          if (!isAppLockSetupPage) return '/app-lock/setup';
+        } else if (!activeLock.isUnlocked) {
+          if (!isAppLockUnlockPage) return '/app-lock/unlock';
+        }
+      }
+
+      if (isLoggedIn &&
+          isLoginPage &&
+          (!kRemoteAccountEnrollmentEnabled ||
+              authService.hasRemoteApiCredential ||
+              authService.isAuditSession)) {
+        return _homeRoute();
+      }
+
+      // ── First-use onboarding gate ────────────────────────────────────────
+      // A real user must persist the minimum patient profile before consent or
+      // any patient-facing root. Audit/demo sessions remain exempt.
+      final activeConsent = consent;
+      if (activeConsent != null &&
+          shouldApplyOnboardingGate(
+            isLoggedIn: isLoggedIn,
+            isAnonymous: isAnonymous,
+            requiresHostedRemoteLogin: requiresHostedRemoteLogin,
+            hasCompletedOnboarding: activeConsent.hasCompletedOnboarding,
+            hasProfileState: activeConsent.isInitialized,
+          )) {
+        if (!isOnboardingPage && !isAppLockPage) return '/onboarding';
+      }
+
+      // A completed local profile must leave first-use even when no remote
+      // consent gate runs. The profile stream may update after the attempted
+      // navigation to /dashboard; redirect the still-open onboarding route.
+      if (isOnboardingPage &&
+          activeConsent?.hasCompletedOnboarding == true &&
+          isLoggedIn &&
+          !isAnonymous &&
+          !authService.isAuditSession &&
+          !authService.hasRemoteApiCredential) {
+        return _homeRoute();
+      }
+
+      // ── Consent gate (RGPD Art. 7) ────────────────────────────────────────
+      // No mandatory AI dialog for the local-only path: remote AI transport
+      // has no bearer and is denied by ApiClient independently of routing.
+      // A direct stale /consent bookmark must not reintroduce this gate.
+      if (isLoggedIn &&
+          !authService.hasRemoteApiCredential &&
+          !authService.isAuditSession &&
+          isConsentPage) {
+        return _homeRoute();
+      }
+      // Remote-capable sessions retain the verified consent gate.
+      if (activeConsent != null &&
+          shouldRequireRemoteAIConsentGate(
+            isLoggedIn: isLoggedIn,
+            isAnonymous: isAnonymous,
+            requiresHostedRemoteLogin: requiresHostedRemoteLogin,
+            hasConsentService: true,
+            hasRemoteApiCredential: authService.hasRemoteApiCredential,
+          )) {
+        final hasConsent = activeConsent.hasConsent;
+        final hasDeclined = activeConsent.hasDeclinedLocally;
+
+        if (!hasConsent &&
+            !hasDeclined &&
+            !isConsentPage &&
+            !isAppLockPage &&
+            !isOnboardingPage) {
+          return '/consent';
+        }
+        if ((hasConsent || hasDeclined) && isConsentPage) return _homeRoute();
+        if (activeConsent.hasCompletedOnboarding && isOnboardingPage) {
+          return hasConsent || hasDeclined ? _homeRoute() : '/consent';
+        }
+      }
+
+      return null;
+    },
+    routes: [
+      GoRoute(
+        path: '/login',
+        parentNavigatorKey: _rootNavigatorKey,
+        pageBuilder: (context, state) => CustomTransitionPage(
+          key: state.pageKey,
+          child: const LoginScreen(),
+          transitionDuration: AminaMotion.standard,
+          reverseTransitionDuration: AminaMotion.fast,
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            if (AminaMotion.reduce(context)) return child;
+            return FadeTransition(
+              opacity: CurvedAnimation(
+                parent: animation,
+                curve: AminaMotion.enter,
+              ),
+              child: child,
+            );
+          },
+        ),
+      ),
+      GoRoute(
+        path: '/app-lock/setup',
+        parentNavigatorKey: _rootNavigatorKey,
+        pageBuilder: (context, state) => _createPage(
+          state,
+          const AppLockSetupScreen(),
+        ),
+      ),
+      GoRoute(
+        path: '/app-lock/unlock',
+        parentNavigatorKey: _rootNavigatorKey,
+        pageBuilder: (context, state) => _createPage(
+          state,
+          const AppLockUnlockScreen(),
+        ),
+      ),
+      GoRoute(
+        path: '/reset-password',
+        parentNavigatorKey: _rootNavigatorKey,
+        pageBuilder: (context, state) => CustomTransitionPage(
+          key: state.pageKey,
+          child: ResetPasswordScreen(
+            uid: state.uri.queryParameters['uid'] ?? '',
+            token: state.uri.queryParameters['token'] ?? '',
+          ),
+          transitionDuration: AminaMotion.standard,
+          reverseTransitionDuration: AminaMotion.fast,
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            if (AminaMotion.reduce(context)) return child;
+            return FadeTransition(
+              opacity: CurvedAnimation(
+                parent: animation,
+                curve: AminaMotion.enter,
+              ),
+              child: child,
+            );
+          },
+        ),
+      ),
+      GoRoute(
+        path: '/consent',
+        parentNavigatorKey: _rootNavigatorKey,
+        pageBuilder: (context, state) => CustomTransitionPage(
+          key: state.pageKey,
+          child: const ConsentScreen(),
+          transitionDuration: AminaMotion.standard,
+          reverseTransitionDuration: AminaMotion.fast,
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            if (AminaMotion.reduce(context)) return child;
+            return FadeTransition(
+              opacity: CurvedAnimation(
+                parent: animation,
+                curve: AminaMotion.enter,
+              ),
+              child: child,
+            );
+          },
+        ),
+      ),
+      GoRoute(
+        path: '/onboarding',
+        parentNavigatorKey: _rootNavigatorKey,
+        pageBuilder: (context, state) => CustomTransitionPage(
+          key: state.pageKey,
+          child: const OnboardingChatScreen(),
+          transitionDuration: AminaMotion.standard,
+          reverseTransitionDuration: AminaMotion.fast,
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            if (AminaMotion.reduce(context)) return child;
+            return FadeTransition(
+              opacity: CurvedAnimation(
+                parent: animation,
+                curve: AminaMotion.enter,
+              ),
+              child: child,
+            );
+          },
+        ),
+      ),
+
+      GoRoute(
+        path: '/preferences',
+        parentNavigatorKey: _rootNavigatorKey,
+        pageBuilder: (context, state) => _createPage(
+          state,
+          const OnboardingChatScreen(preferencesOnly: true),
+        ),
+      ),
+
+      for (final m in ModuleRegistry.all())
+        for (final r in m.fullScreenRoutes)
+          GoRoute(
+            path: r.path,
+            parentNavigatorKey: _rootNavigatorKey,
+            pageBuilder: (context, state) =>
+                _createPage(state, r.builder(state)),
+          ),
+
+      ShellRoute(
+        navigatorKey: _shellNavigatorKey,
+        builder: (context, state, child) => MainShell(child: child),
+        routes: [
+          GoRoute(
+            path: '/profile',
+            pageBuilder: (context, state) =>
+                _createPage(state, const ProfileScreen()),
+          ),
+          for (final m in ModuleRegistry.all())
+            for (final r in m.shellRoutes)
+              GoRoute(
+                path: r.path,
+                pageBuilder: (context, state) =>
+                    _createPage(state, r.builder()),
+              ),
+        ],
+      ),
+
+      GoRoute(path: '/', redirect: (context, state) => _homeRoute()),
+    ],
+  );
+
+  return AppRouterHolder._(router);
+}
+
+String _homeRoute() {
+  final mods = ModuleRegistry.all();
+  if (mods.isNotEmpty && mods.first.navDestinations.isNotEmpty) {
+    return mods.first.navDestinations.first.route;
+  }
+  return '/dashboard';
+}
+
+GoRouter createAppRouter([dynamic auth]) {
+  final service = auth is AuthService ? auth : AuthService();
+  return createAppRouterHolder(authService: service).router;
+}
+
+CustomTransitionPage _createPage(GoRouterState state, Widget child) {
+  return CustomTransitionPage(
+    key: state.pageKey,
+    child: child,
+    transitionDuration: AminaMotion.standard,
+    reverseTransitionDuration: AminaMotion.fast,
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      if (AminaMotion.reduce(context)) return child;
+      final entrance = CurvedAnimation(
+        parent: animation,
+        curve: AminaMotion.enter,
+      );
+      return FadeTransition(
+        opacity: entrance,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 0.018),
+            end: Offset.zero,
+          ).animate(entrance),
+          child: child,
+        ),
+      );
+    },
+  );
+}
+
+class PlaceholderScreen extends StatelessWidget {
+  final String title;
+  const PlaceholderScreen({super.key, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(title)),
+      body: Center(child: Text(title)),
+    );
+  }
+}

@@ -1,0 +1,117 @@
+# Medications — product / functional / UX / UI / safety audit
+
+Date: 2026-08-15
+Lane: IAMINA patient-page product audit
+Status: **CLOSED — runtime + post-merge recertified**
+
+## Mission
+
+Medications est la surface canonique pour journaliser les prises médicamenteuses réellement effectuées, y compris l’insuline. Elle ne prescrit, ne recommande et ne calcule aucune dose.
+
+## Baseline observée
+
+Chrome réel 390×844 :
+
+- header canonique `Médicaments` ;
+- carte `Nouvelle prise` ;
+- disclaimer explicite : IAmina ne recommande ni médicament ni dose ;
+- nom du traitement ;
+- dose facultative ;
+- unité ;
+- heure de prise ;
+- CTA `Enregistrer la prise` ;
+- liste `Prises récentes`.
+
+La hiérarchie visuelle est claire et calme, sans overflow visible.
+
+## Findings corrigés
+
+### BLOCKER — intégrité de dose saisie
+
+Avant correction, une dose invalide pouvait être perdue ou persistée de façon incohérente. Une unité pouvait aussi survivre sans dose.
+
+Verdict : **IMPROVE**.
+
+Correctif : si une dose est saisie, elle doit être parsable, finie et strictement positive. Une unité sans dose est refusée. Aucun seuil thérapeutique ni recommandation de dose n’est ajouté.
+
+### HIGH — CTA actif sans traitement
+
+Avant correction, le CTA restait actif même si le nom était vide ; `_save()` échouait silencieusement.
+
+Verdict : **IMPROVE**.
+
+Correctif : CTA désactivé tant que le nom du traitement est vide.
+
+### HIGH — suppression immédiate
+
+Avant correction, une prise pouvait être supprimée par un tap unique sans confirmation.
+
+Verdict : **IMPROVE**.
+
+Correctif : confirmation explicite avant suppression.
+
+## Verdicts fonctionnels
+
+| Fonction | Verdict | Motif |
+|---|---|---|
+| Nom du traitement libre | KEEP | fait réellement pris, sans catalogue prescriptif |
+| Dose facultative | KEEP + IMPROVE | utile mais validation factuelle obligatoire |
+| Unité libre | KEEP + IMPROVE | compatible avec plusieurs traitements, mais jamais orpheline |
+| Heure de prise | KEEP | factuelle, éditable jusqu’à 365 jours |
+| Disclaimer non-prescriptif | KEEP | safety essentielle |
+| Liste récente | KEEP | vérification immédiate du journal |
+| Suppression | IMPROVE | confirmation requise |
+| Suggestion de médicament/dose | REMOVE / ne pas ajouter | hors périmètre et prescriptif |
+
+## Safety / truthfulness
+
+- aucune recommandation de médicament ;
+- aucune recommandation ou calcul de dose ;
+- aucune normalisation clinique automatique ;
+- seules les données déclarées par l’utilisateur sont journalisées ;
+- la validation ajoutée contrôle uniquement la cohérence syntaxique et structurelle de la donnée saisie.
+
+## UI / UX
+
+Le rendu mobile est fort : carte unique, champs essentiels, heure visible, CTA dominant, historique immédiatement sous le formulaire. Aucun redesign structurel n’est justifié.
+
+Inspection manuelle Chrome #28, 390×844 : aucun overflow, aucune collision, CTA bien désactivé à vide, disclaimer visible, hiérarchie intacte.
+
+Inspection manuelle Chrome #29 post-merge, 390×844 : même hiérarchie attendue, CTA désactivé à vide, disclaimer visible, aucune collision ni overflow.
+
+## Tests / certification
+
+Head certifié avant merge : `eec071e712c3f295378a849045ee264ea45c9249`
+
+- CI #2430 — run `31905461782` ✅
+- Django migration drift #2242 — run `31905461794` ✅
+- UI screenshot audit #69 — run `31905461766` ✅
+- UI browser screenshot certification #28 — run `31905461758` ✅
+- artefact Chrome #28 : `9252254370`
+- digest : `sha256:7458e44b7f85bcd68a0842b400ac99079c32273abf877145dfaef0ac6be4c7c8`
+- runtime merge PR #248 : `12f47a42cd3d2419e922416f4b81e533786815d6`
+
+Post-merge `main` :
+
+- CI #2433 — run `31905948449` ✅
+- Django migration drift #2245 — run `31905948500` ✅
+- UI screenshot audit #70 ✅
+- UI browser screenshot certification #29 — run `31905948455` ✅
+- artefact Chrome #29 : `9252391915`
+- digest : `sha256:ecf547c3d8b1fd8ed3095ab837821292ba7f66db5b1a395e0a3bf3290a2fc1a9`
+
+Les preuves visuelles avant et après merge ont été inspectées manuellement ; l’identité de digest n’est pas utilisée comme critère de certification.
+
+Le harness de test widget+Drift initial était instable ; après deux échecs similaires, il a été remplacé par des contrats ciblés sans stream vivant, tandis que Chrome réel couvre le rendu.
+
+## Score
+
+Baseline : **7.8/10**.
+
+Final : **9.6/10**.
+
+Justification : périmètre canonique non prescriptif, intégrité de dose protégée, suppression sécurisée, affordance d’enregistrement corrigée, et certification CI/drift/UI/Chrome verte avant et après merge. Déduction résiduelle : nom du traitement et unité restent volontairement libres plutôt que typés par un catalogue structuré ; aucune autorité clinique n’a été ajoutée.
+
+## Scope technique
+
+Aucune migration, aucun changement de schéma, aucun seuil clinique, aucune logique thérapeutique, aucun changement du numerator MENA.

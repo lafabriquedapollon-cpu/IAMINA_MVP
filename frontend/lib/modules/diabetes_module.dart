@@ -1,0 +1,112 @@
+import 'package:flutter/material.dart';
+import '../features/companion/companion_conversation_screen.dart';
+import '../features/companion/companion_premium_screen.dart';
+import '../features/dashboard/dashboard_companion_entry_screen.dart';
+import '../features/dashboard/widgets/add_log_sheet.dart';
+import '../features/journal/journal_screen.dart';
+import '../features/journal/reports_screen.dart';
+import '../features/journal/add_log_screen.dart';
+import '../features/journal/edit_log_screen.dart';
+import '../features/import/cgm_screen.dart';
+import '../features/documents/document_import_premium_screen.dart';
+import '../features/medications/medication_screen.dart';
+import '../features/notifications/d2_notifications_screen.dart';
+import '../features/reminders/reminders_screen.dart';
+import '../l10n/app_localizations.dart';
+import 'module_config.dart';
+
+String _navText(AppLocalizations l, String fr, String en, String ar) {
+  final code = l.localeName.split('_').first;
+  if (code == 'ar') return ar;
+  if (code == 'en') return en;
+  return fr;
+}
+
+AddLogFocus _focusFromState(String? value) => switch (value) {
+  'meal' => AddLogFocus.meal,
+  'activity' => AddLogFocus.activity,
+  _ => AddLogFocus.none,
+};
+
+/// Diabetes condition module.
+///
+/// Persistent navigation is deliberately limited to the three condition roots;
+/// the chassis adds Profile as the fourth root. Import and data-entry flows are
+/// full-screen actions so the bottom navigation never appears inside a deep flow.
+final ModuleConfig diabetesModule = ModuleConfig(
+  id: 'diabetes',
+  navDestinations: [
+    ModuleNavDestination(
+      route: '/dashboard',
+      icon: Icons.home_outlined,
+      selectedIcon: Icons.home_rounded,
+      label: (l) => l.navHome,
+    ),
+    ModuleNavDestination(
+      route: '/journal',
+      icon: Icons.show_chart_rounded,
+      selectedIcon: Icons.show_chart_rounded,
+      label: (l) => _navText(l, 'Mesures', 'Measurements', 'القياسات'),
+    ),
+    ModuleNavDestination(
+      route: '/summary',
+      icon: Icons.description_outlined,
+      selectedIcon: Icons.description_rounded,
+      label: (l) => _navText(l, 'Rapports', 'Reports', 'التقارير'),
+    ),
+  ],
+  shellRoutes: [
+    ModuleShellRoute(
+      path: '/dashboard',
+      builder: () => const DashboardCompanionEntryScreen(),
+    ),
+    ModuleShellRoute(path: '/journal', builder: () => const JournalScreen()),
+    ModuleShellRoute(path: '/summary', builder: () => const ReportsScreen()),
+  ],
+  fullScreenRoutes: [
+    ModuleFullScreenRoute(
+      path: '/companion',
+      builder: (s) => const CompanionPremiumScreen(),
+    ),
+    ModuleFullScreenRoute(
+      path: '/companion/chat',
+      builder: (s) => const CompanionConversationScreen(),
+    ),
+    ModuleFullScreenRoute(
+      path: '/ajouter',
+      builder: (s) => s.uri.queryParameters['focus'] == 'insulin'
+          ? const MedicationScreen()
+          : AddLogScreen(
+              focus: _focusFromState(s.uri.queryParameters['focus']),
+            ),
+    ),
+    ModuleFullScreenRoute(
+      path: '/importer',
+      builder: (s) => const DocumentImportPremiumScreen(),
+    ),
+    ModuleFullScreenRoute(
+      path: '/cgm',
+      builder: (s) => const CgmScreen(),
+    ),
+    ModuleFullScreenRoute(
+      path: '/medications',
+      builder: (s) => const MedicationScreen(),
+    ),
+    ModuleFullScreenRoute(
+      path: '/notifications',
+      builder: (s) => const D2NotificationsScreen(),
+    ),
+    ModuleFullScreenRoute(
+      path: '/reminders',
+      builder: (s) => const RemindersScreen(),
+    ),
+    ModuleFullScreenRoute(
+      path: '/pulper',
+      builder: (s) => const DocumentImportPremiumScreen(),
+    ),
+    ModuleFullScreenRoute(
+      path: '/journal/:id/edit',
+      builder: (s) => EditLogScreen(logId: int.parse(s.pathParameters['id']!)),
+    ),
+  ],
+);
