@@ -1,0 +1,54 @@
+name: IAMINA Rehome Smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/rehome-smoke.yml'
+      - 'backend/**'
+      - 'scripts/**'
+      - 'frontend/**'
+      - 'vercel.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot-source-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout exact PR commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Verify source tree and Python syntax (static only)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import ast
+          import subprocess
+          from pathlib import Path
+          root = Path('.')
+          for name in ('frontend/pubspec.yaml', 'backend/manage.py'):
+              if not (root / name).is_file():
+                  raise SystemExit(f'Missing required source: {name}')
+          files = [*Path('backend').rglob('*.py'), *Path('scripts').rglob('*.py')]
+          if len(files) < 900:
+              raise SystemExit(f'Unexpected Python source count: {len(files)}')
+          for item in files:
+              ast.parse(item.read_text(encoding='utf-8'), filename=str(item))
+          tracked = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          forbidden = [p for p in tracked if p and (Path(p).name.startswith('.env') or p.endswith(('.pem', '.p12', '.pfx', '.sqlite', '.sqlite3')))]
+          if forbidden:
+              raise SystemExit(f'Forbidden tracked paths: {len(forbidden)} (names withheld)')
+          workflows = [p.name for p in Path('.github/workflows').iterdir() if p.is_file()]
+          if workflows != ['rehome-smoke.yml']:
+              raise SystemExit('Unexpected active workflow(s)')
+          print(f'SOURCE_CONTRACT_PASS: {len(files)} Python files parsed; tracked path guard PASS')
+          PY
+
+      - name: Run independent standard-library source regression tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -q
