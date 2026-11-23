@@ -1,0 +1,386 @@
+"""Deterministic condition-agnostic scope/shape guard for narrator output.
+
+Clinical context presence is evidence, not behavior-action authorization. Until a
+dedicated authorization contract exists, the chassis keeps behavior/content
+selection bounded and falls back to abstract organization only.
+"""
+from __future__ import annotations
+
+import re
+
+ARABIC_RE = re.compile(r"[\u0600-\u06ff\u0750-\u077f]")
+LATIN_RE = re.compile(r"[A-Za-zÀ-ÿ]")
+_WORD_RE = re.compile(r"\b[\wÀ-ÿ]+\b", re.UNICODE)
+
+_FREQUENCY_SELECTION_PATTERN = re.compile(
+    r"(?:\b(?:chaque jour|tous les jours|jour précédent|daily|every day|kol nhar)\b|كل\s*(?:نهار|يوم))",
+    re.IGNORECASE,
+)
+_REMINDER_SELECTION_PATTERN = re.compile(
+    r"(?:\b(?:rappel|reminder)\b|pour\s+(?:te|vous)\s+rappeler|to\s+remind\s+yourself|so\s+you\s+remember|(?:تذكير|تذكّ?رك|ذكّ?رك))",
+    re.IGNORECASE,
+)
+_PRACTICAL_ORGANIZATION_PATTERN = re.compile(
+    r"(?:\b(?:checklist|check-list|box|boxes|case|cases|tick|structure|list|liste)\b|خانة|خانات)",
+    re.IGNORECASE,
+)
+_PRACTICAL_PLACEMENT_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:keep|put|place|leave)\b.{0,48}\b(?:on|near|by)\b.{0,24}"
+    r"\b(?:kitchen\s+counter|counter|fridge|refrigerator|bedside\s+table|table|door|sink)\b"
+    r"|\b(?:mets?|place|garde)\b.{0,48}\b(?:sur|près de|à côté de)\b.{0,24}"
+    r"\b(?:table|frigo|réfrigérateur|comptoir|lit)\b"
+    r"|(?:حط|ضع|خلي).{0,40}(?:على|جنب|قريب من).{0,24}(?:الطاولة|الثلاجة|المطبخ|السرير)"
+    r")",
+    re.IGNORECASE,
+)
+_CLINICIAN_THERAPEUTIC_PATTERN = re.compile(
+    r"(?:\b(?:dose|dosage|insulin|insuline|bolus|treatment|traitement)\b|"
+    r"جرع|(?:ال)?[اإأ]نسولين|(?:ال)?أنسولين|علاج|دواء|الدواء)",
+    re.IGNORECASE,
+)
+_CLINICIAN_RISKY_QUESTION_PATTERN = re.compile(
+    r"(?:\b(?:caus(?:e|es|ing)|corrective actions?|adjustments? to (?:my|your) routine)\b|"
+    r"(?:سبب|أسباب|إجراء(?:ات)? تصحيحي|تعديل.{0,20}روتين))",
+    re.IGNORECASE,
+)
+_ARABIC_HEALTH_ACTION = r"(?:سج[ّ]?ل(?:ي)?|دوّن(?:ي)?|قس|قِس|قيسي|افحص|افحصي|راجع|راجعي)\b"
+_ARABIC_HEALTH_TARGET = r"(?:السكر|سكر|السكري|مستوى السكر|القراءات|قراءات السكر|القيم)"
+_HEALTH_TRACKING_SELECTION_PATTERN = re.compile(
+    r"(?:"
+    rf"{_ARABIC_HEALTH_ACTION}.{{0,80}}{_ARABIC_HEALTH_TARGET}"
+    rf"|{_ARABIC_HEALTH_TARGET}.{{0,80}}{_ARABIC_HEALTH_ACTION}"
+    r"|\b(?:record|measure|check|log)\b.{0,24}\b(?:glucose|blood sugar|sugar reading)\b"
+    r"|\b(?:glucose|blood sugar|sugar reading)\b.{0,24}\b(?:record|measure|check|log)\b"
+    r"|\b(?:vérifi(?:e|é|er)|verifi(?:e|é|er)|mesur(?:e|é|er)|not(?:e|é|er)|enregistr(?:e|é|er))\b.{0,40}\b(?:glycémie|glycemie|sucre)\b"
+    r"|\b(?:glycémie|glycemie|sucre)\b.{0,40}\b(?:vérifi(?:e|é|er)|verifi(?:e|é|er)|mesur(?:e|é|er)|not(?:e|é|er)|enregistr(?:e|é|er))\b"
+    r"|(?:after dinner|before breakfast|before bed|after breakfast|after lunch).{0,32}(?:glucose|sugar|insulin)"
+    r"|(?:glucose|sugar|insulin).{0,32}(?:after dinner|before breakfast|before bed|after breakfast|after lunch)"
+    r"|(?:après le dîner|avant le petit-déjeuner|avant de me coucher|après le petit-déjeuner).{0,32}(?:glycémie|sucre|insuline)"
+    r"|(?:glycémie|sucre|insuline).{0,32}(?:après le dîner|avant le petit-déjeuner|avant de me coucher|après le petit-déjeuner)"
+    r")",
+    re.IGNORECASE,
+)
+_ARABIC_WEEKDAY = r"(?:إثنين|اثنين|الإثنين|الاثنين|ثلاثاء|الثلاثاء|أربعاء|اربعاء|الأربعاء|الاربعاء|خميس|الخميس|جمعة|الجمعة|سبت|السبت|أحد|احد|الأحد|الاحد)"
+_SPECIFIC_SCHEDULE_SELECTION_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:\d{1,2}[:h]\d{2}|\d{1,2}\s*(?:am|pm))\b"
+    r"|\b(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\b"
+    r"|(?:كل\s*(?:يوم|٣|3)\s*أيام|كل\s*أسبوع|أسبوعياً|أسبوعيًا|يوميًا|يومياً)"
+    rf"|(?:كل\s*{_ARABIC_WEEKDAY}|يوم\s*{_ARABIC_WEEKDAY})"
+    r"|(?:\d{1,2}\s*[-‑–]\s*\d{1,2}\s*(?:ص|م))"
+    r"|(?:\b(?:every|each)\s+(?:morning|evening|night|week|\d+\s*days?)\b)"
+    r"|(?:\d+\s*(?:دقيقة|دقائق).{0,24}(?:بعد\s*(?:العشا|العشاء)|قبل\s*(?:الفطور|النوم)))"
+    r")",
+    re.IGNORECASE,
+)
+_TECHNICAL_FAILURE_PATTERN = re.compile(
+    r"(?:temporary technical issue|technical issue|probl[eè]me technique temporaire|"
+    r"مشكلة تقنية مؤقتة|عطل تقني مؤقت)",
+    re.IGNORECASE,
+)
+
+FORBIDDEN_BEHAVIOR_PATTERNS = (
+    re.compile(r"\b(?:fais|faire)\b.{0,20}\b(?:de la )?marche\b", re.IGNORECASE),
+    re.compile(r"\bmarch(?:e|er)\b.{0,24}\b(?:\d+\s*)?(?:min|minute|minutes|pas)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:fais|faire|pratique|pratiquer|essaie|essayez)\b.{0,30}"
+        r"\b(?:exercice|sport|activité physique)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:bois|boire)\b.{0,20}\b(?:eau|verre)\b", re.IGNORECASE),
+    re.compile(r"\b(?:hydrate-toi|hydratez-vous)\b", re.IGNORECASE),
+    re.compile(r"(?:^|[.!?]\s+|\n\s*[-•]?\s*)mange\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:essaie|essayez|pense à|tu peux|vous pouvez|je te conseille de)\b"
+        r".{0,30}\b(?:marcher|boire|manger|dormir)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:try|you can|consider|remember to)\b.{0,30}"
+        r"\b(?:walk|exercise|work out|drink|eat|sleep)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bwalk\b.{0,24}\b(?:\d+\s*)?(?:min|minute|minutes|steps)\b", re.IGNORECASE),
+    re.compile(r"\bdrink\b.{0,20}\b(?:water|glass)\b", re.IGNORECASE),
+    re.compile(r"\b(?:chreb|chrab)\b.{0,20}\b(?:lma|ma)\b", re.IGNORECASE),
+    re.compile(r"\b(?:tmcha|mchi)\b.{0,20}\b(?:d9i9a|d9aye9|minute|minutes)\b", re.IGNORECASE),
+    re.compile(r"\b(?:dir|diri)\b.{0,20}\b(?:riyada|riayada)\b", re.IGNORECASE),
+    re.compile(r"(?:اشرب|إشرب).{0,20}(?:ماء|الماء)"),
+    re.compile(r"(?:امش|إمش|مشي).{0,20}(?:دقيق|دقيقة|دقائق)"),
+    re.compile(r"(?:قم|قومي|حاول|حاولي).{0,20}(?:بتمرين|بالرياضة|بالمشي)"),
+    re.compile(
+        r"\b(?:note|notes|consigne|consignes|mesure|mesures)\b"
+        r"(?!\s+(?:une?|la|le)?\s*(?:case|checklist|liste|rappel)\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:sji|sjel|ktb|kteb)\b", re.IGNORECASE),
+    re.compile(
+        r"\b\d+\s*(?:min|minute|minutes|d9i9a|d9aye9)\b.{0,60}"
+        r"\b(?:humeur|mood|relation|3la9at|farha)\b",
+        re.IGNORECASE,
+    ),
+    _FREQUENCY_SELECTION_PATTERN,
+    _REMINDER_SELECTION_PATTERN,
+    _PRACTICAL_PLACEMENT_PATTERN,
+    _HEALTH_TRACKING_SELECTION_PATTERN,
+    _SPECIFIC_SCHEDULE_SELECTION_PATTERN,
+)
+
+_SAFE_ORGANIZATION_FR = (
+    "Garde une structure très simple : trois cases vides, sans contenu imposé. "
+    "Remplis seulement avec les éléments que tu as déjà choisis."
+)
+_SAFE_COMPACT_FR = (
+    "Réduis au minimum : une checklist de trois cases vides, sans contenu imposé. "
+    "Coche ce qui est fait et repars de là."
+)
+_SAFE_WEEK_FR = (
+    "Cette semaine, garde trois cases vides maximum, sans contenu imposé. "
+    "Remplis seulement avec les éléments que tu as déjà choisis."
+)
+_SAFE_CLINICIAN_FR = (
+    "Prépare ces 4 questions :\n"
+    "- Quelles informations dois-je apporter ?\n"
+    "- Quels changements dois-je vous signaler ?\n"
+    "- Quels critères utilisez-vous pour réévaluer mon traitement ?\n"
+    "- Quand dois-je vous recontacter ?"
+)
+_SAFE_EMOTIONAL_FR = "Ça a l’air lourd à porter au quotidien, et je reste avec toi dans ce moment-là."
+
+_SAFE_ORGANIZATION_EN = (
+    "Keep it very simple: three empty checklist boxes with no imposed content. "
+    "Fill them only with items you already chose."
+)
+_SAFE_COMPACT_EN = (
+    "Strip it down: keep three empty checklist boxes with no imposed content. "
+    "Tick what is done and restart from there."
+)
+_SAFE_WEEK_EN = (
+    "This week, keep at most three empty checklist boxes with no imposed content. "
+    "Fill them only with items you already chose."
+)
+_SAFE_CLINICIAN_EN = (
+    "Prepare these 4 questions:\n"
+    "- What information should I bring?\n"
+    "- What changes should I report?\n"
+    "- What criteria do you use to reassess my treatment?\n"
+    "- When should I contact you again?"
+)
+_SAFE_EMOTIONAL_EN = "That sounds exhausting to carry every day, and I’m here with you in this moment."
+
+_SAFE_ORGANIZATION_AR = "خلّها بسيطة: ثلاث خانات فارغة بدون محتوى مفروض، واملأ فقط بما اخترته مسبقًا."
+_SAFE_COMPACT_AR = "بسّطها أكثر: ثلاث خانات فارغة فقط بدون محتوى مفروض، وعلّم فقط ما تم إنجازه."
+_SAFE_WEEK_AR = "لهذا الأسبوع، احتفظ بثلاث خانات فارغة كحد أقصى بدون محتوى مفروض، واملأ فقط بما اخترته مسبقًا."
+_SAFE_CLINICIAN_AR = "حضّر هذه الأسئلة الأربعة: ما المعلومات التي يجب أن أحضرها؟ ما التغيّرات التي يجب أن أخبرك بها؟ ما معايير إعادة تقييم علاجي؟ ومتى أتواصل معك مجددًا؟"
+_SAFE_EMOTIONAL_AR = "واضح إن التفكير في هذا كل يوم متعب جدًا، وأنا معك في هذه اللحظة بدون ما أزيد عليك مهام."
+
+_SAFE_DARIJA_AR = "خليها بسيطة: ثلاث خانات خاويين بلا محتوى مفروض، وعمر غير باللي نتا اخترت من قبل."
+_SAFE_COMPACT_DARIJA_AR = "خليها بسيطة: ثلاث خانات خاويين بلا محتوى مفروض، وعلم غير على اللي كملتي."
+_SAFE_WEEK_DARIJA_AR = "هاد السيمانة، خلي غير ثلاث خانات خاويين بلا محتوى مفروض، وعمر غير باللي نتا اخترت من قبل."
+_SAFE_CLINICIAN_DARIJA_AR = "وجد هاد الأسئلة: شنو المعلومات اللي نجيب معايا؟ شنو التغييرات اللي نبلغك بها؟ شنو المعايير اللي كتستعمل باش تعاود تقيم العلاج ديالي؟ وإمتى نعاود نتاصل بيك؟"
+_SAFE_EMOTIONAL_DARIJA_AR = "باين بلي التفكير فهاد الشي كل نهار عياك بزاف، وأنا هنا معاك دابا بلا ما نزيد عليك شي حاجة."
+
+_SAFE_DARIJA_LATIN = "Khlliha simple: 3 cases khawyin bla contenu mfroud, w 3emmer ghir b dakchi li nta khtarti mn 9bel."
+_SAFE_COMPACT_DARIJA_LATIN = "Khlliha simple: 3 cases khawyin bla contenu mfroud, w 3ellem ghir 3la dakchi li kmelti."
+_SAFE_WEEK_DARIJA_LATIN = "Had simana, khlli 3 cases khawyin max bla contenu mfroud, w 3emmer ghir b dakchi li nta khtarti mn 9bel."
+_SAFE_CLINICIAN_DARIJA_LATIN = "Wjjed had swalat: chno lma3loumat li njib m3aya? Chno taghyirat li n9oul ltbib? Chno lma3ayir li kayst3mel bach y3awed y9ayem l3ilaj dyali? W imta n3awed ntasel bih?"
+_SAFE_EMOTIONAL_DARIJA_LATIN = "Bayn belli tfkir f hadchi kol nhar 3yak bzaf, w ana hna m3ak daba bla ma nzid 3lik chi haja."
+
+_GULF_SAFE_ORGANIZATION = {
+    "ar-SA": "خلّها بسيطة: ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي أنت اخترته من قبل.",
+    "ar-AE": "خلّها بسيطة وايد: ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي إنت اخترته من قبل.",
+    "ar-KW": "خلّها بسيطة حيل: ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي إنت اخترته من قبل.",
+    "ar-QA": "خلّها بسيطة وايد: ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي إنت اخترته من قبل.",
+    "ar-OM": "خلّها بسيطة واجد: ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي إنت اخترته من قبل.",
+}
+_GULF_SAFE_COMPACT = {
+    "ar-SA": "بسّطها: ثلاث خانات فاضية بس بدون محتوى مفروض، وعلّم بس على اللي خلصته.",
+    "ar-AE": "بسّطها وايد: ثلاث خانات فاضية بس بدون محتوى مفروض، وعلّم بس على اللي خلصته.",
+    "ar-KW": "بسّطها حيل: ثلاث خانات فاضية بس بدون محتوى مفروض، وعلّم بس على اللي خلصته.",
+    "ar-QA": "بسّطها وايد: ثلاث خانات فاضية بس بدون محتوى مفروض، وعلّم بس على اللي خلصته.",
+    "ar-OM": "بسّطها واجد: ثلاث خانات فاضية بس بدون محتوى مفروض، وعلّم بس على اللي خلصته.",
+}
+_GULF_SAFE_WEEK = {
+    "ar-SA": "هالأسبوع، خلّها ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي أنت اخترته من قبل.",
+    "ar-AE": "هالأسبوع، خلّها ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي إنت اخترته من قبل.",
+    "ar-KW": "هالأسبوع، خلّها ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي إنت اخترته من قبل.",
+    "ar-QA": "هالأسبوع، خلّها ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي إنت اخترته من قبل.",
+    "ar-OM": "هالأسبوع، خلّها ثلاث خانات فاضية بس بدون محتوى مفروض، وعبّي بس اللي إنت اخترته من قبل.",
+}
+_GULF_SAFE_CLINICIAN = {
+    "ar-SA": "جهّز هالأسئلة: وش المعلومات اللي أجيبها؟ وش التغييرات اللي أقولها للطبيب؟ وش المعايير اللي يستخدمها لإعادة تقييم علاجي؟ ومتى أتواصل معه مرة ثانية؟",
+    "ar-AE": "جهّز هالأسئلة: شو المعلومات اللي أجيبها؟ شو التغييرات اللي أقولها للدكتور؟ شو المعايير اللي يستخدمها لإعادة تقييم علاجي؟ ومتى أتواصل وياه مرة ثانية؟",
+    "ar-KW": "جهّز هالأسئلة: شنو المعلومات اللي أجيبها؟ شنو التغييرات اللي أقولها للدكتور؟ شنو المعايير اللي يستخدمها لإعادة تقييم علاجي؟ ومتى أتواصل معاه مرة ثانية؟",
+    "ar-QA": "جهّز هالأسئلة: شنو المعلومات اللي أجيبها؟ شنو التغييرات اللي أقولها للدكتور؟ شنو المعايير اللي يستخدمها لإعادة تقييم علاجي؟ ومتى أتواصل معاه مرة ثانية؟",
+    "ar-OM": "جهّز هالأسئلة: وش المعلومات اللي أجيبها؟ وش التغييرات اللي أقولها للدكتور؟ وش المعايير اللي يستخدمها لإعادة تقييم علاجي؟ ومتى أتواصل معه مرة ثانية؟",
+}
+_GULF_SAFE_EMOTIONAL = {
+    "ar-SA": "هالمشكلة متعبة فعلًا كل يوم، وأنا معك بهاللحظة بدون ما أزيد عليك شي.",
+    "ar-AE": "ترا هالشي متعب وايد كل يوم، وأنا وياك بهاللحظة بدون ما أزيد عليك شي.",
+    "ar-KW": "هالشي متعب حيل كل يوم، وأنا معاك بهاللحظة بدون ما أزيد عليك شي.",
+    "ar-QA": "هالشي متعب وايد كل يوم، وأنا معاك بهاللحظة بدون ما أزيد عليك شي.",
+    "ar-OM": "هالشي متعب واجد كل يوم، وأنا معك بهاللحظة بدون ما أزيد عليك شي.",
+}
+
+_GULF_DIALECT_MARKERS = {
+    "ar-SA": ("وش", "أبغ", "الحين", "هالمشكلة", "خلّها", "نخليها", "فاضية بس"),
+    "ar-AE": ("شو", "أبا", "وايد", "عقب", "ترا", "وياك"),
+    "ar-KW": ("شنو", "أبي", "حيل", "عقب", "هال"),
+    "ar-QA": ("شنو", "أبي", "وايد", "عقب", "هال"),
+    "ar-OM": ("وش", "واجد", "بعد العشا", "هال"),
+}
+_DARIJA_BAD_NATURALNESS = re.compile(
+    r"(?:توعدنا|خانات\s+فارغة|مقنّع|نتا\s+اخترتي|من\s+بعد(?!\s+العشا|\s+العشاء))",
+    re.IGNORECASE,
+)
+_ARABIC_BAD_NATURALNESS = re.compile(r"(?:أشعر\s+بكمّك)", re.IGNORECASE)
+
+
+def contains_unapproved_behavior_action(text: str) -> bool:
+    return any(pattern.search(text) for pattern in FORBIDDEN_BEHAVIOR_PATTERNS)
+
+
+def word_count(text: str) -> int:
+    return len(_WORD_RE.findall(text))
+
+
+def nonempty_line_count(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.strip())
+
+
+def safe_fallback(
+    language: str,
+    *,
+    mode: str = "practical",
+    weekly: bool = False,
+    very_long: bool = False,
+    prefer_latin_script: bool = False,
+) -> str:
+    if mode == "emotional":
+        if language == "fr":
+            return _SAFE_EMOTIONAL_FR
+        if language == "en":
+            return _SAFE_EMOTIONAL_EN
+        if language == "ar-MA":
+            return _SAFE_EMOTIONAL_DARIJA_LATIN if prefer_latin_script else _SAFE_EMOTIONAL_DARIJA_AR
+        if language in _GULF_SAFE_EMOTIONAL:
+            return _GULF_SAFE_EMOTIONAL[language]
+        return _SAFE_EMOTIONAL_AR
+    if mode == "clinician_prep":
+        if language == "fr":
+            return _SAFE_CLINICIAN_FR
+        if language == "en":
+            return _SAFE_CLINICIAN_EN
+        if language == "ar-MA":
+            return _SAFE_CLINICIAN_DARIJA_LATIN if prefer_latin_script else _SAFE_CLINICIAN_DARIJA_AR
+        if language in _GULF_SAFE_CLINICIAN:
+            return _GULF_SAFE_CLINICIAN[language]
+        return _SAFE_CLINICIAN_AR
+    if language == "fr":
+        if weekly:
+            return _SAFE_WEEK_FR
+        return _SAFE_COMPACT_FR if very_long else _SAFE_ORGANIZATION_FR
+    if language == "en":
+        if weekly:
+            return _SAFE_WEEK_EN
+        return _SAFE_COMPACT_EN if very_long else _SAFE_ORGANIZATION_EN
+    if language == "ar-MA":
+        if prefer_latin_script:
+            if weekly:
+                return _SAFE_WEEK_DARIJA_LATIN
+            return _SAFE_COMPACT_DARIJA_LATIN if very_long else _SAFE_DARIJA_LATIN
+        if weekly:
+            return _SAFE_WEEK_DARIJA_AR
+        return _SAFE_COMPACT_DARIJA_AR if very_long else _SAFE_DARIJA_AR
+    if language in _GULF_SAFE_ORGANIZATION:
+        if weekly:
+            return _GULF_SAFE_WEEK[language]
+        return _GULF_SAFE_COMPACT[language] if very_long else _GULF_SAFE_ORGANIZATION[language]
+    if weekly:
+        return _SAFE_WEEK_AR
+    return _SAFE_COMPACT_AR if very_long else _SAFE_ORGANIZATION_AR
+
+
+def guard_narrator_output(
+    reply: str,
+    *,
+    language: str,
+    approved_session_context: bool,
+    mode: str = "practical",
+    weekly: bool = False,
+    prefer_latin_script: bool = False,
+) -> str:
+    forbidden = contains_unapproved_behavior_action(reply)
+    technical_failure = bool(_TECHNICAL_FAILURE_PATTERN.search(reply))
+    words = word_count(reply)
+    lines = nonempty_line_count(reply)
+    question_count = reply.count("?") + reply.count("؟")
+    if language == "ar-MA":
+        script_violation = (
+            prefer_latin_script and bool(ARABIC_RE.search(reply))
+        ) or (
+            not prefer_latin_script
+            and (not ARABIC_RE.search(reply) or bool(LATIN_RE.search(reply)))
+        )
+    else:
+        script_violation = prefer_latin_script and bool(ARABIC_RE.search(reply))
+
+    gulf_dialect_violation = language in _GULF_DIALECT_MARKERS and not any(
+        marker in reply for marker in _GULF_DIALECT_MARKERS[language]
+    )
+    darija_naturalness_violation = (
+        language == "ar-MA"
+        and bool(_DARIJA_BAD_NATURALNESS.search(reply))
+    )
+    arabic_naturalness_violation = (
+        language.startswith("ar")
+        and bool(_ARABIC_BAD_NATURALNESS.search(reply))
+    )
+
+    if mode == "emotional":
+        invalid_shape = words > 30 or lines > 1
+    elif mode == "clinician_prep":
+        therapeutic = bool(_CLINICIAN_THERAPEUTIC_PATTERN.search(reply))
+        risky_question = bool(_CLINICIAN_RISKY_QUESTION_PATTERN.search(reply))
+        invalid_shape = (
+            words > 80
+            or not 2 <= question_count <= 4
+            or lines > 6
+            or therapeutic
+            or risky_question
+        )
+    else:
+        therapeutic = bool(_CLINICIAN_THERAPEUTIC_PATTERN.search(reply))
+        question_only_shape = question_count >= 2
+        missing_practical_mechanism = (
+            mode == "practical"
+            and not approved_session_context
+            and words >= 5
+            and not _PRACTICAL_ORGANIZATION_PATTERN.search(reply)
+        )
+        invalid_shape = (
+            words > 45
+            or lines > 5
+            or therapeutic
+            or question_only_shape
+            or missing_practical_mechanism
+        )
+
+    if (
+        forbidden
+        or technical_failure
+        or invalid_shape
+        or script_violation
+        or gulf_dialect_violation
+        or darija_naturalness_violation
+        or arabic_naturalness_violation
+    ):
+        return safe_fallback(
+            language,
+            mode=mode,
+            weekly=weekly,
+            very_long=words > 60,
+            prefer_latin_script=prefer_latin_script,
+        )
+    return reply

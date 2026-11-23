@@ -1,0 +1,90 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+
+String _read(String path) => File(path).readAsStringSync();
+
+String _readProfileLibrary() => [
+  _read('lib/features/profile/profile_screen.dart'),
+  _read('lib/features/profile/profile_screen_presentation.dart'),
+].join('\n');
+
+void main() {
+  test('shell exposes the actual post-sidebar viewport to routed pages', () {
+    final shell = _read('lib/features/navigation/main_shell.dart');
+    expect(shell, contains('LayoutBuilder('));
+    expect(
+      shell,
+      contains('size: Size(constraints.maxWidth, constraints.maxHeight)'),
+    );
+  });
+
+  test(
+    'dashboard keeps first-use copy readable while data views gain width',
+    () {
+      final dashboard = _read('lib/features/dashboard/dashboard_screen.dart');
+      expect(
+        RegExp(
+          r'BoxConstraints\(\s*maxWidth:\s*900,?\s*\)',
+        ).hasMatch(dashboard),
+        isTrue,
+      );
+      expect(
+        RegExp(
+          r'screenW\s*>=\s*1400\s*\?\s*\(screenW\s*-\s*1200\)\s*/\s*2',
+        ).hasMatch(dashboard),
+        isTrue,
+      );
+    },
+  );
+
+  test('journal caps long-history reading width on desktop', () {
+    final journal = _read('lib/features/journal/journal_screen.dart');
+    expect(journal, contains('(viewportWidth - 980) / 2'));
+    expect(journal, contains('viewportWidth >= 700'));
+  });
+
+  test('dedicated CGM guide keeps a centered wizard and responsive filtered connection layout', () {
+    final importer = _read('lib/features/import/import_screen.dart');
+    final cgmScreen = _read('lib/features/import/cgm_screen.dart');
+    final cgm = _read('lib/features/import/cgm_connections_section.dart');
+    expect(importer, contains('ResponsiveContentSurface('));
+    expect(importer, contains('maxWidth: 1040'));
+    expect(importer, contains('constraints.maxWidth < 900'));
+    expect(importer, contains('Expanded(flex: 6, child: documentSurface)'));
+    expect(importer, contains('Expanded(flex: 4, child: connectionsSurface)'));
+    expect(
+      importer,
+      contains("_CgmGuideEntryCard(onTap: () => context.push('/cgm'))"),
+    );
+    expect(cgmScreen, contains('ResponsiveContentSurface('));
+    expect(cgmScreen, contains('maxWidth: 760'));
+    expect(
+      cgmScreen,
+      contains('CgmConnectionsSection(service: service, sourceFilter: sourceId)'),
+    );
+    expect(cgmScreen, contains('constraints.maxWidth < 480'));
+    expect(cgmScreen, contains("ValueKey('cgm-wizard-nightscout-yes')"));
+    expect(cgm, contains('constraints.maxWidth >= 900'));
+    expect(cgm, contains('Expanded(child: cards[i])'));
+  });
+
+  test(
+    'profile and Pulper cap over-wide desktop bodies without shrinking tablet',
+    () {
+      final profile = _readProfileLibrary();
+      final pulper = _read(
+        'lib/features/documents/document_import_screen.dart',
+      );
+      final surface = _read('lib/core/widgets/responsive_content_surface.dart');
+      expect(profile, contains('maxWidth: 1040'));
+      expect(
+        pulper,
+        contains('maxWidth: MediaQuery.sizeOf(context).width >= 900 ? 760 : 980'),
+      );
+      expect(pulper, contains('width: desktop ? 260 : double.infinity'));
+      expect(surface, contains('math.min(constraints.maxWidth, maxWidth)'));
+      expect(surface, contains('AlignmentDirectional.topCenter'));
+    },
+  );
+}

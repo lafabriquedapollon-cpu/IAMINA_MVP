@@ -1,0 +1,147 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+
+String _read(String path) => File(path).readAsStringSync();
+
+String _readCompanionLibrary() => [
+  _read('lib/features/companion/companion_premium_screen.dart'),
+  _read('lib/features/companion/companion_premium_screen_presentation.dart'),
+].join('\n');
+
+void main() {
+  test('app root applies the certified LOGIN-derived visual language', () {
+    final main = _read('lib/main.dart');
+    final language = _read('lib/core/theme/amina_visual_language.dart');
+
+    expect(main, contains('AminaVisualLanguage.harmonize(AminaTheme.light)'));
+    expect(main, contains('AminaVisualLanguage.harmonize(AminaTheme.dark)'));
+    expect(language, contains('class AminaVisualLanguage'));
+    expect(language, contains('static const double cardRadius = 24'));
+    expect(language, contains('static const double controlRadius = 12'));
+    expect(language, contains('static const double fieldRadius = 10'));
+    expect(language, contains('primaryGradient'));
+    expect(language, contains('inputDecorationTheme:'));
+    expect(language, contains('elevatedButtonTheme:'));
+    expect(language, contains('filledButtonTheme:'));
+    expect(language, contains('outlinedButtonTheme:'));
+  });
+
+  test('shared patient surfaces consume the canonical visual language', () {
+    for (final path in <String>[
+      'lib/core/widgets/clinical_card.dart',
+      'lib/core/widgets/glass_card.dart',
+      'lib/core/widgets/amina_button.dart',
+      'lib/core/widgets/amina_text_field.dart',
+      'lib/core/widgets/mobile_page_header.dart',
+      'lib/core/widgets/first_use_panel.dart',
+    ]) {
+      final source = _read(path);
+      expect(
+        source,
+        contains('amina_visual_language.dart'),
+        reason: '$path must use the canonical presentation layer',
+      );
+    }
+  });
+
+  test('active premium patient surfaces use one canonical mobile chrome', () {
+    const logo = "assets/images/iamina_logo_mark.png";
+    final dashboardEntry = _read(
+      'lib/features/dashboard/dashboard_companion_entry_screen.dart',
+    );
+    final dashboard = _read(
+      'lib/features/dashboard/dashboard_premium_screen.dart',
+    );
+    final companion = _readCompanionLibrary();
+    final header = _read('lib/core/widgets/mobile_page_header.dart');
+    final bridge = _read('lib/core/widgets/legacy_page_header_bridge.dart');
+    final addLog = _read('lib/features/journal/add_log_screen.dart');
+    final documentImport = _read(
+      'lib/features/documents/document_import_premium_screen.dart',
+    );
+    final module = _read('lib/modules/diabetes_module.dart');
+
+    expect(dashboardEntry, contains('DashboardPremiumScreen'));
+    expect(
+      dashboardEntry,
+      contains("ValueKey('dashboard-companion-primary-entry')"),
+    );
+    expect(module, contains('const DashboardCompanionEntryScreen()'));
+    expect(dashboard, contains('assets/images/iamina_logo_horizontal.png'));
+    expect(dashboard, contains("label: 'IAMINA'"));
+    expect(companion, contains('assets/images/iamina_logo_horizontal.png'));
+    expect(companion, contains("label: 'IAMINA'"));
+    expect(header, contains(logo));
+    expect(header, contains('width: 64'));
+    expect(header, contains('height: 64'));
+    expect(header, contains('minHeight: 96'));
+    expect(header, contains('decoration: TextDecoration.none'));
+    expect(header, contains('if (bottom == null) return chrome'));
+    expect(header, contains('final desktopInset'));
+    expect(header, contains('(surfaceWidth - 1120) / 2'));
+    expect(header, contains('padding: EdgeInsetsDirectional.fromSTEB('));
+    expect(header, contains('desktopInset'));
+    expect(bridge, contains('AminaMobilePageHeader'));
+    expect(bridge, contains('contentTopInset'));
+    expect(addLog, contains('AminaLegacyPageHeaderBridge'));
+    expect(addLog, contains('contentTopInset: 12'));
+    expect(documentImport, contains('AminaLegacyPageHeaderBridge'));
+    expect(addLog, isNot(contains('PremiumTaskBrandOverlay')));
+    expect(documentImport, isNot(contains('PremiumTaskBrandOverlay')));
+    expect(module, contains('CompanionPremiumScreen'));
+    expect(module, contains('DocumentImportPremiumScreen'));
+  });
+
+  test('visual certification harnesses stay isolated from production main', () {
+    final main = _read('lib/main.dart');
+    final golden = _read('test/ui_visual_screenshot_test.dart');
+    final nativeWorkflow = _read('../.github/workflows/ui-screenshot-audit.yml');
+    final browserMain = _read('lib/ui_browser_audit_main.dart');
+    final browserWorkflow = _read(
+      '../.github/workflows/ui-browser-screenshot.yml',
+    );
+
+    expect(main, isNot(contains('await db.seedDemoData()')));
+    expect(main, isNot(contains('ui_browser_audit_main.dart')));
+
+    expect(golden, contains('NativeDatabase.memory()'));
+    expect(golden, contains('await db.seedDemoData()'));
+    expect(golden, contains("bool.fromEnvironment('IAMINA_VISUAL_AUDIT')"));
+    expect(golden, isNot(contains('precacheImage(')));
+    expect(golden, isNot(contains("package:firebase_core/firebase_core.dart")));
+    expect(nativeWorkflow, contains('--dart-define=IAMINA_VISUAL_AUDIT=true'));
+    expect(nativeWorkflow, contains('--update-goldens'));
+    expect(nativeWorkflow, contains('test/ui_visual_screenshot_test.dart'));
+
+    expect(browserMain, contains('runApp('));
+    expect(browserMain, contains('addPostFrameCallback'));
+    expect(browserMain, contains('await db.seedDemoData()'));
+    expect(browserMain, contains("queryParameters['surface']"));
+    expect(browserMain, contains('DocumentImportPremiumScreen'));
+    expect(browserMain, contains('AminaMobilePageHeader'));
+    expect(browserMain, contains("title: 'Nouvelle mesure'"));
+    expect(browserMain, contains('Firebase.initializeApp'));
+    expect(browserMain, contains('DefaultFirebaseOptions.currentPlatform'));
+    expect(browserMain, isNot(contains("import 'main.dart'")));
+    expect(browserWorkflow, contains('lib/ui_browser_audit_main.dart'));
+    expect(browserWorkflow, contains('flutter build web --release'));
+    expect(browserWorkflow, contains('Page.captureScreenshot'));
+    expect(browserWorkflow, contains('Emulation.setDeviceMetricsOverride'));
+    expect(browserWorkflow, contains('suspiciously small'));
+    expect(browserWorkflow, contains('distinct renders'));
+    expect(browserWorkflow, contains('amina-chat'));
+    expect(browserWorkflow, contains('iamina-ui-browser-cert-'));
+    expect(browserWorkflow, contains('fail-fast: false'));
+    expect(browserWorkflow, contains('width: 390, height: 844, mobile: true'));
+    expect(browserWorkflow, contains('width: 768, height: 1024, mobile: false'));
+    expect(browserWorkflow, contains('width: 1280, height: 900, mobile: false'));
+    expect(browserWorkflow, contains(r'${{ matrix.width }}'));
+    expect(browserWorkflow, contains(r'${{ matrix.height }}'));
+    expect(browserWorkflow, contains(r'${{ matrix.mobile }}'));
+    expect(browserWorkflow, contains('--disable-dev-shm-usage'));
+    expect(browserWorkflow, contains('companion-unavailable'));
+    expect(browserWorkflow, contains(r'test "$total" -eq "${#surfaces[@]}"'));
+    expect(browserWorkflow, contains(r'test "$count" -eq "${#surfaces[@]}"'));
+  });
+}

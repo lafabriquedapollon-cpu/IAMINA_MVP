@@ -1,0 +1,406 @@
+// ConsentScreen — widget tests
+//
+// Verifies the versioned consent gate renders correctly and responds to user actions.
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:amina/data/drift/database.dart';
+import 'package:amina/features/auth/consent_screen.dart';
+import 'package:amina/l10n/app_localizations.dart';
+import 'package:amina/services/api_client.dart';
+import 'package:amina/services/app_lock_service.dart';
+import 'package:amina/services/consent_evidence_store.dart';
+import 'package:amina/services/consent_notice_contract.dart';
+import 'package:amina/services/consent_service.dart';
+import 'package:chopper/chopper.dart';
+import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:provider/provider.dart';
+
+AppDatabase _openDb() => AppDatabase(NativeDatabase.memory());
+
+final class _TestApiClient extends ApiClient {
+  _TestApiClient(this._testClient) : super(baseUrl: 'http://localhost:8000');
+
+  final ChopperClient _testClient;
+
+  @override
+  ChopperClient get client => _testClient;
+}
+
+class _UnlockedLock extends AppLockService {
+  @override
+  bool get isUnlocked => true;
+}
+
+class _SkippedLock extends AppLockService {
+  @override
+  bool get isExplicitlySkipped => true;
+
+  @override
+  bool get isUnlocked => false;
+}
+
+class _FakeConsentEvidenceStore extends ConsentEvidenceStore {
+  ConsentNoticeClaim? written;
+  bool withdrawalPending = false;
+
+  @override
+  Future<void> markWithdrawalPending() async { withdrawalPending = true; }
+
+  @override
+  Future<bool> hasWithdrawalPending() async => withdrawalPending;
+
+  @override
+  Future<void> clearWithdrawalPending() async { withdrawalPending = false; }
+
+  @override
+  Future<ConsentNoticeClaim?> readCurrent() async => written;
+
+  @override
+  Future<bool> hasCurrentEvidence() async => written != null;
+
+  @override
+  Future<void> write(ConsentNoticeClaim claim) async {
+    written = claim;
+  }
+
+  @override
+  Future<void> clear() async {
+    written = null;
+  }
+}
+
+Widget _makeApp({
+  required AppDatabase db,
+  required ApiClient apiClient,
+  required ConsentService consentService,
+  required ConsentEvidenceStore evidenceStore,
+  AppLockService? appLockService,
+}) {
+  final router = GoRouter(
+    initialLocation: '/consent',
+    routes: [
+      GoRoute(
+        path: '/consent',
+        builder: (_, __) => const ConsentScreen(),
+      ),
+      GoRoute(
+        path: '/dashboard',
+        builder: (_, __) => const Scaffold(body: Text('Dashboard')),
+      ),
+      GoRoute(
+        path: '/app-lock/setup',
+        builder: (_, __) => const Scaffold(body: Text('Lock setup')),
+      ),
+    ],
+  );
+
+  return MultiProvider(
+    providers: [
+      Provider<AppDatabase>.value(value: db),
+      Provider<ApiClient>.value(value: apiClient),
+      Provider<ConsentEvidenceStore>.value(value: evidenceStore),
+      ChangeNotifierProvider<ConsentService>.value(value: consentService),
+      if (appLockService != null)
+        ChangeNotifierProvider<AppLockService>.value(value: appLockService),
+    ],
+    child: MaterialApp.router(
+      routerConfig: router,
+      locale: const Locale('fr'),
+      localizationsDelegates: const [
+        AppLocalizations.delegate,
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [Locale('fr'), Locale('ar', 'MA')],
+    ),
+  );
+}
+
+void main() {
+  late AppDatabase db;
+  late ChopperClient chopper;
+  late _TestApiClient apiClient;
+  late ConsentService consentService;
+  late _FakeConsentEvidenceStore evidenceStore;
+  late _UnlockedLock unlockedLock;
+  late ConsentNoticeClaim claim;
+  late http.Request? capturedRequest;
+  late bool responseSuccess;
+  Completer<http.Response>? responseCompleter;
+
+  http.Response successResponse() => http.Response(
+    jsonEncode({
+      'ai_consent_given': true,
+      'notice_version': claim.version,
+      'notice_hash': claim.noticeHash,
+      'locale': claim.locale,
+    }),
+    200,
+    headers: const {'content-type': 'application/json'},
+  );
+
+  setUp(() {
+    db = _openDb();
+    claim = ConsentNoticeContract.forLocale('fr');
+    capturedRequest = null;
+    responseSuccess = true;
+    responseCompleter = null;
+    consentService = ConsentService();
+    evidenceStore = _FakeConsentEvidenceStore();
+    unlockedLock = _UnlockedLock();
+
+    chopper = ChopperClient(
+      baseUrl: Uri.parse('http://localhost:8000'),
+      client: MockClient((request) async {
+        capturedRequest = request;
+        final pending = responseCompleter;
+        if (pending != null) return pending.future;
+        if (!responseSuccess) {
+          return http.Response(
+            jsonEncode({'detail': 'rejected'}),
+            422,
+            headers: const {'content-type': 'application/json'},
+          );
+        }
+        return successResponse();
+      }),
+      converter: const JsonConverter(),
+    );
+    apiClient = _TestApiClient(chopper);
+  });
+
+  tearDown(() async {
+    consentService.dispose();
+    unlockedLock.dispose();
+    chopper.dispose();
+    await db.close();
+  });
+
+  Widget app() => _makeApp(
+    db: db,
+    apiClient: apiClient,
+    consentService: consentService,
+    evidenceStore: evidenceStore,
+    appLockService: unlockedLock,
+  );
+
+  testWidgets('renders without error (smoke test)', (tester) async {
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    expect(find.byType(ConsentScreen), findsOneWidget);
+  });
+
+  testWidgets('shows shield icon in header', (tester) async {
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.shield_outlined), findsOneWidget);
+  });
+
+  testWidgets('shows accept button', (tester) async {
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    expect(find.text('Accepter et continuer'), findsOneWidget);
+  });
+
+  testWidgets('shows decline button', (tester) async {
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    expect(find.text('Continuer sans IA'), findsOneWidget);
+  });
+
+  testWidgets('shows lock icon in privacy footnote', (tester) async {
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.lock_outline), findsOneWidget);
+  });
+
+  testWidgets('shows three data point emojis', (tester) async {
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    expect(find.textContaining('📊'), findsOneWidget);
+    expect(find.textContaining('🍽️'), findsOneWidget);
+    expect(find.textContaining('😴'), findsOneWidget);
+  });
+
+  testWidgets('tapping decline marks service declined', (tester) async {
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+
+    final declineBtn = find.text('Continuer sans IA');
+    await tester.ensureVisible(declineBtn);
+    await tester.tap(declineBtn);
+    await tester.pump();
+
+    expect(consentService.hasDeclinedLocally, isTrue);
+    // C01: declining must not call the server or synthesize grant evidence.
+    expect(capturedRequest, isNull);
+    expect(evidenceStore.written, isNull);
+    expect(consentService.hasConsent, isFalse);
+  });
+
+  testWidgets('accept posts exact claim and persists verified evidence', (tester) async {
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+
+    final acceptBtn = find.text('Accepter et continuer');
+    await tester.ensureVisible(acceptBtn);
+    await tester.tap(acceptBtn);
+    await tester.pumpAndSettle();
+
+    expect(capturedRequest, isNotNull);
+    expect(capturedRequest!.method, 'POST');
+    expect(capturedRequest!.url.path, '/api/v1/account/consent');
+    expect(
+      jsonDecode(capturedRequest!.body),
+      {
+        'notice_version': claim.version,
+        'notice_hash': claim.noticeHash,
+        'locale': claim.locale,
+      },
+    );
+    expect(evidenceStore.written?.version, claim.version);
+    expect(evidenceStore.written?.noticeHash, claim.noticeHash);
+    expect(evidenceStore.written?.locale, claim.locale);
+    expect(consentService.hasConsent, isTrue);
+    expect(find.text('Dashboard'), findsOneWidget);
+  });
+
+  testWidgets('loading indicator shown while accepting', (tester) async {
+    final completer = Completer<http.Response>();
+    responseCompleter = completer;
+
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+
+    final acceptBtn = find.text('Accepter et continuer');
+    await tester.ensureVisible(acceptBtn);
+    await tester.tap(acceptBtn);
+    await tester.pump();
+
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    completer.complete(successResponse());
+    await tester.pumpAndSettle();
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('missing app-lock service cannot grant consent even with valid API', (tester) async {
+    await tester.pumpWidget(_makeApp(
+      db: db,
+      apiClient: apiClient,
+      consentService: consentService,
+      evidenceStore: evidenceStore,
+      // Unavailable provider must NOT default to a valid unlocked vault.
+    ));
+    await tester.pumpAndSettle();
+    final accept = find.text('Accepter et continuer');
+    await tester.ensureVisible(accept);
+    await tester.tap(accept);
+    await tester.pump();
+    expect(capturedRequest, isNull);
+    expect(evidenceStore.written, isNull);
+    expect(consentService.hasConsent, isFalse);
+    expect(find.textContaining('activez d’abord le verrouillage'), findsOneWidget);
+  });
+
+  testWidgets('no-lock choice cannot consent and offers explicit lock setup', (tester) async {
+    final lock = _SkippedLock();
+    addTearDown(lock.dispose);
+    await tester.pumpWidget(_makeApp(
+      db: db, apiClient: apiClient, consentService: consentService,
+      evidenceStore: evidenceStore, appLockService: lock,
+    ));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('consent-lock-required-note')), findsOneWidget);
+    expect(find.byKey(const Key('consent-enable-app-lock')), findsOneWidget);
+    final accept = find.text('Accepter et continuer');
+    await tester.ensureVisible(accept);
+    await tester.tap(accept);
+    await tester.pump();
+    expect(capturedRequest, isNull);
+    expect(evidenceStore.written, isNull);
+    expect(consentService.hasConsent, isFalse);
+    expect(find.textContaining('activez d’abord le verrouillage'), findsOneWidget);
+    final setup = find.byKey(const Key('consent-enable-app-lock'));
+    await tester.ensureVisible(setup);
+    await tester.tap(setup);
+    await tester.pumpAndSettle();
+    expect(find.text('Lock setup'), findsOneWidget);
+  });
+
+  testWidgets('failed consent response stays fail-closed', (tester) async {
+    responseSuccess = false;
+
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+
+    final acceptBtn = find.text('Accepter et continuer');
+    await tester.ensureVisible(acceptBtn);
+    await tester.tap(acceptBtn);
+    await tester.pumpAndSettle();
+
+    expect(evidenceStore.written, isNull);
+    expect(consentService.hasConsent, isFalse);
+    expect(find.byType(ConsentScreen), findsOneWidget);
+    expect(find.byType(SnackBar), findsOneWidget);
+    expect(find.textContaining('Consentement non enregistré'), findsOneWidget);
+  });
+
+  testWidgets('C04 API refusal retains the non-AI escape route', (tester) async {
+    responseSuccess = false;
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+
+    final accept = find.text('Accepter et continuer');
+    await tester.ensureVisible(accept);
+    await tester.tap(accept);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ConsentScreen), findsOneWidget);
+    expect(evidenceStore.written, isNull);
+    expect(consentService.hasConsent, isFalse);
+    expect(find.textContaining('Consentement non enregistré'), findsOneWidget);
+
+    // The transient SnackBar occupies the bottom hit area; retry once it
+    // has dismissed, just as an actual user can select the alternate CTA.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    final decline = find.text('Continuer sans IA');
+    await tester.ensureVisible(decline);
+    await tester.tap(decline);
+    await tester.pumpAndSettle();
+
+    expect(consentService.hasDeclinedLocally, isTrue);
+    expect(consentService.hasConsent, isFalse);
+    expect(find.text('Dashboard'), findsOneWidget);
+  });
+
+  testWidgets('C05 pending withdrawal survives failed reconsent', (tester) async {
+    responseSuccess = false;
+    evidenceStore.withdrawalPending = true;
+    consentService.markWithdrawalPending();
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+
+    expect(consentService.hasWithdrawalPending, isTrue);
+    expect(consentService.hasConsent, isFalse);
+    final accept = find.text('Accepter et continuer');
+    await tester.ensureVisible(accept);
+    await tester.tap(accept);
+    await tester.pumpAndSettle();
+
+    // A failed remote acknowledgment cannot clear the persisted stop marker.
+    expect(evidenceStore.withdrawalPending, isTrue);
+    expect(consentService.hasWithdrawalPending, isTrue);
+    expect(consentService.hasConsent, isFalse);
+    expect(evidenceStore.written, isNull);
+  });
+}

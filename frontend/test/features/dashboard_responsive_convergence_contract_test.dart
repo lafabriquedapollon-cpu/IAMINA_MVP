@@ -1,0 +1,81 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('Dashboard route always resolves to the same primary entry', () {
+    final module = File('lib/modules/diabetes_module.dart').readAsStringSync();
+
+    expect(module, contains("path: '/dashboard'"));
+    expect(
+      module,
+      contains('builder: () => const DashboardCompanionEntryScreen()'),
+    );
+    expect(module, isNot(contains('DashboardScreen()')));
+    expect(module, isNot(contains("dashboard_screen.dart")));
+    expect(module, isNot(contains('constraints.maxWidth < 700')));
+  });
+
+  test('Responsive hierarchy keeps one factual trend before interpretation', () {
+    final responsive = File(
+      'lib/features/dashboard/widgets/dashboard_responsive_sections.dart',
+    ).readAsStringSync();
+
+    expect(responsive, contains('constraints.maxWidth < 760'));
+    expect(responsive, contains('DashboardTrendSection('));
+    expect(responsive, isNot(contains('DashboardAdaptiveKpiSection(')));
+    expect(responsive, contains('DashboardInsightSection('));
+    expect(responsive, contains('DashboardMyRemindersCard()'));
+    expect(responsive, isNot(contains('DashboardNextActionSection(')));
+    expect(responsive.indexOf('DashboardMyRemindersCard()'),
+        greaterThan(responsive.indexOf('DashboardTrendSection(')));
+    expect(responsive, contains('DashboardInsightSection('));
+    expect(responsive, isNot(contains('DashboardScreen')));
+    expect(responsive, isNot(contains('ClinicalEngine')));
+    expect(responsive, isNot(contains('calcGMI')));
+    expect(responsive, isNot(contains('calcTIR')));
+  });
+
+  test('Large screens are bounded and place data tools after primary content', () {
+    final dashboard = File(
+      'lib/features/dashboard/dashboard_premium_screen.dart',
+    ).readAsStringSync();
+
+    expect(dashboard, contains('final horizontalPadding = width >= 1200'));
+    expect(dashboard, contains('(width - 1120) / 2'));
+    expect(dashboard, contains('width >= 700'));
+    expect(dashboard, contains('DashboardResponsiveSections('));
+    expect(dashboard, contains('const _DataTools()'));
+    expect(dashboard, contains("ValueKey('dashboard-data-import')"));
+    expect(dashboard, contains("ValueKey('dashboard-data-cgm')"));
+    expect(dashboard, contains('watchRecentLogs(limit: 1)'));
+    expect(dashboard, isNot(contains('Duration(days: 21)')));
+  });
+
+  test('Visual cert sets deterministic scroll without a production UI fork', () {
+    final module = File('lib/modules/diabetes_module.dart').readAsStringSync();
+    final dashboard = File(
+      'lib/features/dashboard/dashboard_premium_screen.dart',
+    ).readAsStringSync();
+    final entry = File(
+      'lib/features/dashboard/dashboard_companion_entry_screen.dart',
+    ).readAsStringSync();
+    final cert = File('lib/ui_dashboard_backend_cert_main.dart').readAsStringSync();
+
+    expect(module, contains('const DashboardCompanionEntryScreen()'));
+    expect(dashboard, isNot(contains('dashboard-cert-scroll')));
+    expect(cert, contains("Uri.base.queryParameters['scroll']"));
+    expect(cert, contains('_targetScrollOffset = _certScrollOffsetFromUri()'));
+    expect(cert, contains('initialScrollOffset: _targetScrollOffset'));
+    expect(cert, contains('_scrollController.hasClients'));
+    expect(cert, contains('position.maxScrollExtent'));
+    expect(cert, contains('_scrollController.jumpTo('));
+    expect(cert, contains('keepScrollOffset: false'));
+    expect(cert, contains("debugLabel: 'dashboard-cert-scroll'"));
+    expect(cert, contains('scrollController: _scrollController'));
+    expect(cert, contains('_scrollController.dispose();'));
+    expect(cert, isNot(contains('PrimaryScrollController(')));
+    expect(entry, contains('scrollController: scrollController'));
+    expect(dashboard, contains('controller: scrollController'));
+  });
+}

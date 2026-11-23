@@ -1,0 +1,40 @@
+import 'dart:io';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test(
+    'UX-11 dashboard actions and mobile nav preserve approved semantics',
+    () {
+      final today = File(
+        'lib/features/dashboard/widgets/dashboard_today_section.dart',
+      ).readAsStringSync();
+      expect(today, isNot(contains('DashboardCompanionCallout')));
+      final companion = File(
+        'lib/features/dashboard/widgets/dashboard_companion_fab.dart',
+      ).readAsStringSync();
+      expect(companion, contains("'dashboard-companion-chat-action'"));
+      expect(companion, contains("context.push('/companion/chat')"));
+      final premium = File(
+        'lib/features/dashboard/dashboard_premium_screen.dart',
+      ).readAsStringSync();
+      expect(premium, contains("ValueKey('dashboard-data-import')"));
+      expect(premium, contains("context.go('/importer')"));
+
+      final module = File(
+        'lib/modules/diabetes_module.dart',
+      ).readAsStringSync();
+      final navBlock = module.split('shellRoutes:').first;
+      expect(module, contains("'Mesures'"));
+      expect(module, contains("'Rapports'"));
+      expect(navBlock, isNot(contains("route: '/importer'")));
+      expect(module, contains("path: '/importer'"));
+      expect(module, contains('const DashboardCompanionEntryScreen()'));
+
+      final shell = File(
+        'lib/features/navigation/main_shell.dart',
+      ).readAsStringSync();
+      expect(shell, contains("label: (l10n) => l10n.profile"));
+      expect(shell, contains('mobile-nav-add'));
+    },
+  );
+}

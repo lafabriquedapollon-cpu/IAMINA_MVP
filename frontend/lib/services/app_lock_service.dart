@@ -1,0 +1,412 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import 'app_lock_authenticator.dart';
+import 'app_lock_authenticator_factory.dart';
+import 'auth_service.dart';
+
+typedef ProtectedLocalStateProbe = Future<bool> Function();
+
+class AppLockService extends ChangeNotifier {
+  static const _credentialKey = 'iamina_app_lock_credential_v1';
+  static const _requiredKey = 'iamina_app_lock_required_v1';
+  // New explicit choice, separate from the deprecated untrusted opt-out marker.
+  static const _choiceKey = 'iamina_app_lock_initial_choice_v2';
+  static const _choiceOwnerKey = 'iamina_app_lock_initial_choice_owner_v2';
+  // Owner-scoped opt-out: never remove a global credential needed by B when
+  // A disables the UI lock. This is a preference, not identity authentication.
+  static String _ownerChoiceKey(String owner) =>
+      'iamina_app_lock_choice_v3_$owner';
+  static const _skippedChoice = 'skipped_explicitly';
+  static const _requiredValue = 'required';
+  static const Duration defaultGracePeriod = Duration(seconds: 60);
+
+  final FlutterSecureStorage _storage;
+  final AppLockAuthenticator _authenticator;
+  final AuthService? _authService;
+  final ProtectedLocalStateProbe? _protectedLocalStateProbe;
+  final DateTime Function() _now;
+  final Duration gracePeriod;
+
+  bool _initialized = false;
+  bool _configured = false;
+  bool _required = false;
+  bool _explicitlySkipped = false;
+  int _choiceGeneration = 0;
+  bool _unlocked = false;
+  bool _recoveryRequired = false;
+  AppLockCredential? _credential;
+  DateTime? _backgroundedAt;
+
+  AppLockService({
+    FlutterSecureStorage? storage,
+    AppLockAuthenticator? authenticator,
+    AuthService? authService,
+    ProtectedLocalStateProbe? protectedLocalStateProbe,
+    DateTime Function()? now,
+    this.gracePeriod = defaultGracePeriod,
+  })  : _storage = storage ?? const FlutterSecureStorage(),
+        _authenticator =
+            authenticator ?? createPlatformAppLockAuthenticator(),
+        _authService = authService,
+        _protectedLocalStateProbe = protectedLocalStateProbe,
+        _now = now ?? DateTime.now {
+    _authService?.addListener(_handleAuthChanged);
+  }
+
+  bool get isInitialized => _initialized;
+  bool get isConfigured => _configured;
+  bool get isRequired => _required;
+  bool get isExplicitlySkipped => _explicitlySkipped;
+  bool get isUnlocked => _unlocked;
+  // D1 P0: Web patient SQLite is not yet certified as encrypted at rest.
+  // This is a compile-time platform refusal, NOT a browser preference,
+  // feature flag, or remotely asserted claim of encryption readiness.
+  bool get canOptOutOfAppLock => !kIsWeb;
+  bool get recoveryRequired => _recoveryRequired;
+  bool get needsSetup => _initialized && !_configured && !_explicitlySkipped && !_recoveryRequired;
+
+  Future<void> initialize() async {
+    _configured = false;
+    _required = false;
+    _explicitlySkipped = false;
+    _unlocked = false;
+    _recoveryRequired = false;
+    _credential = null;
+
+    try {
+      final requiredValue = await _storage.read(key: _requiredKey);
+      final choiceValue = await _storage.read(key: _choiceKey);
+      final choiceOwner = await _storage.read(key: _choiceOwnerKey);
+      final rawCredential = await _storage.read(key: _credentialKey);
+      final owner = (await _authService?.resolvePatientVaultScope())?.databaseName;
+      final ownerChoice = owner == null ? null
+          : await _storage.read(key: _ownerChoiceKey(owner));
+      // Old Web skip markers are untrusted and must never override the
+      // hard crypto prerequisite. Preserve their bytes for verified recovery.
+      final chosenNoLock = canOptOutOfAppLock &&
+          (ownerChoice == _skippedChoice ||
+              (choiceValue == _skippedChoice && owner == choiceOwner));
+      _required = requiredValue == _requiredValue;
+
+      if (rawCredential != null && rawCredential.isNotEmpty) {
+        try {
+          _credential = AppLockCredential.decode(rawCredential);
+          _configured = true;
+          _required = true;
+          _explicitlySkipped = false;
+          if (requiredValue != _requiredValue) {
+            await _storage.write(key: _requiredKey, value: _requiredValue);
+          }
+        } catch (_) {
+          _credential = null;
+          _configured = false;
+          _recoveryRequired = true;
+          _required = true;
+        }
+      } else if (_required) {
+        _recoveryRequired = true;
+      } else if (chosenNoLock) {
+        // A previously confirmed choice applies to this patient only.
+        _explicitlySkipped = true;
+      } else if (await _hasProtectedLocalState()) {
+        // Secure app-lock state disappeared while patient-local state still
+        // exists. Treat that as rollback/ambiguity, never as a fresh install.
+        _required = true;
+        _recoveryRequired = true;
+      }
+      // A valid pre-existing credential may remain available for other
+      // accounts while this particular owner explicitly opted out.
+      if (!_recoveryRequired && chosenNoLock) {
+        _explicitlySkipped = true;
+      }
+    } catch (_) {
+      // Storage or protected-state ambiguity must not silently unlock or reset
+      // a previously protected app.
+      _credential = null;
+      _configured = false;
+      _required = true;
+      _explicitlySkipped = false;
+      _recoveryRequired = true;
+    } finally {
+      _initialized = true;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> _hasProtectedLocalState() async {
+    final probe = _protectedLocalStateProbe;
+    if (probe == null) return false;
+    try {
+      return await probe();
+    } catch (_) {
+      // Failure to prove the installation is empty is not proof that it is
+      // fresh. Fail closed into recovery instead of offering re-enrollment.
+      return true;
+    }
+  }
+
+  Future<AppLockCapability> capability() => _authenticator.capability();
+
+  Future<void> recoverWithVerifiedRemoteAccount() async {
+    if (!_initialized) {
+      throw StateError('App lock requires initialized state');
+    }
+    final auth = _authService;
+    if (!_recoveryRequired ||
+        auth == null ||
+        !auth.isRemoteCredentialVerified ||
+        !auth.hasRemoteApiCredential) {
+      throw const AppLockException('verified_remote_recovery_required');
+    }
+
+    // A fresh, server-verified account login is the recovery authority. Remove
+    // only the unverifiable app-lock material; patient-local clinical state is
+    // retained and remains inaccessible until a new strong device lock enrolls.
+    await _storage.delete(key: _credentialKey);
+    await _storage.delete(key: _requiredKey);
+    _credential = null;
+    _configured = false;
+    _required = false;
+    _recoveryRequired = false;
+    _unlocked = false;
+    notifyListeners();
+  }
+
+  /// An explicit choice on a brand-new unprotected installation only.
+  /// Never use it to bypass an installed credential, a required marker, or
+  /// an ambiguous/recovery vault. A compromised browser profile is out of
+  /// scope for device-local data when the user deliberately declines a lock.
+  Future<void> continueWithoutAppLock() async {
+    if (!canOptOutOfAppLock) {
+      throw const AppLockException('web_encrypted_vault_required');
+    }
+    if (!_initialized || _configured || _required || _recoveryRequired) {
+      throw const AppLockException('protected_vault_cannot_skip_lock');
+    }
+    if (await _hasProtectedLocalState() && !_explicitlySkipped) {
+      throw const AppLockException('existing_local_data_requires_lock');
+    }
+    final owner = (await _authService?.resolvePatientVaultScope())?.databaseName;
+    if (owner == null) {
+      throw const AppLockException('patient_vault_identity_required');
+    }
+    // Persist owner first. A partial write cannot authorize a skip.
+    await _storage.write(key: _ownerChoiceKey(owner), value: _skippedChoice);
+    _explicitlySkipped = true;
+    _unlocked = false;
+    notifyListeners();
+  }
+
+  /// Disable ONLY this patient's app-lock choice, after fresh platform
+  /// verification. Keep the credential for other locally saved owners.
+  /// Nothing here grants backend auth or enables clinical data sync.
+  Future<void> disableForCurrentVault() async {
+    if (!canOptOutOfAppLock) {
+      throw const AppLockException('web_encrypted_vault_required');
+    }
+    final auth = _authService;
+    final credential = _credential;
+    if (!_initialized || !_configured || !_required || _recoveryRequired ||
+        !_unlocked || auth == null || !auth.isAuthenticated ||
+        credential == null || _explicitlySkipped) {
+      throw const AppLockException('verified_unlock_required_to_disable');
+    }
+    final epoch = AuthService.authEpoch;
+    final owner = (await auth.resolvePatientVaultScope())?.databaseName;
+    if (owner == null || epoch != AuthService.authEpoch) {
+      throw const AppLockException('patient_vault_identity_required');
+    }
+
+    // Do not confuse a previously unlocked session with a fresh verification.
+    final proof = await _authenticator.unlock(credential);
+    if (epoch != AuthService.authEpoch || !auth.isAuthenticated ||
+        (await auth.resolvePatientVaultScope())?.databaseName != owner) {
+      throw const AppLockException('patient_changed_during_lock_verification');
+    }
+    // Keep the anti-rollback counter current before changing protection.
+    final updated = credential.copyWith(signCount: proof.signCount);
+    await _storage.write(key: _credentialKey, value: updated.encode());
+    await _storage.write(key: _ownerChoiceKey(owner), value: _skippedChoice);
+    _credential = updated;
+    if (epoch != AuthService.authEpoch) {
+      throw const AppLockException('patient_changed_during_lock_verification');
+    }
+    _explicitlySkipped = true;
+    _unlocked = false;
+    notifyListeners();
+  }
+
+  /// Re-enable protection for this owner. The device credential is never
+  /// silently reused: enabling requires verification or new enrollment.
+  Future<void> enableForCurrentVault() async {
+    if (!_initialized || _recoveryRequired || !_explicitlySkipped) {
+      throw const AppLockException('lock_preference_not_available');
+    }
+    final auth = _authService;
+    final epoch = AuthService.authEpoch;
+    final owner = (await auth?.resolvePatientVaultScope())?.databaseName;
+    if (owner == null || epoch != AuthService.authEpoch) {
+      throw const AppLockException('patient_vault_identity_required');
+    }
+    final credential = _credential;
+    if (credential != null) {
+      final proof = await _authenticator.unlock(credential);
+      if (epoch != AuthService.authEpoch ||
+          (await auth?.resolvePatientVaultScope())?.databaseName != owner) {
+        throw const AppLockException('patient_changed_during_lock_verification');
+      }
+      final updated = credential.copyWith(signCount: proof.signCount);
+      await _storage.write(key: _credentialKey, value: updated.encode());
+      await _storage.delete(key: _ownerChoiceKey(owner));
+      await _storage.delete(key: _choiceKey);
+      await _storage.delete(key: _choiceOwnerKey);
+      _credential = updated;
+      _explicitlySkipped = false;
+      _unlocked = true;
+      notifyListeners();
+      return;
+    }
+
+    // Remove the skip BEFORE persisting a new credential; crashes during
+    // enrollment must never leave a protected credential with an active skip.
+    await _storage.delete(key: _ownerChoiceKey(owner));
+    await _storage.delete(key: _choiceKey);
+    await _storage.delete(key: _choiceOwnerKey);
+    _explicitlySkipped = false;
+    notifyListeners();
+    try {
+      await configure();
+    } catch (_) {
+      // Enrollment failure restores the previous user choice; it cannot
+      // weaken any existing lock because there was no credential.
+      if (!_configured && !_required && !_recoveryRequired &&
+          epoch == AuthService.authEpoch) {
+        await _storage.write(key: _ownerChoiceKey(owner), value: _skippedChoice);
+        _explicitlySkipped = true;
+        notifyListeners();
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> configure() async {
+    if (!_initialized) {
+      throw StateError('App lock requires initialized state');
+    }
+    if (_recoveryRequired) {
+      throw const AppLockException('recovery_required');
+    }
+    final capability = await _authenticator.capability();
+    if (capability == AppLockCapability.insecureContext) {
+      throw const AppLockException('insecure_context');
+    }
+    if (capability != AppLockCapability.supported) {
+      throw const AppLockException('strong_auth_unavailable');
+    }
+
+    final credential = await _authenticator.enroll();
+    await _storage.write(key: _credentialKey, value: credential.encode());
+    await _storage.write(key: _requiredKey, value: _requiredValue);
+
+    _credential = credential;
+    _explicitlySkipped = false;
+    _configured = true;
+    _required = true;
+    _recoveryRequired = false;
+    _unlocked = true;
+    notifyListeners();
+  }
+
+  Future<void> unlock() async {
+    if (!_initialized) {
+      throw StateError('App lock requires initialized state');
+    }
+    if (_recoveryRequired) {
+      throw const AppLockException('recovery_required');
+    }
+    final credential = _credential;
+    if (!_configured || credential == null) {
+      throw const AppLockException('app_lock_not_configured');
+    }
+
+    final assertion = await _authenticator.unlock(credential);
+    final updated = credential.copyWith(signCount: assertion.signCount);
+    await _storage.write(key: _credentialKey, value: updated.encode());
+
+    _credential = updated;
+    _unlocked = true;
+    notifyListeners();
+  }
+
+  void lock() {
+    if (!_unlocked) return;
+    _unlocked = false;
+    notifyListeners();
+  }
+
+  void noteBackgrounded() {
+    _backgroundedAt ??= _now();
+  }
+
+  void noteResumed() {
+    final backgroundedAt = _backgroundedAt;
+    _backgroundedAt = null;
+    if (backgroundedAt == null || !_configured || !_unlocked) return;
+    final elapsed = _now().difference(backgroundedAt);
+    if (elapsed >= gracePeriod) lock();
+  }
+
+  void noteDetached() {
+    _backgroundedAt = null;
+    lock();
+  }
+
+  void _handleAuthChanged() {
+    final auth = _authService;
+    final generation = ++_choiceGeneration;
+    if (auth != null && auth.isInitialized && !auth.isAuthenticated) {
+      lock();
+    }
+    // Revoke the prior owner's opt-out synchronously before an async scope
+    // lookup. Never carry patient A's choice over to patient B.
+    if (_explicitlySkipped) {
+      _explicitlySkipped = false;
+      notifyListeners();
+    }
+    unawaited(_restoreChoiceForCurrentOwner(generation));
+  }
+
+  Future<void> _restoreChoiceForCurrentOwner(int generation) async {
+    // Never resurrect an old Web opt-out after switching A→B→A or login.
+    // The historical preference is not proof of encrypted vault protection.
+    if (!canOptOutOfAppLock) return;
+    if (!_initialized || _recoveryRequired) return;
+    try {
+      final choice = await _storage.read(key: _choiceKey);
+      final owner = await _storage.read(key: _choiceOwnerKey);
+      final scope = await _authService?.resolvePatientVaultScope();
+      final scopedChoice = scope == null ? null
+          : await _storage.read(key: _ownerChoiceKey(scope.databaseName));
+      if (generation != _choiceGeneration || !_initialized ||
+          _recoveryRequired) return;
+      final allowed = scopedChoice == _skippedChoice ||
+          (choice == _skippedChoice &&
+              owner != null && owner == scope?.databaseName);
+      if (_explicitlySkipped != allowed) {
+        _explicitlySkipped = allowed;
+        notifyListeners();
+      }
+    } catch (_) {
+      // Storage ambiguity never grants access.
+    }
+  }
+
+  @override
+  void dispose() {
+    _authService?.removeListener(_handleAuthChanged);
+    super.dispose();
+  }
+}

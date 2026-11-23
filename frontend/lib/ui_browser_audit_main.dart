@@ -1,0 +1,780 @@
+import 'dart:async';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
+
+import 'core/theme/amina_visual_language.dart';
+import 'core/theme/app_theme.dart';
+import 'core/widgets/mobile_page_header.dart';
+import 'data/drift/database.dart';
+import 'data/models/companion_models.dart';
+import 'data/models/proactive_preview_models.dart';
+import 'features/auth/consent_screen.dart';
+import 'features/auth/onboarding_chat_screen.dart';
+import 'features/companion/companion_conversation_screen.dart';
+import 'features/companion/companion_premium_screen.dart';
+import 'features/dashboard/dashboard_companion_entry_screen.dart';
+import 'features/dashboard/widgets/dashboard_my_reminders_card.dart';
+import 'features/dashboard/widgets/add_log_sheet.dart';
+import 'features/dashboard/widgets/dashboard_adaptive_kpi_section.dart';
+import 'features/dashboard/widgets/dashboard_insight_section.dart';
+import 'features/dashboard/widgets/dashboard_next_action_section.dart';
+import 'features/dashboard/widgets/dashboard_trend_section.dart';
+import 'features/documents/document_import_premium_screen.dart';
+import 'features/journal/add_log_screen.dart';
+import 'features/journal/journal_screen.dart';
+import 'features/journal/reports_screen.dart';
+import 'features/journal/widgets/food_pictogram_audit_fixture.dart';
+import 'features/journal/widgets/meal_capture_panel.dart';
+import 'features/medications/medication_screen.dart';
+import 'features/navigation/main_shell.dart';
+import 'features/notifications/d2_notifications_screen.dart';
+import 'features/profile/profile_screen.dart';
+import 'features/reminders/reminders_screen.dart';
+import 'firebase_options.dart';
+import 'l10n/app_localizations.dart';
+import 'services/api_client.dart';
+import 'services/app_lock_service.dart';
+import 'services/auth_service.dart';
+import 'services/companion_service.dart';
+import 'services/consent_service.dart';
+import 'services/consent_evidence_store.dart';
+import 'services/locale_preference_service.dart';
+import 'services/meal_food_favorites_repository.dart';
+import 'services/modules_provider.dart';
+import 'services/sync_service.dart';
+
+class _BrowserAuditCompanionService extends CompanionService {
+  @override
+  Future<CompanionOverview?> fetchOverview() async => CompanionOverview(
+    patternStatus: 'ready',
+    reviewStatus: 'ready',
+    reviewAnchorCapturedAt: DateTime.utc(2026, 8, 15, 10),
+    patterns: const <CompanionPattern>[],
+    changesSinceReview: const <CompanionChange>[
+      CompanionChange(
+        observationKey: 'meal:lunch',
+        changeKind: 'persisting',
+        evidenceStrength: 'moderate',
+        missingData: <String>[],
+      ),
+    ],
+    afterVisit: const CompanionAfterVisit(
+      status: 'no_recorded_visit',
+      anchorId: null,
+      occurredAt: null,
+      source: null,
+      factCount: 0,
+      latestFactAt: null,
+    ),
+    safetyNotice: 'governed_browser_fixture',
+    sourceVersion: 'ui-browser-audit.v1',
+  );
+
+  @override
+  Future<ProactivePreview?> fetchProactivePreview() async => const ProactivePreview(
+    status: 'available',
+    attentionBudget: 'one_non_urgent_item_per_24h',
+    cooldownUntil: null,
+    pendingCount: 1,
+    safetyNotice: 'governed_browser_preview_fixture',
+    item: ProactivePreviewItem(
+      observationKey: 'context:stress',
+      kind: 'context',
+      state: 'persisting',
+      surfaceNow: false,
+      whatChanged: 'repeated_eligible_evidence',
+      whyItIsSurfacingNow: 'persistence_or_evidence_density_changed',
+      evidenceWindowDays: 90,
+      personalBaselineComparisonMgDl: 24,
+      observations: 6,
+      distinctDays: 4,
+      evidenceDensity: 'moderate',
+      limitationsOrMissingData: <String>[
+        'observational_association_only',
+        'no_causality_diagnosis_or_treatment_inference',
+      ],
+      allowedNextStep: 'PREPARE_CLINICIAN_DISCUSSION',
+      escalationClass: 'none',
+      evidenceId: 'rule.personal-response.repetition.v1',
+      sourceVersion: 'proactive.personal-response.lifecycle.v1',
+      priority: ProactivePreviewPriority(
+        safetyTimeSensitivity: 'non_urgent_observation',
+        clinicalRelevance: 'review_worthy',
+        persistence: 'recurrent_episode',
+        changeFromPersonalBaselineMgDl: 24,
+        evidenceDensity: 'moderate',
+        actionability: 'PREPARE_CLINICIAN_DISCUSSION',
+        evidenceMaturity: 'internal_governed_rule',
+        interruptionCost: 'eligible',
+      ),
+    ),
+  );
+}
+
+class _BrowserUnavailableCompanionService extends CompanionService {
+  @override
+  Future<CompanionOverview?> fetchOverview() async => null;
+
+  @override
+  void dispose() {}
+}
+
+class _BrowserFirstUseCompanionService extends CompanionService {
+  @override
+  Future<ProactivePreview?> fetchProactivePreview() async =>
+      const ProactivePreview(
+        status: 'insufficient_data',
+        attentionBudget: 'one_non_urgent_item_per_24h',
+        cooldownUntil: null,
+        pendingCount: 0,
+        safetyNotice: 'first_use_browser_fixture',
+        item: null,
+      );
+
+  @override
+  Future<CompanionChatReply?> sendChatMessage(
+    String message, {
+    int contextDays = 14,
+  }) async =>
+      const CompanionChatReply(
+        reply:
+            'Je peux t’aider à organiser ce que tu as enregistré, sans inventer ce que les données ne montrent pas.',
+        conversationId: 'first-use-browser',
+        replyLanguage: 'fr',
+      );
+}
+
+class _BrowserMealFavoritesRepository implements MealFoodFavoritesRepository {
+  Set<String> _ids = <String>{'whole_grain_bread'};
+
+  @override
+  Future<Set<String>> load() async => Set<String>.from(_ids);
+
+  @override
+  Future<void> save(Set<String> ids) async {
+    _ids = Set<String>.from(ids);
+  }
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  } catch (error) {
+    debugPrint('Browser audit Firebase init unavailable: $error');
+  }
+
+  // Synthetic D3 browser fixture only; never used by production main.dart.
+  final isD3Audit = Uri.base.queryParameters['surface'] == 'd3-reminders';
+  final db = AppDatabase.defaults();
+  if (isD3Audit) {
+    final now = DateTime.now();
+    await db.addReminder(
+      title: 'Contrôle synthétique',
+      dueAt: now.add(const Duration(hours: 4)),
+    );
+    await db.addReminder(
+      title: 'Rendez-vous fictif',
+      dueAt: now.add(const Duration(days: 1)),
+    );
+    await db.addReminder(
+      title: 'Vérification test',
+      dueAt: now.add(const Duration(days: 2)),
+    );
+  }
+  final auth = AuthService();
+  // The synthetic screenshot fixture must use the same profile dependencies
+  // as the real application; no patient identity or backend auth is created.
+  final appLock = AppLockService();
+  await appLock.initialize();
+  final api = ApiClient(authService: auth);
+  final consent = ConsentService()
+    ..seedInitialProfile(null)
+    ..attachStream(db.watchProfile());
+  final modules = ModulesProvider(api);
+  final sync = SyncService(db, api);
+  final shouldSeedDemo = Uri.base.queryParameters['seed'] != '0';
+  final CompanionService visualCompanion = shouldSeedDemo
+      ? _BrowserAuditCompanionService()
+      : _BrowserFirstUseCompanionService();
+
+  runApp(
+    MultiProvider(
+      providers: [
+        Provider<AppDatabase>.value(value: db),
+        ChangeNotifierProvider<AuthService>.value(value: auth),
+        ChangeNotifierProvider<AppLockService>.value(value: appLock),
+        Provider<ApiClient>.value(value: api),
+        Provider<SyncService>.value(value: sync),
+        ChangeNotifierProvider<ConsentService>.value(value: consent),
+        Provider<ConsentEvidenceStore>(create: (_) => ConsentEvidenceStore()),
+        ChangeNotifierProvider<LocalePreferenceService>(
+          create: (_) => LocalePreferenceService(api),
+        ),
+        ChangeNotifierProvider<ModulesProvider>.value(value: modules),
+        ChangeNotifierProvider<TweaksNotifier>(create: (_) => TweaksNotifier()),
+        StreamProvider<PatientProfileData?>(
+          create: (_) => db.watchProfile(),
+          initialData: null,
+        ),
+      ],
+      child: _BrowserAuditApp(visualCompanion: visualCompanion),
+    ),
+  );
+
+  if (shouldSeedDemo) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        await db.seedDemoData();
+      } catch (error) {
+        debugPrint('Browser audit demo seed unavailable: $error');
+      }
+    });
+  }
+}
+
+class _BrowserAuditApp extends StatelessWidget {
+  final CompanionService visualCompanion;
+
+  const _BrowserAuditApp({required this.visualCompanion});
+
+  @override
+  Widget build(BuildContext context) {
+    final surface = Uri.base.queryParameters['surface'] ?? 'dashboard';
+    final router = GoRouter(
+      initialLocation: _pathForSurface(surface),
+      routes: [
+        ShellRoute(
+          builder: (context, state, child) => MainShell(child: child),
+          routes: [
+            GoRoute(
+              path: '/dashboard',
+              builder: (context, state) => DashboardCompanionEntryScreen(
+                companionService: visualCompanion,
+              ),
+            ),
+            GoRoute(
+              path: '/journal',
+              builder: (context, state) => const JournalScreen(),
+            ),
+            GoRoute(
+              path: '/summary',
+              // Match the actual patient Reports tab, not the deprecated
+              // AI summary endpoint that can show an unrelated error state.
+              builder: (context, state) => const ReportsScreen(),
+            ),
+            GoRoute(
+              path: '/reports-local',
+              builder: (context, state) => const ReportsScreen(),
+            ),
+            GoRoute(
+              path: '/profile',
+              builder: (context, state) => const ProfileScreen(),
+            ),
+          ],
+        ),
+        GoRoute(
+          path: '/onboarding',
+          builder: (context, state) => const OnboardingChatScreen(),
+        ),
+        GoRoute(
+          path: '/consent',
+          builder: (context, state) => const ConsentScreen(),
+        ),
+        GoRoute(
+          path: '/importer',
+          builder: (context, state) => const DocumentImportPremiumScreen(),
+        ),
+        GoRoute(
+          path: '/document-import',
+          builder: (context, state) => const DocumentImportPremiumScreen(),
+        ),
+        GoRoute(
+          path: '/add-log',
+          builder: (context, state) => const AddLogScreen(),
+        ),
+        GoRoute(
+          path: '/add-log-meal',
+          builder: (context, state) => const _BrowserAddLogMealSurface(),
+        ),
+        GoRoute(
+          path: '/meal-picker',
+          builder: (context, state) => const _BrowserMealPickerSurface(),
+        ),
+        GoRoute(
+          path: '/medications',
+          builder: (context, state) => const MedicationScreen(),
+        ),
+        GoRoute(
+          path: '/notifications',
+          builder: (context, state) => const D2NotificationsScreen(),
+        ),
+        GoRoute(
+          path: '/reminders',
+          builder: (context, state) => const RemindersScreen(),
+        ),
+        GoRoute(
+          path: '/companion',
+          builder: (context, state) => const CompanionPremiumScreen(),
+        ),
+        GoRoute(
+          path: '/companion-unavailable',
+          builder: (context, state) => CompanionPremiumScreen(
+            service: _BrowserUnavailableCompanionService(),
+          ),
+        ),
+        GoRoute(
+          path: '/companion/chat',
+          builder: (context, state) =>
+              CompanionConversationScreen(service: visualCompanion),
+        ),
+        GoRoute(
+          path: '/amina-chat',
+          builder: (context, state) =>
+              CompanionConversationScreen(service: visualCompanion),
+        ),
+        GoRoute(
+          path: '/d3-reminders',
+          builder: (context, state) => const _BrowserD3RemindersSurface(),
+        ),
+        GoRoute(
+          path: '/first-use-receipt',
+          builder: (context, state) => const _BrowserFirstUseReceiptSurface(),
+        ),
+        GoRoute(
+          path: '/first-use-chat',
+          builder: (context, state) =>
+              _BrowserFirstUseChatSurface(service: visualCompanion),
+        ),
+        GoRoute(
+          path: '/trend',
+          builder: (context, state) => const _BrowserTrendSurface(),
+        ),
+        GoRoute(
+          path: '/kpi',
+          builder: (context, state) => const _BrowserKpiSurface(),
+        ),
+        GoRoute(
+          path: '/insight',
+          builder: (context, state) => _BrowserInsightSurface(
+            service: visualCompanion,
+          ),
+        ),
+        GoRoute(
+          path: '/next-action',
+          builder: (context, state) => _BrowserNextActionSurface(
+            service: visualCompanion,
+          ),
+        ),
+      ],
+    );
+
+    return MaterialApp.router(
+      debugShowCheckedModeBanner: false,
+      theme: AminaVisualLanguage.harmonize(AminaTheme.light),
+      darkTheme: AminaVisualLanguage.harmonize(AminaTheme.dark),
+      themeMode: ThemeMode.light,
+      // Browser-only Arabic/RTL certification fixture. Production app locale
+      // remains owned by LocalePreferenceService; no runtime change.
+      locale: Uri.base.queryParameters['locale'] == 'ar'
+          ? const Locale('ar')
+          : const Locale('fr'),
+      localizationsDelegates: const [
+        AppLocalizations.delegate,
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: AppLocalizations.supportedLocales,
+      routerConfig: router,
+    );
+  }
+}
+
+class _BrowserAddLogMealSurface extends StatefulWidget {
+  const _BrowserAddLogMealSurface();
+
+  @override
+  State<_BrowserAddLogMealSurface> createState() =>
+      _BrowserAddLogMealSurfaceState();
+}
+
+class _BrowserAddLogMealSurfaceState extends State<_BrowserAddLogMealSurface> {
+  var _attempts = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealMealNote());
+  }
+
+  void _revealMealNote() {
+    if (!mounted) return;
+    Element? target;
+
+    void visit(Element element) {
+      if (target != null) return;
+      if (element.widget.key == const Key('meal-note-input')) {
+        target = element;
+        return;
+      }
+      element.visitChildren(visit);
+    }
+
+    context.visitChildElements(visit);
+    if (target != null) {
+      unawaited(
+        Scrollable.ensureVisible(
+          target!,
+          alignment: 0.72,
+          duration: Duration.zero,
+        ),
+      );
+      return;
+    }
+
+    _attempts += 1;
+    if (_attempts < 12) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealMealNote());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      const AddLogScreen(focus: AddLogFocus.meal);
+}
+
+String _pathForSurface(String surface) => switch (surface) {
+  'onboarding' => '/onboarding',
+  'consent' => '/consent',
+  'dashboard' => '/dashboard',
+  'journal' => '/journal',
+  'summary' => '/summary',
+  'reports-local' => '/reports-local',
+  'profile' => '/profile',
+  'importer' => '/importer',
+  'document-import' => '/document-import',
+  'add-log' => '/add-log',
+  'add-log-meal' => '/add-log-meal',
+  'meal-picker' => '/meal-picker',
+  'medications' => '/medications',
+  'notifications' => '/notifications',
+  'reminders' => '/reminders',
+  'companion' => '/companion',
+  'companion-unavailable' => '/companion-unavailable',
+  'amina-chat' => '/amina-chat',
+  'd3-reminders' => '/d3-reminders',
+  'first-use-receipt' => '/first-use-receipt',
+  'first-use-chat' => '/first-use-chat',
+  'trend' => '/trend',
+  'kpi' => '/kpi',
+  'insight' => '/insight',
+  'next-action' => '/next-action',
+  _ => '/dashboard',
+};
+
+class _BrowserMealPickerSurface extends StatefulWidget {
+  const _BrowserMealPickerSurface();
+
+  @override
+  State<_BrowserMealPickerSurface> createState() =>
+      _BrowserMealPickerSurfaceState();
+}
+
+class _BrowserMealPickerSurfaceState extends State<_BrowserMealPickerSurface> {
+  final _favorites = _BrowserMealFavoritesRepository();
+  final List<String> _selectedIds = <String>[];
+  bool _searchSeeded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _seedSearch());
+  }
+
+  void _seedSearch() {
+    if (!mounted || _searchSeeded) return;
+    Element? target;
+
+    void visit(Element element) {
+      if (target != null) return;
+      final widget = element.widget;
+      if (widget is TextField &&
+          widget.key == const Key('meal-food-search')) {
+        target = element;
+        return;
+      }
+      element.visitChildren(visit);
+    }
+
+    context.visitChildElements(visit);
+    final textField = target?.widget;
+    if (textField is TextField) {
+      final query = foodPictogramAuditQuery;
+      textField.controller?.text = query;
+      textField.onChanged?.call(query);
+      _searchSeeded = true;
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _seedSearch());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AminaTheme.bg(context),
+      body: Column(
+        children: <Widget>[
+          const AminaMobilePageHeader(
+            title: 'Nouvelle mesure',
+            subtitle: 'Notez simplement ce qui vient de se passer.',
+          ),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1080),
+                  child: Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: AminaTheme.subtleBg(context),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: AminaTheme.divider(context)),
+                    ),
+                    child: MealCapturePanel(
+                      selectedIds: _selectedIds,
+                      canUsePhotoRecognition: false,
+                      favoritesRepository: _favorites,
+                      onChanged: (ids) => setState(() {
+                        _selectedIds
+                          ..clear()
+                          ..addAll(ids);
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BrowserTrendSurface extends StatelessWidget {
+  const _BrowserTrendSurface();
+
+  @override
+  Widget build(BuildContext context) {
+    final profile = context.watch<PatientProfileData?>();
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4FBF9),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: DashboardTrendSection(
+            unit: profile?.unitPreference ?? 'mg/dL',
+            low: profile?.targetRangeLow,
+            high: profile?.targetRangeHigh,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BrowserKpiSurface extends StatelessWidget {
+  const _BrowserKpiSurface();
+
+  @override
+  Widget build(BuildContext context) {
+    final profile = context.watch<PatientProfileData?>();
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4FBF9),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: DashboardAdaptiveKpiSection(
+            unit: profile?.unitPreference ?? 'mg/dL',
+            low: profile?.targetRangeLow,
+            high: profile?.targetRangeHigh,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BrowserInsightSurface extends StatelessWidget {
+  final CompanionService service;
+
+  const _BrowserInsightSurface({required this.service});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4FBF9),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: DashboardInsightSection(service: service),
+        ),
+      ),
+    );
+  }
+}
+
+class _BrowserNextActionSurface extends StatelessWidget {
+  final CompanionService service;
+
+  const _BrowserNextActionSurface({required this.service});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4FBF9),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: DashboardNextActionSection(service: service),
+        ),
+      ),
+    );
+  }
+}
+
+
+/// Dedicated synthetic fixture isolates the actual D3 card for Chrome proof.
+class _BrowserD3RemindersSurface extends StatelessWidget {
+  const _BrowserD3RemindersSurface();
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: AminaTheme.bg(context),
+    body: SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: const DashboardMyRemindersCard(),
+      ),
+    ),
+  );
+}
+
+class _BrowserFirstUseReceiptSurface extends StatefulWidget {
+  const _BrowserFirstUseReceiptSurface();
+
+  @override
+  State<_BrowserFirstUseReceiptSurface> createState() =>
+      _BrowserFirstUseReceiptSurfaceState();
+}
+
+class _BrowserFirstUseReceiptSurfaceState
+    extends State<_BrowserFirstUseReceiptSurface> {
+  var _phase = 0;
+  var _attempts = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _advance());
+  }
+
+  void _advance() {
+    if (!mounted || _attempts++ > 20) return;
+
+    Element? target;
+    void visit(Element element) {
+      if (target != null) return;
+      if (_phase == 0 &&
+          element.widget.key == const Key('glucose-input')) {
+        target = element;
+        return;
+      }
+      if (_phase == 1 &&
+          element.widget.key == const Key('save-log-button')) {
+        target = element;
+        return;
+      }
+      element.visitChildren(visit);
+    }
+
+    context.visitChildElements(visit);
+    final widget = target?.widget;
+    if (_phase == 0 && widget is TextField) {
+      widget.controller?.text = '126';
+      widget.onChanged?.call('126');
+      _phase = 1;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _advance());
+      return;
+    }
+    if (_phase == 1 && widget is FilledButton && widget.onPressed != null) {
+      widget.onPressed!.call();
+      _phase = 2;
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _advance());
+  }
+
+  @override
+  Widget build(BuildContext context) => const AddLogScreen();
+}
+
+class _BrowserFirstUseChatSurface extends StatefulWidget {
+  final CompanionService service;
+
+  const _BrowserFirstUseChatSurface({required this.service});
+
+  @override
+  State<_BrowserFirstUseChatSurface> createState() =>
+      _BrowserFirstUseChatSurfaceState();
+}
+
+class _BrowserFirstUseChatSurfaceState
+    extends State<_BrowserFirstUseChatSurface> {
+  var _attempts = 0;
+  var _submitted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _submit());
+  }
+
+  void _submit() {
+    if (!mounted || _submitted || _attempts++ > 20) return;
+
+    Element? target;
+    void visit(Element element) {
+      if (target != null) return;
+      if (element.widget.key == const Key('companion-chat-input')) {
+        target = element;
+        return;
+      }
+      element.visitChildren(visit);
+    }
+
+    context.visitChildElements(visit);
+    final widget = target?.widget;
+    if (widget is TextField) {
+      const message = 'Que peux-tu faire avec cette première mesure ?';
+      widget.controller?.text = message;
+      widget.onChanged?.call(message);
+      widget.onSubmitted?.call(message);
+      _submitted = true;
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _submit());
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      CompanionConversationScreen(service: widget.service);
+}

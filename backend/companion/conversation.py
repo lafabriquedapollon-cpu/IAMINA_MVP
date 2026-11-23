@@ -1,0 +1,1261 @@
+import logging
+import re
+
+from companion.advice_filter import apply_advice_throttle
+from companion.memory import _detect_emotional_signals
+from companion.narration_envelope import (
+    shadow_validate_protected_resolution,
+    shadow_validate_resolution,
+)
+from companion.narrator_prompts import (
+    CHAT_USER,
+    EMOTIONAL_USER,
+    SYSTEM_WITH_STATE,
+    get_language_label,
+)
+from companion.output_guard import guard_narrator_output
+from companion.parser import parse_llm_json
+from companion.protected_provider_shadow import (
+    generate_protected_provider_shadow_candidate,
+)
+from companion.protected_shadow_telemetry import record_protected_narration_shadow
+from companion.route_telemetry import record_companion_route
+from companion.state import compute_state, state_to_prompt
+from companion.tone import get_tone_instruction, select_relationship_tone
+from companion.zero_model_router import exact_chitchat_reply
+from core.ai_processor_policy import AIProcessorPolicyDenied
+from core.clinical_decision_audit import record_clinical_decision_audit
+from core.clinical_policy import (
+    NarrationMode,
+    NarrationPolicyRequest,
+    authorize_narration,
+    clinical_context_authorized,
+    narration_authorized,
+    narration_policy_block,
+    policy_denied_reply,
+)
+from core.companion.clinical import (
+    get_advice_resolution,
+    get_companion_context,
+    get_domain_context,
+    get_offline_fallback,
+    verify_advice_reply,
+    verify_protected_advice_reply,
+)
+from core.companion.ports import get_conversation_store
+from core.contracts.advice_decision import AdviceDecision
+from core.contracts.companion_context import CompanionContext
+from core.contracts.domain_context import DomainContext
+from core.emergency_response import compose_emergency_for_patient
+from core.input_safety import (
+    INSULIN_BLOCK,
+    PRESCRIPTION_BLOCK,
+    URGENT,
+    evaluate_input_safety,
+)
+from core.llm_gateway import get_gateway_llm
+from core.medical_safety import apply_no_prescription_policy, no_prescription_message
+from llm.pseudonymizer import PHIPseudonymizer
+
+logger = logging.getLogger(__name__)
+
+
+def _shadow_narration_envelope(
+    resolution,
+    *,
+    patient_id: int | None,
+    language: str,
+    prefer_latin_script: bool,
+    internal_shadow_authorized: bool = False,
+) -> None:
+    """Exercise narration contracts without changing patient output."""
+    try:
+        shadow_validate_resolution(
+            resolution,
+            language=language,
+            prefer_latin_script=prefer_latin_script,
+        )
+        if resolution.decision.intent == "clinician_prep":
+            protected = shadow_validate_protected_resolution(
+                resolution,
+                language=language,
+                prefer_latin_script=prefer_latin_script,
+            )
+            if not protected.structurally_valid:
+                raise PermissionError("protected clinician-prep shadow mismatch")
+            verify_protected_advice_reply(
+                patient_id,
+                resolution,
+                protected.reinjected_reply,
+            )
+
+            provider_candidate = generate_protected_provider_shadow_candidate(
+                protected.envelope,
+                internal_authorized=internal_shadow_authorized,
+                internal_subject_id=patient_id,
+            )
+            if provider_candidate is not None:
+                from companion.narration_envelope import (
+                    verify_and_reinject_protected_narration,
+                )
+
+                try:
+                    provider_reinjected = verify_and_reinject_protected_narration(
+                        provider_candidate,
+                        protected.envelope,
+                    )
+                    verify_protected_advice_reply(
+                        patient_id,
+                        resolution,
+                        provider_reinjected,
+                    )
+                except Exception:
+                    record_protected_narration_shadow(status="rejected")
+                    raise
+                record_protected_narration_shadow(status="accepted")
+    except Exception:
+        logger.exception("IAmina narration envelope shadow validation failed")
+
+
+_HISTORY_CHAR_BUDGET = 900
+_STREAM_SUFFIX = (
+    "\nRéponds en texte SIMPLE et direct — PAS de JSON, PAS de guillemets autour "
+    "de la réponse, PAS de clés comme 'reply'. Juste la réponse naturelle."
+)
+
+_ARABIC_RE = re.compile(r"[؀-ۿݐ-ݿ]")
+_GULF_DIALECT_KEYS = frozenset({"ar-SA", "ar-AE", "ar-KW", "ar-QA", "ar-OM"})
+_ARABIC_LANGUAGE_KEYS = frozenset({"ar", "ar-MA", *_GULF_DIALECT_KEYS})
+_DARIJA_LATIN_RE = re.compile(
+    r"\b(wach|zwina|dima|m3lich|mzyan|bghit|3yayt|3andi|3ndek|dyali|dyalek|"
+    r"kayn|mazal|daba|hna|nta|nti|wakha|khouya|khti|bzaf|chhal|kifach|chno|"
+    r"fach|rah|sir|salam|labas|b9iti|ma3lich|inchallah|labes|mashi|walo|"
+    r"yallah|bslama|chokran|3la|dyal|lli|had|hadi|bach|ach|nkdar|nqder|"
+    r"khasni|khassni|mnin|fin|hnaya|ghir|smahli|samahli|mabghitch|sokkar|kan7ess|brassi|mdowekh)\b",
+    re.IGNORECASE,
+)
+_EMOTIONAL_RE = re.compile(
+    r"(?:\b("
+    r"j.?en ai marre|j.?en peux plus|c.?est trop|je suis fatigué|je suis épuisé|"
+    r"j.?abandonne|c.?est inutile|à quoi ça sert|ras le bol|découragé|"
+    r"3yayt|3yit|t3bna|t3bit|ma b9ich|mab9inch|ma nqderch|ma nqdarch|"
+    r"khlass|bghit nwaqaf|7chuma|ma3ndich|i give up|i.?m done|can.?t do this|"
+    r"i.?m(?: honestly)? tired|it.?s exhausting|so tired|exhausted|hopeless"
+    r")\b|تعبت|مرهق(?:ني)?|عييت|تعبني)",
+    re.IGNORECASE,
+)
+_CLINICIAN_PREP_RE = re.compile(
+    r"(?:\b(?:médecin|medecin|docteur|doctor|tbib|tobib)\b|(?:ال)?طبيب|(?:ال)?دكتور)",
+    re.IGNORECASE,
+)
+_RECAP_RE = re.compile(
+    r"(?:\b(?:résume|resume|récap(?:itule)?|recap(?:itulate)?|summari[sz]e|summary)\b|"
+    r"لخ[ّ]?ص|اختصر|ملخ[ّ]?ص|وش اتفقنا|شو اتفقنا|إيش اتفقنا|ايش اتفقنا|شنو اتفقنا)",
+    re.IGNORECASE,
+)
+_WEEK_RE = re.compile(r"\b(?:semaine|week|simana|السيمانة|سيمانة|أسبوع|الاسبوع|الأسبوع)\b", re.IGNORECASE)
+_EVENING_MARKERS = {
+    "fr": ("soir", "dîner", "diner"),
+    "en": ("evening", "dinner"),
+    "ar": ("المساء", "العشاء", "بالليل"),
+    "ar-MA": ("بالليل", "العشا", "العشاء"),
+    "ar-SA": ("بالليل", "العشاء", "العشا"),
+    "ar-AE": ("بالليل", "عقب العشا", "العشا"),
+    "ar-KW": ("بالليل", "عقب العشا", "العشا"),
+    "ar-QA": ("بالليل", "عقب العشا", "العشا"),
+    "ar-OM": ("بالليل", "بعد العشا", "العشا"),
+}
+_EVENING_PRACTICAL_FALLBACKS = {
+    "fr": "Pour le soir après le dîner, garde seulement une checklist très simple de trois cases vides, sans contenu imposé.",
+    "en": "For the evening after dinner, keep it very simple: three empty checklist boxes with no imposed content.",
+    "ar": "في المساء بعد العشاء، خلّه بسيطًا جدًا: ثلاث خانات فارغة فقط بدون محتوى مفروض.",
+    "ar-MA": "بالليل من بعد العشا، خليها بسيطة بزاف: غير ثلاث خانات خاويين بلا محتوى مفروض.",
+    "ar-SA": "بالليل بعد العشاء، خلّها بسيطة جدًا: ثلاث خانات فاضية بس بدون محتوى مفروض.",
+    "ar-AE": "بالليل عقب العشا، خلّها بسيطة وايد: ثلاث خانات فاضية بس بدون محتوى مفروض.",
+    "ar-KW": "بالليل عقب العشا، خلّها بسيطة حيل: ثلاث خانات فاضية بس بدون محتوى مفروض.",
+    "ar-QA": "بالليل عقب العشا، خلّها بسيطة وايد: ثلاث خانات فاضية بس بدون محتوى مفروض.",
+    "ar-OM": "بالليل بعد العشا، خلّها بسيطة واجد: ثلاث خانات فاضية بس بدون محتوى مفروض.",
+}
+_EVENING_RECAP_FALLBACKS = {
+    "fr": "On garde une organisation très simple pour le soir après le dîner, et on prépare des questions à poser à ton médecin.",
+    "en": "We're keeping the evening after dinner very simple, and we're preparing questions for you to ask your doctor.",
+    "ar": "اتفقنا أن يكون الأمر بسيطًا جدًا في المساء بعد العشاء، وأن نجهّز أسئلة تطرحها على الطبيب.",
+    "ar-MA": "اتفقنا نخليوها بسيطة بزاف بالليل من بعد العشا، ونوجدو أسئلة تسولهم للطبيب.",
+    "ar-SA": "اتفقنا نخليها بسيطة جدًا بالليل بعد العشاء، ونجهز أسئلة تسألها للطبيب.",
+    "ar-AE": "اتفقنا نخليها بسيطة وايد بالليل عقب العشا، ونجهز أسئلة تسألها للطبيب.",
+    "ar-KW": "اتفقنا نخليها بسيطة حيل بالليل عقب العشا، ونجهز أسئلة تسألها للطبيب.",
+    "ar-QA": "اتفقنا نخليها بسيطة وايد بالليل عقب العشا، ونجهز أسئلة تسألها للطبيب.",
+    "ar-OM": "اتفقنا نخليها بسيطة واجد بالليل بعد العشا، ونجهز أسئلة تسألها للطبيب.",
+}
+_DARIJA_LATIN_EVENING_PRACTICAL = (
+    "Bllil mn b3d l3cha, khlliha simple bzaf: ghir 3 cases khawyin bla contenu mfroud."
+)
+_DARIJA_LATIN_EVENING_RECAP = (
+    "Ttafe9na nkhliwha simple bzaf bllil mn b3d l3cha, w nwjdo swalat bach tswel tbib."
+)
+_DARIJA_AR_NO_PRESCRIPTION = (
+    "ما نقدرش نوصف ليك علاج، نبدل ليك جرعة الإنسولين، نوقف ليك دوا، ولا نشخص حالة. "
+    "نقدر نعاونك تنظم الملاحظات ديالك وتوجد أسئلة للطبيب ديالك."
+)
+_GULF_NO_PRESCRIPTION = {
+    "ar-SA": (
+        "ما أقدر أوصف لك علاج، أو أغيّر جرعة الإنسولين، أو أوقف دوا، أو أشخّص حالة. "
+        "أقدر أساعدك ترتّب ملاحظاتك وتجهّز أسئلة لطبيبك."
+    ),
+    "ar-AE": (
+        "ما أقدر أوصف لك علاج، أو أغيّر جرعة الإنسولين، أو أوقف دوا، أو أشخّص حالة. "
+        "أقدر أساعدك ترتّب ملاحظاتك وتجهّز أسئلة لطبيبك."
+    ),
+    "ar-KW": (
+        "ما أقدر أوصف لك علاج، أو أغيّر جرعة الإنسولين، أو أوقف دوا، أو أشخّص حالة. "
+        "أقدر أساعدك ترتّب ملاحظاتك وتجهّز أسئلة لطبيبك."
+    ),
+    "ar-QA": (
+        "ما أقدر أوصف لك علاج، أو أغيّر جرعة الإنسولين، أو أوقف دوا، أو أشخّص حالة. "
+        "أقدر أساعدك ترتّب ملاحظاتك وتجهّز أسئلة لطبيبك."
+    ),
+    "ar-OM": (
+        "ما أقدر أوصف لك علاج، أو أغيّر جرعة الإنسولين، أو أوقف دوا، أو أشخّص حالة. "
+        "أقدر أساعدك ترتّب ملاحظاتك وتجهّز أسئلة لطبيبك."
+    ),
+}
+
+
+def _append_turn(patient, role: str, message: str) -> None:
+    store = get_conversation_store()
+    if store is not None and patient is not None:
+        store.append(patient.id, role, message)
+
+
+def _recent_turns(patient, limit: int, offset: int = 0, role: str | None = None):
+    store = get_conversation_store()
+    if store is None or patient is None:
+        return []
+    return store.recent(patient.id, limit, offset=offset, role=role)
+
+
+def _turn_count(patient) -> int:
+    store = get_conversation_store()
+    if store is None or patient is None:
+        return 0
+    return store.count(patient.id)
+
+
+_LOCAL_LAST_EXCHANGE = {
+    "qu'est-ce qu'on s'était dit juste avant",
+    "qu est ce qu on s etait dit juste avant",
+    "qu'est-ce qu'on vient de se dire",
+    "what did we just say",
+    "what did we say just before",
+    "chno glna 9bel",
+    "ach glna 9bel",
+}
+_LOCAL_RECAP = {
+    "peux-tu me résumer notre échange en une phrase",
+    "peux tu me resumer notre echange en une phrase",
+    "résume notre échange en une phrase",
+    "resume notre echange en une phrase",
+    "summarize our conversation in one sentence",
+    "chno lkhla9a dyal had lhdra",
+}
+
+
+def _normalize_local_meta(message: str) -> str:
+    normalized = message.strip().casefold().replace("’", "'")
+    normalized = re.sub(r"[,.!?…،؛:]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    for prefix in ("merci et ", "merci ", "et "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):].strip()
+            break
+    return normalized
+
+
+def _compact_turn_text(message: str, limit: int = 220) -> str:
+    compact = re.sub(r"\s+", " ", (message or "").strip())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def _recent_exchange_pair(patient):
+    assistant = None
+    user = None
+    for turn in _recent_turns(patient, 8):
+        if assistant is None and turn.role == "assistant":
+            assistant = turn.message
+            continue
+        if assistant is not None and turn.role == "user":
+            user = turn.message
+            break
+    return user, assistant
+
+
+def _local_conversation_meta_reply(
+    message: str,
+    patient,
+    language: str,
+) -> str | None:
+    """Answer exact history-meta turns locally; never send stored chat to a provider."""
+    normalized = _normalize_local_meta(message)
+    if normalized not in _LOCAL_LAST_EXCHANGE and normalized not in _LOCAL_RECAP:
+        return None
+
+    user_turn, assistant_turn = _recent_exchange_pair(patient)
+    if not user_turn or not assistant_turn:
+        if language == "en":
+            return "I don't have an earlier exchange to recap yet."
+        if language == "ar-MA" and not _ARABIC_RE.search(message):
+            return "Mazal ma kaynch échange 9bel bach nlkhso."
+        if language in _ARABIC_LANGUAGE_KEYS:
+            return "ما زال ما كاينش تبادل سابق باش نلخّصه."
+        return "Je n'ai pas encore d'échange précédent à rappeler."
+
+    previous_user = _compact_turn_text(user_turn)
+    previous_assistant = _compact_turn_text(assistant_turn)
+
+    if normalized in _LOCAL_LAST_EXCHANGE:
+        if language == "en":
+            return (
+                f'Just before, you asked: “{previous_user}” '
+                f'and I answered: “{previous_assistant}”.'
+            )
+        if language == "ar-MA" and not _ARABIC_RE.search(message):
+            return (
+                f'9bel chwia swlti: “{previous_user}” '
+                f'w jawbtek: “{previous_assistant}”.'
+            )
+        if language in _ARABIC_LANGUAGE_KEYS:
+            return f'قبل شوية سولتيني: «{previous_user}» وجاوبتك: «{previous_assistant}».'
+        return (
+            f'Juste avant, tu m’as demandé : « {previous_user} » '
+            f'et je t’ai répondu : « {previous_assistant} ».'
+        )
+
+    if language == "en":
+        return f'In short: you asked “{previous_user}”, and I answered “{previous_assistant}”.'
+    if language == "ar-MA" and not _ARABIC_RE.search(message):
+        return f'Bikhtisar: swlti “{previous_user}”, w jawbtek “{previous_assistant}”.'
+    if language in _ARABIC_LANGUAGE_KEYS:
+        return f'باختصار: سولتيني «{previous_user}»، وجاوبتك «{previous_assistant}».'
+    return f'En bref : tu m’as demandé « {previous_user} » et je t’ai répondu « {previous_assistant} ».'
+
+
+def _deterministic_language(language: str) -> str:
+    """Keep Gulf dialects narrator-only; deterministic clinical copy uses MSA."""
+    return "ar" if language in _GULF_DIALECT_KEYS else language
+
+
+def _governance_blocked_fallback(message: str, language: str) -> str:
+    """Useful fail-closed copy when external narration is not authorized."""
+    if language == "en":
+        return (
+            "I can keep helping with IAmina's local functions. Ask me for a specific recorded item — "
+            "glucose, meals, sleep, stress, recorded treatment, CGM or documents — "
+            "or ask what I can do."
+        )
+    if language == "ar-MA" and not _ARABIC_RE.search(message):
+        return (
+            "N9der nkemmel m3ak b fonctions locales dyal IAmina. Sowlni 3la data m7edda msjla — "
+            "sucre, makla, n3as, stress, traitement msjjel, CGM wela documents — "
+            "wela sowlni chno n9der ndir."
+        )
+    if language in _ARABIC_LANGUAGE_KEYS:
+        return (
+            "نقدر نكمل معك بوظائف IAmina المحلية. اسألني عن معلومة محددة ومسجلة مثل السكر، الوجبات، "
+            "النوم، التوتر، العلاج المسجل، CGM أو الوثائق، أو اسألني ماذا أستطيع أن أفعل."
+        )
+    return (
+        "Je peux continuer avec les fonctions locales d’IAMINA. Demande-moi une donnée précise enregistrée — "
+        "glycémie, repas, sommeil, stress, traitement enregistré, CGM ou documents — "
+        "ou demande-moi ce que je sais faire."
+    )
+
+
+def is_governance_blocked_reply(reply: str, message: str, language: str) -> bool:
+    """Identify the exact fail-closed processor-policy fallback.
+
+    This is response metadata, not a substitute for the processor authorization gate.
+    """
+    detected = detect_language(message, language)
+    return reply == _governance_blocked_fallback(
+        message, _deterministic_language(detected)
+    )
+
+
+def _get_context(patient, context_days: int, language: str = "fr") -> DomainContext:
+    domain_language = _deterministic_language(language)
+    if patient is None:
+        return DomainContext.empty(language=domain_language)
+    return get_domain_context(patient.id, language=domain_language, days=context_days)
+
+
+def _get_companion_context(patient, language: str = "fr") -> CompanionContext:
+    domain_language = _deterministic_language(language)
+    if patient is None:
+        return CompanionContext.empty(language=domain_language)
+    return get_companion_context(patient.id, language=domain_language)
+
+
+def _is_emotional(message: str) -> bool:
+    return bool(_EMOTIONAL_RE.search(message))
+
+
+def _response_mode(message: str) -> str:
+    if _is_emotional(message):
+        return "emotional"
+    if _RECAP_RE.search(message):
+        return "recap"
+    if _CLINICIAN_PREP_RE.search(message):
+        return "clinician_prep"
+    return "practical"
+
+
+def _is_weekly_request(message: str) -> bool:
+    return bool(_WEEK_RE.search(message))
+
+
+def _effective_context_days(message: str, default_days: int) -> int:
+    """Use a 7-day clinical window when the user explicitly asks for the week."""
+    return 7 if _is_weekly_request(message) else default_days
+
+
+def _normalize_reply(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _is_verbatim_repeat(reply: str, patient, mode: str) -> bool:
+    if mode == "emotional":
+        return False
+    history_limit = 20 if mode == "recap" else 1
+    previous = _recent_turns(patient, history_limit, role="assistant")
+    if not previous:
+        return False
+    normalized_reply = _normalize_reply(reply)
+    return any(normalized_reply == _normalize_reply(turn.message) for turn in previous)
+
+
+def _contains_evening_anchor(language: str, text: str) -> bool:
+    normalized = _normalize_reply(text)
+    return any(
+        _normalize_reply(marker) in normalized
+        for marker in _EVENING_MARKERS.get(language, ())
+    )
+
+
+def _history_has_evening_constraint(patient, language: str) -> bool:
+    return any(
+        _contains_evening_anchor(language, turn.message)
+        for turn in _recent_turns(patient, 20, role="user")
+    )
+
+
+def _history_has_clinician_prep(patient) -> bool:
+    return any(
+        _CLINICIAN_PREP_RE.search(turn.message)
+        for turn in _recent_turns(patient, 20, role="user")
+    )
+
+
+def _needs_continuity_retry(
+    reply: str,
+    message: str,
+    patient,
+    mode: str,
+    language: str,
+) -> bool:
+    if _is_verbatim_repeat(reply, patient, mode):
+        return True
+    if mode == "practical":
+        message_has_evening = _contains_evening_anchor(language, message)
+        reply_has_evening = _contains_evening_anchor(language, reply)
+        return message_has_evening != reply_has_evening
+    if mode == "recap":
+        return _history_has_evening_constraint(patient, language) and not _contains_evening_anchor(
+            language, reply
+        )
+    return False
+
+
+def _contextual_continuity_fallback(
+    *,
+    message: str,
+    patient,
+    language: str,
+    mode: str,
+    prefer_latin_script: bool,
+) -> str | None:
+    if mode == "practical" and _contains_evening_anchor(language, message):
+        if language == "ar-MA" and prefer_latin_script:
+            return _DARIJA_LATIN_EVENING_PRACTICAL
+        return _EVENING_PRACTICAL_FALLBACKS.get(language)
+    if (
+        mode == "recap"
+        and _history_has_evening_constraint(patient, language)
+        and _history_has_clinician_prep(patient)
+    ):
+        if language == "ar-MA" and prefer_latin_script:
+            return _DARIJA_LATIN_EVENING_RECAP
+        return _EVENING_RECAP_FALLBACKS.get(language)
+    return None
+
+
+def _continuity_retry_prompt(user_prompt: str, mode: str) -> str:
+    instruction = (
+        "\n[CONTINUITY_RETRY]\n"
+        "La première réponse ne respecte pas le contrat de continuité et est rejetée. "
+        "Réponds au message courant avec une formulation réellement nouvelle. "
+        "Utilise seulement les contraintes pratiques explicitement données; "
+        "n'invente aucune action santé/comportementale, mesure, repas, activité ou dose."
+    )
+    if mode == "recap":
+        instruction += (
+            " Résume réellement tout ce qui a été convenu dans l'historique, "
+            "au format demandé, sans recycler une réponse précédente."
+        )
+    return user_prompt + instruction
+
+
+def detect_language(message: str, default: str) -> str:
+    if default in _ARABIC_LANGUAGE_KEYS:
+        return default
+    if _ARABIC_RE.search(message) or _DARIJA_LATIN_RE.search(message):
+        return "ar-MA"
+    return default
+
+
+def _trim_history(history_turns, char_budget: int, patient=None) -> str:
+    messages = list(reversed(list(history_turns)))
+    summary_budget = char_budget // 5
+    window_budget = char_budget - summary_budget
+    result: list[str] = []
+    used = 0
+    for item in reversed(messages):
+        line = f"{item.role}: {item.message}"
+        if used + len(line) > window_budget:
+            break
+        result.insert(0, line)
+        used += len(line)
+
+    history_text = "\n".join(result) if result else ""
+    if patient is not None:
+        total = _turn_count(patient)
+        skipped = total - len(result)
+        if skipped > 0:
+            older_turns = _recent_turns(patient, 10, offset=len(result))
+            snippets = " / ".join(
+                turn.message[:40].replace("\n", " ")
+                for turn in reversed(older_turns)
+                if turn.role == "user"
+            )
+            summary = f"[{total} messages au total — {skipped} non affichés — thèmes: {snippets[:200]}]"
+            history_text = summary + "\n" + history_text if history_text else summary
+    return history_text or "Pas d'historique."
+
+
+def _companion_context_block(context: CompanionContext) -> str:
+    """Serialize approved longitudinal state without inventing interpretation."""
+    lines = [
+        "Contexte compagnon gouverné",
+        f"pattern_status={context.pattern_status}",
+        f"review_status={context.review_status}",
+        f"source_version={context.source_version}",
+    ]
+    if context.review_anchor_captured_at:
+        lines.append(f"review_anchor={context.review_anchor_captured_at}")
+
+    for item in context.patterns[:3]:
+        limitations = ",".join(item.limitations) if item.limitations else "none"
+        lines.append(
+            "pattern="
+            f"{item.observation_key};state={item.current_state};"
+            f"evidence_density={item.evidence_density};"
+            f"source_version={item.source_version};limitations={limitations}"
+        )
+
+    for item in context.changes_since_review[:3]:
+        missing = ",".join(item.missing_data) if item.missing_data else "none"
+        lines.append(
+            "change="
+            f"{item.observation_key};kind={item.change_kind};"
+            f"evidence_strength={item.evidence_strength};"
+            f"source_version={item.source_version};missing_data={missing}"
+        )
+
+    lines.append(
+        "after_visit="
+        f"{context.after_visit.status};fact_count={context.after_visit.fact_count}"
+    )
+    lines.append(f"safety_notice={context.safety_notice}")
+    lines.append(
+        "NARRATION_RULE=Describe only the approved state above. Do not infer "
+        "diagnosis, causality, priority, treatment, dose or proactive eligibility."
+    )
+    return "\n".join(lines)
+
+
+def _relationship_memory_summary(memory) -> str:
+    if memory is None:
+        return "Aucune donnée relationnelle mémorisée."
+    parts: list[str] = []
+    if memory.emotional_signals:
+        recent = list(dict.fromkeys(memory.emotional_signals))[-2:]
+        parts.append(f"état émotionnel: {', '.join(recent)}")
+    if memory.last_concern:
+        parts.append(f"dernière préoccupation: {memory.last_concern[:60]}")
+    return " | ".join(parts) if parts else "Aucune donnée relationnelle mémorisée."
+
+
+def _safe_text(pseudonymizer: PHIPseudonymizer, first_name: str, text: str) -> str:
+    if not first_name:
+        return text
+    return pseudonymizer.mask_patient_identity(first_name, text)[1]
+
+
+def _build_runtime_prompt(
+    *,
+    message: str,
+    memory,
+    deep,
+    language: str,
+    patient,
+    context_days: int,
+    streaming: bool,
+    preloaded_context: DomainContext | None = None,
+    advice_decision: AdviceDecision | None = None,
+):
+    language = detect_language(message, language)
+    pseudonymizer = PHIPseudonymizer()
+    first_name = (patient.first_name or "") if patient is not None else ""
+    safe_message = _safe_text(pseudonymizer, first_name, message)
+
+    history = _trim_history(
+        _recent_turns(patient, 10),
+        _HISTORY_CHAR_BUDGET,
+        patient=patient,
+    )
+    ctx = preloaded_context or _get_context(patient, context_days, language)
+    may_use_clinical_context = (
+        advice_decision is None
+        or clinical_context_authorized(advice_decision)
+    )
+    prompt_ctx = (
+        ctx
+        if may_use_clinical_context
+        else DomainContext.empty(language=language)
+    )
+    companion_ctx = (
+        _get_companion_context(patient, language)
+        if may_use_clinical_context
+        else CompanionContext.empty(language=language)
+    )
+    emotional = _is_emotional(message)
+    mode = _response_mode(message)
+
+    tone_ctx = select_relationship_tone(
+        emotional=emotional,
+        streak_days=deep.consecutive_log_days,
+    )
+    state = compute_state(memory, deep, prompt_ctx)
+
+    system = SYSTEM_WITH_STATE.format(
+        language=get_language_label(language),
+        tone=tone_ctx.mode.value,
+        state=state_to_prompt(state),
+    )
+    if streaming:
+        system = system.replace(
+            "- Répondre UNIQUEMENT en JSON valide, sans texte avant ni après.\n",
+            "",
+        )
+        system += _STREAM_SUFFIX
+    system += "\n" + get_tone_instruction(tone_ctx)
+    if advice_decision is not None:
+        system += "\n\n" + narration_policy_block(advice_decision)
+
+    if not emotional and may_use_clinical_context:
+        if prompt_ctx.pivot_text:
+            system += f"\n\nContexte de session approuvé\n{prompt_ctx.pivot_text}"
+        system += "\n\n" + _companion_context_block(companion_ctx)
+
+    memory_summary = _safe_text(
+        pseudonymizer,
+        first_name,
+        _relationship_memory_summary(memory),
+    )
+    safe_history = _safe_text(pseudonymizer, first_name, history)
+
+    prompt_template = EMOTIONAL_USER if emotional else CHAT_USER
+    base_prompt = prompt_template.format(
+        memory=memory_summary,
+        history=safe_history,
+        message=safe_message,
+    )
+    if mode == "recap":
+        base_prompt += (
+            "\n[MODE: RECAP] Synthétise tout l'historique réellement convenu, "
+            "sans reprendre mot pour mot une ancienne réponse."
+        )
+    if streaming:
+        json_tag = "\nRéponds UNIQUEMENT en JSON:"
+        if json_tag in base_prompt:
+            base_prompt = base_prompt[: base_prompt.index(json_tag)].rstrip()
+            base_prompt += "\n\nContrainte: MAX 2 phrases, 40 mots. Texte simple, sans JSON."
+
+    variety_hint = ""
+    previous = _recent_turns(patient, 1, role="assistant")
+    if previous:
+        previous_reply = previous[0].message
+        opener = previous_reply[:12].lower()
+        hints: list[str] = []
+        if any(word in opener for word in ("salam", "bonjour", "ana iamina", "kanfhemek")):
+            hints.append("change l'accroche")
+        if not emotional and re.search(
+            r"\b(?:tableau|checklist|rappel|jour 1|jour 2)\b",
+            previous_reply,
+            re.IGNORECASE,
+        ):
+            hints.append("ne répète pas la même liste; donne une seule simplification adaptée")
+        if hints:
+            variety_hint = "\n[STYLE: " + "; ".join(hints) + "]"
+
+    return language, ctx, system, base_prompt + variety_hint
+
+
+def _authorize_runtime_narration(
+    message: str,
+    patient,
+    language: str,
+    context_days: int,
+):
+    """Resolve deterministic narration authority before any LLM is acquired/called."""
+
+    detected_language = detect_language(message, language)
+    ctx = _get_context(patient, context_days, detected_language)
+
+    try:
+        previous_user_message = None
+        if patient is not None:
+            previous_user_turns = _recent_turns(patient, 1, role="user")
+            if previous_user_turns:
+                previous_user_message = previous_user_turns[0].message
+        module_resolution = get_advice_resolution(
+            patient.id if patient else None,
+            message,
+            ctx,
+            language=detected_language,
+            previous_user_message=previous_user_message,
+        )
+    except Exception:
+        logger.exception("IAmina module advice policy failed closed")
+        decision = AdviceDecision.fail_closed(language=detected_language)
+        return detected_language, ctx, decision, None
+
+    if module_resolution is not None:
+        return detected_language, ctx, module_resolution.decision, module_resolution
+
+    try:
+        decision = authorize_narration(
+            NarrationPolicyRequest(
+                mode=NarrationMode(_response_mode(message)),
+                language=detected_language,
+                has_approved_context=bool(ctx.pivot_text),
+                has_sufficient_data=ctx.has_sufficient_data,
+                analysis_status=ctx.analysis_status,
+            )
+        )
+    except Exception:
+        logger.exception("IAmina clinical policy evaluation failed closed")
+        decision = AdviceDecision.fail_closed(language=detected_language)
+    return detected_language, ctx, decision, None
+
+
+def _policy_denied_reply(
+    patient,
+    ctx: DomainContext,
+    language: str,
+) -> str:
+    del patient, ctx
+    return policy_denied_reply(_deterministic_language(language))
+
+
+def _safety_reply(message: str, patient, language: str) -> str | None:
+    decision = evaluate_input_safety(message)
+    deterministic_language = _deterministic_language(language)
+    if decision.action == URGENT:
+        return compose_emergency_for_patient(
+            decision,
+            patient=patient,
+            language=deterministic_language,
+            message=message,
+        ).reply
+    if decision.action in (INSULIN_BLOCK, PRESCRIPTION_BLOCK):
+        if language == "ar-MA" and _ARABIC_RE.search(message):
+            return _DARIJA_AR_NO_PRESCRIPTION
+        if language in _GULF_NO_PRESCRIPTION:
+            return _GULF_NO_PRESCRIPTION[language]
+        return no_prescription_message(deterministic_language)
+    return None
+
+
+def _finalize_reply(
+    reply: str,
+    deep,
+    language: str,
+    *,
+    approved_session_context: bool = False,
+    mode: str = "practical",
+    weekly: bool = False,
+    prefer_latin_script: bool = False,
+) -> str:
+    reply = apply_advice_throttle(reply, deep)
+    reply = apply_no_prescription_policy(reply, _deterministic_language(language))
+    reply = guard_narrator_output(
+        reply,
+        language=language,
+        approved_session_context=approved_session_context,
+        mode=mode,
+        weekly=weekly,
+        prefer_latin_script=prefer_latin_script,
+    )
+    deep.save()
+    return reply
+
+
+def _update_relationship_memory(message: str, memory) -> None:
+    if memory is None:
+        return
+    _detect_emotional_signals(message, memory)
+    memory.save()
+
+
+def _retry_finalized_repeat(
+    *,
+    reply: str,
+    message: str,
+    llm,
+    system: str,
+    user_prompt: str,
+    deep,
+    language: str,
+    patient,
+    ctx,
+    prefer_latin_script: bool,
+) -> str:
+    mode = _response_mode(message)
+    if not _needs_continuity_retry(reply, message, patient, mode, language):
+        return reply
+
+    contextual_fallback = _contextual_continuity_fallback(
+        message=message,
+        patient=patient,
+        language=language,
+        mode=mode,
+        prefer_latin_script=prefer_latin_script,
+    )
+    try:
+        result = llm.complete(system, _continuity_retry_prompt(user_prompt, mode))
+        parsed = parse_llm_json(result.content, ["reply"])
+        retry_reply = parsed["reply"]
+    except Exception:
+        logger.exception(
+            "IAmina continuity retry failed for patient=%s",
+            patient.id if patient else None,
+        )
+        if contextual_fallback is None:
+            return reply
+        return guard_narrator_output(
+            contextual_fallback,
+            language=language,
+            approved_session_context=bool(ctx.pivot_text),
+            mode=mode,
+            weekly=_is_weekly_request(message),
+            prefer_latin_script=prefer_latin_script,
+        )
+
+    finalized_retry = _finalize_reply(
+        retry_reply,
+        deep,
+        language,
+        approved_session_context=bool(ctx.pivot_text),
+        mode=mode,
+        weekly=_is_weekly_request(message),
+        prefer_latin_script=prefer_latin_script,
+    )
+    if not _needs_continuity_retry(
+        finalized_retry,
+        message,
+        patient,
+        mode,
+        language,
+    ):
+        return finalized_retry
+    if contextual_fallback is None:
+        return reply
+    return guard_narrator_output(
+        contextual_fallback,
+        language=language,
+        approved_session_context=bool(ctx.pivot_text),
+        mode=mode,
+        weekly=_is_weekly_request(message),
+        prefer_latin_script=prefer_latin_script,
+    )
+
+
+def chat(
+    message: str,
+    memory,
+    deep,
+    llm=None,
+    language: str = "fr",
+    patient=None,
+    context_days: int = 14,
+) -> str:
+    """Narrator-only conversational path over deterministic governed context."""
+    safety_reply = _safety_reply(message, patient, language)
+    if safety_reply is not None:
+        record_companion_route("safety")
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", safety_reply)
+        _update_relationship_memory(message, memory)
+        return safety_reply
+
+    detected_language = detect_language(message, language)
+    local_meta_reply = _local_conversation_meta_reply(
+        message,
+        patient,
+        _deterministic_language(detected_language),
+    )
+    if local_meta_reply is not None:
+        record_companion_route("zero_model")
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", local_meta_reply)
+        _update_relationship_memory(message, memory)
+        return local_meta_reply
+
+    zero_model_reply = exact_chitchat_reply(
+        message,
+        _deterministic_language(detected_language),
+    )
+    if zero_model_reply is not None:
+        record_companion_route("zero_model")
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", zero_model_reply)
+        _update_relationship_memory(message, memory)
+        return zero_model_reply
+
+    context_days = _effective_context_days(message, context_days)
+    language, ctx, advice_decision, advice_resolution = _authorize_runtime_narration(
+        message,
+        patient,
+        language,
+        context_days,
+    )
+    if advice_resolution is not None:
+        try:
+            reply = verify_advice_reply(
+                patient.id if patient else None,
+                advice_resolution,
+                advice_resolution.reply,
+            )
+            _shadow_narration_envelope(
+                advice_resolution,
+                patient_id=patient.id if patient else None,
+                language=language,
+                prefer_latin_script=(
+                    language == "ar-MA" and not _ARABIC_RE.search(message)
+                ),
+                internal_shadow_authorized=bool(
+                    patient
+                    and getattr(patient, "is_active", False)
+                    and getattr(patient, "is_staff", False)
+                ),
+            )
+            record_clinical_decision_audit(
+                patient=patient,
+                decision=advice_resolution.decision,
+                verifier_status="passed",
+                final_reply=reply,
+            )
+        except Exception:
+            logger.exception("IAmina governed advice verification/audit failed closed")
+            record_companion_route("policy_denied")
+            reply = _policy_denied_reply(patient, ctx, language)
+            try:
+                record_clinical_decision_audit(
+                    patient=patient,
+                    decision=advice_resolution.decision,
+                    verifier_status="rejected",
+                    final_reply=reply,
+                )
+            except Exception:
+                logger.exception("IAmina rejected advice audit persistence failed")
+            _append_turn(patient, "user", message)
+            _append_turn(patient, "assistant", reply)
+            _update_relationship_memory(message, memory)
+            return reply
+        record_companion_route("policy_rule")
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", reply)
+        _update_relationship_memory(message, memory)
+        return reply
+
+    if not narration_authorized(advice_decision):
+        record_companion_route("policy_denied")
+        reply = _policy_denied_reply(patient, ctx, language)
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", reply)
+        _update_relationship_memory(message, memory)
+        return reply
+
+    record_companion_route("llm")
+    if llm is None:
+        llm = get_gateway_llm()
+
+    language, ctx, system, user_prompt = _build_runtime_prompt(
+        message=message,
+        memory=memory,
+        deep=deep,
+        language=language,
+        patient=patient,
+        context_days=context_days,
+        streaming=False,
+        preloaded_context=ctx,
+        advice_decision=advice_decision,
+    )
+    _append_turn(patient, "user", message)
+    prefer_latin_script = language == "ar-MA" and not _ARABIC_RE.search(message)
+
+    provider_policy_denied = False
+    try:
+        result = llm.complete(system, user_prompt)
+        parsed = parse_llm_json(result.content, ["reply"])
+        reply = parsed["reply"]
+    except AIProcessorPolicyDenied:
+        provider_policy_denied = True
+        logger.warning(
+            "IAmina external narration denied by processor policy for patient=%s",
+            patient.id if patient else None,
+        )
+        reply = _governance_blocked_fallback(
+            message,
+            _deterministic_language(language),
+        )
+    except Exception:
+        logger.exception(
+            "IAmina conversation.chat failed for patient=%s",
+            patient.id if patient else None,
+        )
+        reply = get_offline_fallback(
+            patient.id if patient else None,
+            ctx,
+            _deterministic_language(language),
+        )
+
+    if not provider_policy_denied:
+        reply = _finalize_reply(
+            reply,
+            deep,
+            language,
+            approved_session_context=bool(ctx.pivot_text),
+            mode=_response_mode(message),
+            weekly=_is_weekly_request(message),
+            prefer_latin_script=prefer_latin_script,
+        )
+        reply = _retry_finalized_repeat(
+            reply=reply,
+            message=message,
+            llm=llm,
+            system=system,
+            user_prompt=user_prompt,
+            deep=deep,
+            language=language,
+            patient=patient,
+            ctx=ctx,
+            prefer_latin_script=prefer_latin_script,
+        )
+    _append_turn(patient, "assistant", reply)
+    _update_relationship_memory(message, memory)
+    return reply
+
+
+def stream_chat(
+    message: str,
+    memory,
+    deep,
+    llm=None,
+    language: str = "fr",
+    patient=None,
+    context_days: int = 14,
+):
+    """Narrator-only SSE path; guard the full reply before emitting any chunk."""
+    safety_reply = _safety_reply(message, patient, language)
+    if safety_reply is not None:
+        record_companion_route("safety")
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", safety_reply)
+        _update_relationship_memory(message, memory)
+        yield safety_reply
+        return
+
+    detected_language = detect_language(message, language)
+    local_meta_reply = _local_conversation_meta_reply(
+        message,
+        patient,
+        _deterministic_language(detected_language),
+    )
+    if local_meta_reply is not None:
+        record_companion_route("zero_model")
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", local_meta_reply)
+        _update_relationship_memory(message, memory)
+        yield local_meta_reply
+        return
+
+    zero_model_reply = exact_chitchat_reply(
+        message,
+        _deterministic_language(detected_language),
+    )
+    if zero_model_reply is not None:
+        record_companion_route("zero_model")
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", zero_model_reply)
+        _update_relationship_memory(message, memory)
+        yield zero_model_reply
+        return
+
+    context_days = _effective_context_days(message, context_days)
+    language, ctx, advice_decision, advice_resolution = _authorize_runtime_narration(
+        message,
+        patient,
+        language,
+        context_days,
+    )
+    if advice_resolution is not None:
+        try:
+            reply = verify_advice_reply(
+                patient.id if patient else None,
+                advice_resolution,
+                advice_resolution.reply,
+            )
+            _shadow_narration_envelope(
+                advice_resolution,
+                patient_id=patient.id if patient else None,
+                language=language,
+                prefer_latin_script=(
+                    language == "ar-MA" and not _ARABIC_RE.search(message)
+                ),
+                internal_shadow_authorized=bool(
+                    patient
+                    and getattr(patient, "is_active", False)
+                    and getattr(patient, "is_staff", False)
+                ),
+            )
+            record_clinical_decision_audit(
+                patient=patient,
+                decision=advice_resolution.decision,
+                verifier_status="passed",
+                final_reply=reply,
+            )
+        except Exception:
+            logger.exception("IAmina governed advice verification/audit failed closed")
+            record_companion_route("policy_denied")
+            reply = _policy_denied_reply(patient, ctx, language)
+            try:
+                record_clinical_decision_audit(
+                    patient=patient,
+                    decision=advice_resolution.decision,
+                    verifier_status="rejected",
+                    final_reply=reply,
+                )
+            except Exception:
+                logger.exception("IAmina rejected advice audit persistence failed")
+            _append_turn(patient, "user", message)
+            _append_turn(patient, "assistant", reply)
+            _update_relationship_memory(message, memory)
+            yield reply
+            return
+        record_companion_route("policy_rule")
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", reply)
+        _update_relationship_memory(message, memory)
+        yield reply
+        return
+
+    if not narration_authorized(advice_decision):
+        record_companion_route("policy_denied")
+        reply = _policy_denied_reply(patient, ctx, language)
+        _append_turn(patient, "user", message)
+        _append_turn(patient, "assistant", reply)
+        _update_relationship_memory(message, memory)
+        yield reply
+        return
+
+    record_companion_route("llm")
+    if llm is None:
+        llm = get_gateway_llm()
+
+    language, ctx, system, user_prompt = _build_runtime_prompt(
+        message=message,
+        memory=memory,
+        deep=deep,
+        language=language,
+        patient=patient,
+        context_days=context_days,
+        streaming=True,
+        preloaded_context=ctx,
+        advice_decision=advice_decision,
+    )
+    _append_turn(patient, "user", message)
+    prefer_latin_script = language == "ar-MA" and not _ARABIC_RE.search(message)
+
+    provider_policy_denied = False
+    try:
+        result = llm.complete(system, user_prompt)
+        full_reply = result.content
+    except AIProcessorPolicyDenied:
+        provider_policy_denied = True
+        logger.warning(
+            "IAmina stream external narration denied by processor policy for patient=%s",
+            patient.id if patient else None,
+        )
+        full_reply = _governance_blocked_fallback(
+            message,
+            _deterministic_language(language),
+        )
+    except Exception:
+        logger.exception(
+            "IAmina stream_chat buffered fallback failed for patient=%s",
+            patient.id if patient else None,
+        )
+        full_reply = get_offline_fallback(
+            patient.id if patient else None,
+            ctx,
+            _deterministic_language(language),
+        )
+
+    if not provider_policy_denied:
+        full_reply = _finalize_reply(
+            full_reply,
+            deep,
+            language,
+            approved_session_context=bool(ctx.pivot_text),
+            mode=_response_mode(message),
+            weekly=_is_weekly_request(message),
+            prefer_latin_script=prefer_latin_script,
+        )
+        full_reply = _retry_finalized_repeat(
+            reply=full_reply,
+            message=message,
+            llm=llm,
+            system=system,
+            user_prompt=user_prompt,
+            deep=deep,
+            language=language,
+            patient=patient,
+            ctx=ctx,
+            prefer_latin_script=prefer_latin_script,
+        )
+    _append_turn(patient, "assistant", full_reply)
+    _update_relationship_memory(message, memory)
+    yield full_reply
