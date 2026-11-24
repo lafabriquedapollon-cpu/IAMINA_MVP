@@ -66,7 +66,7 @@ jobs:
 
   flutter-web-baseline:
     needs: snapshot-source-checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       FLUTTER_SUPPRESS_ANALYTICS: "true"
