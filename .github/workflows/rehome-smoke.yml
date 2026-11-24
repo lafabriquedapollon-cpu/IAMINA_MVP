@@ -96,6 +96,14 @@ jobs:
           git diff --exit-code -- pubspec.lock
       - name: Analyze Flutter
         run: flutter analyze --no-fatal-infos --no-pub
+- name: Targeted synthetic Flutter VM regressions
+        run: |
+          flutter test --no-pub --reporter expanded \
+            test/data/drift/patient_vault_scope_test.dart \
+            test/data/drift/patient_vault_profile_write_isolation_test.dart \
+            test/services/patient_vault_session_controller_test.dart \
+            test/services/sync_service_test.dart
+
       - name: Build Web without deployment or CDN
         run: flutter build web --release --no-pub --no-web-resources-cdn --dart-define=API_BASE_URL=http://127.0.0.1:8000
       - name: Verify PWA files
@@ -133,6 +141,7 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/iamina_r2_ci
       REDIS_URL: redis://127.0.0.1:6379/0
       FIREBASE_CREDENTIALS_PATH: ""
+      ENABLE_FIREBASE_MIGRATION: "False"
       GEMINI_API_KEY: ""
       GOOGLE_API_KEY: ""
       GROQ_API_KEY: ""
@@ -181,3 +190,10 @@ jobs:
           python manage.py makemigrations --check --dry-run
       - name: Targeted synthetic health regression
         run: python -m pytest diabetes/tests/test_health_endpoint.py --tb=short -q
+- name: Targeted synthetic PostgreSQL and egress regressions
+        run: |
+          python -m pytest --tb=short -q \
+            diabetes/tests/test_entries.py \
+            diabetes/tests/test_d7_profile_http_isolation.py \
+            core/tests/test_ai_egress_boundary_gate.py
+
