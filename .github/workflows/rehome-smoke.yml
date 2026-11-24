@@ -119,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/r2-browser-venv"
-          "$RUNNER_TEMP/r2-browser-venv/bin/python" -m pip install playwright==1.55.0
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
           "$RUNNER_TEMP/r2-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
       - name: Real browser first-use baseline FR and AR
         working-directory: .
@@ -135,6 +135,7 @@ jobs:
           import os
           import pathlib
           import threading
+          from PIL import Image
           from playwright.sync_api import sync_playwright
 
           web = pathlib.Path("frontend/build/web").resolve()
@@ -213,9 +214,24 @@ jobs:
                                           result["page_errors"] = len(errors)
                                           try:
                                               shot = proof / (label + ".png")
-                                              page.screenshot(path=str(shot), timeout=10000)
+                                              # Wait for actual painted pixels; semantics alone is insufficient.
+                                              for attempt in range(12):
+                                                  page.screenshot(path=str(shot), timeout=10000)
+                                                  with Image.open(shot) as png:
+                                                      rgb = png.convert("RGB")
+                                                      assert rgb.size == (width, height)
+                                                      logo = rgb.crop((width // 2 - 66, 22, width // 2 + 66, 154))
+                                                      teal = sum(1 for r, g, b in logo.getdata()
+                                                                 if r < 90 and g < 160 and b < 150 and g > r + 15)
+                                                      spread = max(hi - lo for lo, hi in rgb.getextrema())
+                                                  result["logo_teal_pixels"] = teal
+                                                  result["pixel_range"] = spread
+                                                  if teal >= 2000 and spread >= 80:
+                                                      break
+                                                  page.wait_for_timeout(500)
                                               result["screenshot_sha256"] = hashlib.sha256(shot.read_bytes()).hexdigest()
                                               assert shot.stat().st_size >= 1000
+                                              assert teal >= 2000 and spread >= 80, "Visual logo/paint gate failed"
                                           except Exception:
                                               result["result"] = "FAIL"
                                               result["screenshot_error"] = True

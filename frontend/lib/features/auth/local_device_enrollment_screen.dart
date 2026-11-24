@@ -71,7 +71,7 @@ class _LocalDeviceEnrollmentScreenState
                             fit: BoxFit.contain,
                             filterQuality: FilterQuality.high,
                             color: AminaTheme.isDark(context) ? Colors.white : null,
-                            colorBlendMode: BlendMode.srcIn,
+                            colorBlendMode: dark ? BlendMode.srcIn : null,
                             errorBuilder: (_, __, ___) => const _LogoFallback(),
                           ),
                         ),
