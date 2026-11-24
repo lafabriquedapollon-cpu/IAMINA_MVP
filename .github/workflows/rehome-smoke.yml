@@ -67,7 +67,7 @@ jobs:
   flutter-web-baseline:
     needs: snapshot-source-checks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       FLUTTER_SUPPRESS_ANALYTICS: "true"
       CI: "true"
@@ -113,6 +113,127 @@ jobs:
             test -s "build/web/$f"
           done
           echo R2_FLUTTER_BUILD_PASS
+
+
+      - name: Install pinned Playwright Chromium and WebKit
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/r2-browser-venv"
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" -m pip install playwright==1.55.0
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
+      - name: Real browser first-use baseline FR and AR
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" - <<'PY'
+          import hashlib
+          import http.server
+          import json
+          import os
+          import pathlib
+          import threading
+          from playwright.sync_api import sync_playwright
+
+          web = pathlib.Path("frontend/build/web").resolve()
+          proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r2-browser-proof"
+          proof.mkdir()
+          assert (web / "index.html").is_file()
+          results = []
+          class Handler(http.server.SimpleHTTPRequestHandler):
+              def __init__(self, *args, **kwargs):
+                  super().__init__(*args, directory=str(web), **kwargs)
+              def log_message(self, *_args):
+                  pass
+
+          with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+              worker = threading.Thread(target=server.serve_forever, daemon=True)
+              worker.start()
+              origin = f"http://127.0.0.1:{server.server_address[1]}"
+              try:
+                  with sync_playwright() as pw:
+                      for engine in ("chromium", "webkit"):
+                          browser = getattr(pw, engine).launch(headless=True)
+                          try:
+                              for locale, cta in (("fr-FR", "Configurer cet appareil"),
+                                                  ("ar-MA", "إعداد هذا الجهاز")):
+                                  for width, height in ((390, 844), (1180, 860)):
+                                      label = f"{engine}-{locale}-{width}x{height}"
+                                      result = dict(engine=engine, browser_version=browser.version,
+                                                    locale=locale, viewport=[width, height],
+                                                    source_sha=os.environ["EXPECTED_SHA"],
+                                                    result="FAIL")
+                                      results.append(result)
+                                      context = browser.new_context(
+                                          locale=locale, viewport={"width": width, "height": height},
+                                          device_scale_factor=1, service_workers="block")
+                                      blocked, errors = [], []
+                                      page = context.new_page()
+                                      page.on("pageerror", lambda err: errors.append(str(err)))
+                                      def local_only(route):
+                                          request = route.request
+                                          url = request.url
+                                          if url.startswith(("data:", "blob:")):
+                                              route.continue_()
+                                          elif (url.startswith(origin + "/") and
+                                                request.method in ("GET", "HEAD") and
+                                                "/api/" not in url.lower()):
+                                              route.continue_()
+                                          else:
+                                              blocked.append((request.method, "/api/" in url.lower()))
+                                              route.abort()
+                                      context.route("**/*", local_only)
+                                      try:
+                                          response = page.goto(origin, wait_until="domcontentloaded", timeout=60000)
+                                          assert response and response.status == 200
+                                          page.wait_for_selector("flutter-view, flt-glass-pane", timeout=60000)
+                                          placeholder = page.locator("flt-semantics-placeholder")
+                                          if placeholder.count():
+                                              placeholder.evaluate("(element) => element.click()")
+                                          button = page.get_by_role("button", name=cta, exact=True)
+                                          button.wait_for(state="visible", timeout=30000)
+                                          assert button.is_enabled()
+                                          page.wait_for_timeout(500)
+                                          assert not errors, "JavaScript page errors"
+                                          assert not any(m not in ("GET", "HEAD", "OPTIONS") or api
+                                                         for m, api in blocked), "Blocked write or API attempt"
+                                          result["result"] = "PASS"
+                                      except Exception as exc:
+                                          result["failure_type"] = type(exc).__name__
+                                          print(f"R2_BROWSER {label} FAIL: {type(exc).__name__}", flush=True)
+                                      finally:
+                                          result["blocked_requests"] = len(blocked)
+                                          result["page_errors"] = len(errors)
+                                          try:
+                                              shot = proof / (label + ".png")
+                                              page.screenshot(path=str(shot), timeout=10000)
+                                              result["screenshot_sha256"] = hashlib.sha256(shot.read_bytes()).hexdigest()
+                                              assert shot.stat().st_size >= 1000
+                                          except Exception:
+                                              result["result"] = "FAIL"
+                                              result["screenshot_error"] = True
+                                          finally:
+                                              context.close()
+                                              print("R2_BROWSER " + json.dumps(result), flush=True)
+                          finally:
+                              browser.close()
+              finally:
+                  server.shutdown()
+                  worker.join(timeout=5)
+                  (proof / "matrix.json").write_text(json.dumps(results, indent=2))
+          assert len(results) == 8 and all(r["result"] == "PASS" for r in results), "Browser matrix incomplete or failed"
+          print("R2_BROWSER_MATRIX_PASS 8/8")
+          PY
+      - name: Retain synthetic first-use screenshots and matrix
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-browser-first-use-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-browser-proof/
+          retention-days: 14
+          if-no-files-found: warn
 
   django-pg16-baseline:
     needs: snapshot-source-checks
