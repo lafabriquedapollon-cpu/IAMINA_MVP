@@ -1,4 +1,5 @@
 import 'package:amina/l10n/app_localizations.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -66,14 +67,29 @@ class _LocalDeviceEnrollmentScreenState
                         child: SizedBox(
                           width: 132,
                           height: 132,
-                          child: Image.asset(
-                            'assets/images/iamina_logo_vertical.png',
-                            fit: BoxFit.contain,
-                            filterQuality: FilterQuality.high,
-                            color: AminaTheme.isDark(context) ? Colors.white : null,
-                            colorBlendMode: dark ? BlendMode.srcIn : null,
-                            errorBuilder: (_, __, ___) => const _LogoFallback(),
-                          ),
+                          // Keep this local, precached brand asset in the
+                          // browser's native image layer on light-theme Web.
+                          // No external URL or credentials are involved.
+                          child: kIsWeb && !dark
+                              ? Image.network(
+                                  'assets/assets/images/iamina_logo_vertical.png',
+                                  webHtmlElementStrategy:
+                                      WebHtmlElementStrategy.prefer,
+                                  fit: BoxFit.contain,
+                                  excludeFromSemantics: true,
+                                  errorBuilder: (_, __, ___) =>
+                                      const _LogoFallback(),
+                                )
+                              : Image.asset(
+                                  'assets/images/iamina_logo_vertical.png',
+                                  fit: BoxFit.contain,
+                                  filterQuality: FilterQuality.high,
+                                  color: dark ? Colors.white : null,
+                                  colorBlendMode: dark ? BlendMode.srcIn : null,
+                                  excludeFromSemantics: true,
+                                  errorBuilder: (_, __, ___) =>
+                                      const _LogoFallback(),
+                                ),
                         ),
                       ),
                       const SizedBox(height: 28),

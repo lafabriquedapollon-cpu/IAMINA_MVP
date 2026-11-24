@@ -31,6 +31,20 @@ void main() {
     expect(source, isNot(contains('email')));
   });
 
+  test('local Web logo uses only the same-origin precached asset', () {
+    final source = File(
+      'lib/features/auth/local_device_enrollment_screen.dart',
+    ).readAsStringSync();
+    final worker = File('web/iamina_service_worker.js').readAsStringSync();
+    expect(source, contains('kIsWeb && !dark'));
+    expect(source, contains('WebHtmlElementStrategy.prefer'));
+    expect(source, contains("'assets/assets/images/iamina_logo_vertical.png'"));
+    expect(worker, contains("'./assets/assets/images/iamina_logo_vertical.png'"));
+    expect(source, contains("Image.asset("));
+    expect(source, isNot(contains('https://')));
+    expect(source, isNot(contains('http://')));
+  });
+
   test('local enrollment copy keeps explicit EN FR AR parity', () {
     final source = File(
       'lib/core/localization/auth_localized_copy.dart',
