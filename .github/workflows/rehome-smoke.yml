@@ -341,7 +341,11 @@ jobs:
               "r2-webkit-headed-app" if headed else
               "r2-enrollment-fixture" if fixture else "r2-browser-proof")
           if fixture:
-              proof = proof / ("semantics-" + semantics_mode)
+              from importlib.metadata import version
+              playwright_version = version("playwright")
+              assert playwright_version in ("1.55.0", "1.59.0"), "Unpinned Playwright version"
+              assert semantics_mode == "on", "Version experiment requires accessibility"
+              proof = proof / ("playwright-" + playwright_version)
           proof.mkdir(parents=True, exist_ok=experiment or fixture)
           if fixture:
               receipt = json.loads((proof.parent / "fixture-build.json").read_text())
@@ -603,6 +607,7 @@ jobs:
                                                     experiment="canvas-only" if experiment else "headed" if headed else "isolated-screen" if fixture else "baseline",
                                                     headed=headed,
                                                     fixture_semantics=semantics_mode if fixture else None,
+                                                    fixture_playwright=playwright_version if fixture else None,
                                                     locale=locale, viewport=[width, height],
                                                     source_sha=os.environ["EXPECTED_SHA"],
                                                     result="FAIL")
@@ -852,7 +857,7 @@ jobs:
               assert len(results) == 5, "Semantics arm matrix incomplete"
               assert all(r.get("resize_gate") == "PASS" for r in cold), "Semantics arm resize matrix failed"
               assert all(r["result"] == "PASS" for r in results), "Semantics arm initial or guard failed"
-              print("R2_SEMANTICS_DIAGNOSTIC_PASS", semantics_mode, "5/5; not product certification")
+              print("R2_ENGINE_DIAGNOSTIC_PASS", playwright_version, "5/5; not product certification")
           elif headed:
               assert len(results) == 8 and len(baseline) == 4, "Headed WebKit matrix incomplete"
               assert all(r.get("resize_gate") == "PASS" for r in cold), "Headed AR mobile resize matrix failed"
@@ -922,9 +927,9 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      - name: Reproduce actual enrollment screen without IAMINA bootstrap
+      - name: Compare pinned WebKit versions on identical enrollment fixture
         if: ${{ !cancelled() && steps.r2_browser.outcome == 'failure' }}
-        timeout-minutes: 12
+        timeout-minutes: 18
         working-directory: .
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -992,12 +997,17 @@ jobs:
               "interaction_disabled_by_test_scope": True,
           },indent=2))
           PY
-          # Both arms run even when the first fails; never replace an on-arm failure by off-arm success.
-          on_status=0
-          off_status=0
-          R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || on_status=$?
-          R2_FIXTURE_SEMANTICS=off "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || off_status=$?
-          printf 'R2_SEMANTICS_ARMS on=%s off=%s\n' "$on_status" "$off_status"
+          # Isolated environments, same fixture bytes, accessibility ON in both arms.
+          # Keep the existing browser toolchain intact; do not install system dependencies for B.
+          old_status=0
+          new_status=0
+          R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || old_status=$?
+          python3 -m venv "$RUNNER_TEMP/r2-engine-159"
+          "$RUNNER_TEMP/r2-engine-159/bin/python" -m pip install playwright==1.59.0 Pillow==11.3.0
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/r2-engine-159-browsers"
+          "$RUNNER_TEMP/r2-engine-159/bin/python" -m playwright install webkit
+          R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-engine-159/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || new_status=$?
+          printf 'R2_ENGINE_ARMS v155=%s v159=%s\n' "$old_status" "$new_status"
           python3 - <<'PY'
           import hashlib
           import json
@@ -1010,7 +1020,7 @@ jobs:
                     for p in sorted(web.rglob("*")) if p.is_file()}
           assert actual == expected, "Fixture build changed during experiment"
           PY
-          test "$on_status" -eq 0 && test "$off_status" -eq 0
+          test "$old_status" -eq 0 && test "$new_status" -eq 0
       - name: Retain isolated enrollment screen diagnostic
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
