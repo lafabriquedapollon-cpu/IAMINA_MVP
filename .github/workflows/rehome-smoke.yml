@@ -464,25 +464,34 @@ jobs:
               return page.evaluate("""() => {
                 const seen = new Set();
                 let nodes = 0, buttons = 0, placeholders = 0;
+                let activationButtons = 0, activeButtons = 0;
+                const buttonTags = [];
                 const walk = root => {
                   for (const e of root.querySelectorAll('*')) {
                     if (seen.has(e)) continue;
                     seen.add(e);
                     if (e.tagName === 'FLT-SEMANTICS') nodes++;
-                    if (e.getAttribute('role') === 'button') buttons++;
-                    if (e.tagName === 'FLT-SEMANTICS-PLACEHOLDER') placeholders++;
+                    const placeholder = e.tagName === 'FLT-SEMANTICS-PLACEHOLDER';
+                    if (placeholder) placeholders++;
+                    if (e.getAttribute('role') === 'button') {
+                      buttons++;
+                      buttonTags.push(e.tagName);
+                      if (placeholder) activationButtons++;
+                      else activeButtons++;
+                    }
                     if (e.shadowRoot) walk(e.shadowRoot);
                   }
                 };
                 walk(document);
-                return {nodes, buttons, placeholders};
+                return {nodes, buttons, placeholders, activationButtons, activeButtons, buttonTags};
               }""")
 
           def assert_fixture_semantics(state):
               if semantics_mode == "on":
-                  assert state["nodes"] > 0 and state["buttons"] > 0, "Semantics on not demonstrated"
+                  assert state["nodes"] > 0 and state["activeButtons"] > 0 and state["placeholders"] == 0, "Semantics on not demonstrated"
               else:
-                  assert state["nodes"] == 0 and state["buttons"] == 0, "Semantics off contaminated"
+                  assert state["nodes"] == 0 and state["activeButtons"] == 0 and state["placeholders"] == 1, "Semantics off contaminated"
+                  assert state["buttons"] == state["activationButtons"], "Unexpected non-activation button"
 
           def negative_cases(browser, engine, origin):
               context = browser.new_context(viewport={"width":390,"height":844},
