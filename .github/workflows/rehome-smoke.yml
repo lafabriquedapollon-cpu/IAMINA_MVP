@@ -136,6 +136,8 @@ jobs:
           import os
           import pathlib
           import threading
+          import time
+          import shutil
           from PIL import Image
           from playwright.sync_api import sync_playwright
 
@@ -151,6 +153,111 @@ jobs:
                   "size": list(logo_source.size), "mode": logo_source.mode,
                   "sha256": hashlib.sha256(logo_path.read_bytes()).hexdigest(),
               }), flush=True)
+          # Immutable, reviewed RGB references from run 45378100000 / artifact 14912323052,
+          # independently confirmed in artifact 14916834190. No automatic rebaseline.
+          reference_rgb = {
+              "chromium-ar-MA-1180x860": "e52a1785cd37a4993aea90bb63f239accbddac09667e107032e31d48c381994d",
+              "chromium-ar-MA-390x844": "eef3a466b44749fc173143bca056c862c99c91d4827feddf41fb219e8ab965bb",
+              "chromium-fr-FR-1180x860": "49e5c1c6c5a2827ac226d3d26356c0478bb9d2eb3463ca26add2ff7c61db9de8",
+              "chromium-fr-FR-390x844": "1f33f487022a813e8cc1324486732c25b952fc72d010f9bed8f2f66c85abf49f",
+              "webkit-ar-MA-1180x860": "db8b5c8fe925ef18d7d33ad893c47843353b0fef71c4cf633632c932e2bc58d7",
+              "webkit-ar-MA-390x844": "6e835341c91af6c0fc933fef5db7a092cfa1b579033ee0b8298fd76f0a076046",
+              "webkit-fr-FR-1180x860": "f8fda05aa25417114b20e8d9a737457193de2377010700b48dfe5419f5487a0a",
+              "webkit-fr-FR-390x844": "959ce31f26975c2cfebcad77742f640c0d13c4786718bc8dbd260a0849fc9257",
+          }
+          def assess_frame(path, width, height, label):
+              with Image.open(path) as png:
+                  rgb = png.convert("RGB")
+                  assert rgb.size == (width, height)
+                  logo = rgb.crop((width // 2 - 66, 22, width // 2 + 66, 154))
+                  card = rgb.crop((0, 154, width, height))
+                  def teal_count(image):
+                      return sum(1 for r, g, b in image.getdata()
+                                 if r < 90 and g < 160 and b < 150 and g > r + 15)
+                  def spread(image):
+                      return max(hi - lo for lo, hi in image.getextrema())
+                  digest = hashlib.sha256(rgb.tobytes()).hexdigest()
+                  metrics = dict(logo_teal_pixels=teal_count(logo), pixel_range=spread(rgb),
+                                 card_teal_pixels=teal_count(card), card_pixel_range=spread(card),
+                                 rgb_sha256=digest, reference_match=digest == reference_rgb[label])
+              metrics["old_pixel_gate"] = (metrics["logo_teal_pixels"] >= 2000 and
+                  metrics["pixel_range"] >= 80 and metrics["card_teal_pixels"] >= 5000 and
+                  metrics["card_pixel_range"] >= 80)
+              metrics["complete"] = metrics["old_pixel_gate"] and metrics["reference_match"]
+              return metrics
+
+          def attach_guard(context, origin):
+              blocked, errors, websocket_attempts, console = [], [], [], []
+              page = context.new_page()
+              page.on("pageerror", lambda err: errors.append(type(err).__name__))
+              page.on("console", lambda msg: console.append(msg.type)
+                      if msg.type in ("error", "warning") else None)
+              def local_only(route):
+                  req = route.request
+                  if req.url.startswith(("data:", "blob:")):
+                      route.continue_()
+                  elif (req.url.startswith(origin + "/") and req.method in ("GET", "HEAD")
+                        and "/api/" not in req.url.lower()):
+                      route.continue_()
+                  else:
+                      blocked.append(req.method)
+                      route.abort()
+              def block_ws(ws):
+                  websocket_attempts.append(True)
+                  ws.close()
+              context.route("**/*", local_only)
+              context.route_web_socket("**/*", block_ws)
+              def verdict():
+                  return dict(blocked_requests=len(blocked), page_errors=len(errors),
+                              websocket_attempts=len(websocket_attempts),
+                              console_warning_count=console.count("warning"),
+                              console_error_count=console.count("error"),
+                              console_warning_error_count=len(console),
+                              late_event_gate="FAIL" if blocked or errors or websocket_attempts else "PASS")
+              return page, verdict
+
+          def negative_cases(browser, engine, origin):
+              context = browser.new_context(viewport={"width":390,"height":844},
+                                            device_scale_factor=1, service_workers="block")
+              page, verdict = attach_guard(context, origin)
+              checks = []
+              label = engine + "-fr-FR-390x844"
+              try:
+                  for name, card in (("logo_only", ""), ("fake_teal_card",
+                          '<div style="position:absolute;top:200px;left:90px;width:210px;height:100px;background:#007c68"></div>')):
+                      page.set_content('<body style="margin:0;background:white"><div style="position:absolute;top:22px;left:145px;width:100px;height:100px;background:#007c68"></div>' + card + '</body>')
+                      shot = proof / (engine + "-negative-" + name + ".png")
+                      page.screenshot(path=str(shot))
+                      metrics = assess_frame(shot,390,844,label)
+                      assert not metrics["complete"], name + " accepted"
+                      assert metrics["old_pixel_gate"] == (name == "fake_teal_card"), "negative fixture invalid"
+                      checks.append(dict(name=name, result="PASS", metrics=metrics,
+                                         screenshot_sha256=hashlib.sha256(shot.read_bytes()).hexdigest()))
+                  assert page.get_by_role("button", name="Continuer sans compte", exact=True).count() == 0
+                  checks.append(dict(name="missing_cta_fixture", result="PASS"))
+                  assert verdict()["late_event_gate"] == "PASS", "negative fixture precondition"
+                  # Inject after the initial assertion window, in the same event guard.
+                  page.evaluate("() => setTimeout(() => { throw new Error('R2 synthetic late error'); }, 25)")
+                  page.wait_for_timeout(150)
+                  state = verdict()
+                  assert state["page_errors"] > 0 and state["late_event_gate"] == "FAIL"
+                  checks.append(dict(name="late_js_error", result="PASS", observed=state))
+                  page.evaluate("(url) => fetch(url).catch(() => null)", origin + "/api/r2-negative")
+                  state = verdict()
+                  assert state["blocked_requests"] > 0 and state["late_event_gate"] == "FAIL"
+                  checks.append(dict(name="late_http_block", result="PASS", observed=state))
+                  page.evaluate("(url) => { const socket = new WebSocket(url); socket.onerror = () => {}; }",
+                                origin.replace("http:", "ws:") + "/r2-negative")
+                  page.wait_for_timeout(150)
+                  state = verdict()
+                  assert state["websocket_attempts"] > 0 and state["late_event_gate"] == "FAIL"
+                  checks.append(dict(name="late_websocket_block", result="PASS", observed=state))
+              finally:
+                  context.close()
+                  (proof / (engine + "-negative-matrix.json")).write_text(json.dumps(checks, indent=2))
+              assert len(checks) == 6
+              print("R2_NEGATIVE_PASS " + engine + " 6/6", flush=True)
+
           results = []
           class Handler(http.server.SimpleHTTPRequestHandler):
               def __init__(self, *args, **kwargs):
@@ -167,6 +274,7 @@ jobs:
                       for engine in ("chromium", "webkit"):
                           browser = getattr(pw, engine).launch(headless=True)
                           try:
+                              negative_cases(browser, engine, origin)
                               for locale, cta in (("fr-FR", "Continuer sans compte"),
                                                   ("ar-MA", "المتابعة بدون حساب")):
                                   for width, height in ((390, 844), (1180, 860)):
@@ -179,27 +287,10 @@ jobs:
                                       context = browser.new_context(
                                           locale=locale, viewport={"width": width, "height": height},
                                           device_scale_factor=1, service_workers="block")
-                                      blocked, errors = [], []
-                                      page = context.new_page()
-                                      page.on("pageerror", lambda err: errors.append(str(err)))
-                                      asset_responses, console_errors = [], []
+                                      page, verdict = attach_guard(context, origin)
+                                      asset_responses = []
                                       page.on("response", lambda res: asset_responses.append(res.status)
                                               if res.url.split("?")[0].endswith("/iamina_logo_vertical.png") else None)
-                                      page.on("console", lambda msg: console_errors.append(msg.type)
-                                              if msg.type in ("error", "warning") else None)
-                                      def local_only(route):
-                                          request = route.request
-                                          url = request.url
-                                          if url.startswith(("data:", "blob:")):
-                                              route.continue_()
-                                          elif (url.startswith(origin + "/") and
-                                                request.method in ("GET", "HEAD") and
-                                                "/api/" not in url.lower()):
-                                              route.continue_()
-                                          else:
-                                              blocked.append((request.method, "/api/" in url.lower()))
-                                              route.abort()
-                                      context.route("**/*", local_only)
                                       try:
                                           result["stage"] = "navigate"
                                           response = page.goto(origin, wait_until="domcontentloaded", timeout=60000)
@@ -215,9 +306,7 @@ jobs:
                                           button.wait_for(state="visible", timeout=30000)
                                           assert button.is_enabled()
                                           page.wait_for_timeout(500)
-                                          assert not errors, "JavaScript page errors"
-                                          assert not any(m not in ("GET", "HEAD", "OPTIONS") or api
-                                                         for m, api in blocked), "Blocked write or API attempt"
+                                          assert verdict()["late_event_gate"] == "PASS", "Initial browser guard failed"
                                           result["stage"] = "assertions-complete"
                                           result["result"] = "PASS"
                                       except Exception as exc:
@@ -226,42 +315,34 @@ jobs:
                                       finally:
                                           try:
                                               shot = proof / (label + ".png")
-                                              # A native HTML logo can paint before the Flutter card.
-                                              # Require two consecutive complete frames, not logo alone.
                                               paint_streak = 0
+                                              frames = []
                                               for attempt in range(12):
-                                                  page.screenshot(path=str(shot), timeout=10000)
-                                                  with Image.open(shot) as png:
-                                                      rgb = png.convert("RGB")
-                                                      assert rgb.size == (width, height)
-                                                      logo = rgb.crop((width // 2 - 66, 22, width // 2 + 66, 154))
-                                                      card = rgb.crop((0, 154, width, height))
-                                                      teal = sum(1 for r, g, b in logo.getdata()
-                                                                 if r < 90 and g < 160 and b < 150 and g > r + 15)
-                                                      card_teal = sum(1 for r, g, b in card.getdata()
-                                                                      if r < 90 and g < 160 and b < 150 and g > r + 15)
-                                                      spread = max(hi - lo for lo, hi in rgb.getextrema())
-                                                      card_spread = max(hi - lo for lo, hi in card.getextrema())
-                                                  result["logo_teal_pixels"] = teal
-                                                  result["pixel_range"] = spread
-                                                  result["card_teal_pixels"] = card_teal
-                                                  result["card_pixel_range"] = card_spread
-                                                  complete = teal >= 2000 and spread >= 80 and card_teal >= 5000 and card_spread >= 80
-                                                  paint_streak = paint_streak + 1 if complete else 0
+                                                  candidate = proof / (label + "-attempt-" + str(attempt + 1) + ".png")
+                                                  page.screenshot(path=str(candidate), timeout=10000)
+                                                  metrics = assess_frame(candidate, width, height, label)
+                                                  frame = dict(file=candidate.name, attempt=attempt + 1,
+                                                               monotonic_ns=time.monotonic_ns(),
+                                                               sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                                                               metrics=metrics)
+                                                  frames.append(frame)
+                                                  result["frames"] = frames
+                                                  result.update(metrics)
+                                                  paint_streak = paint_streak + 1 if metrics["complete"] else 0
                                                   result["paint_streak"] = paint_streak
+                                                  shutil.copyfile(candidate, shot)
                                                   if paint_streak >= 2:
                                                       break
                                                   page.wait_for_timeout(500)
                                               result["screenshot_sha256"] = hashlib.sha256(shot.read_bytes()).hexdigest()
                                               assert shot.stat().st_size >= 1000
-                                              assert paint_streak >= 2, "Visual logo/card paint gate failed"
+                                              assert paint_streak >= 2, "Reference RGB / logo / card paint gate failed"
                                           except Exception:
                                               result["result"] = "FAIL"
                                               result["screenshot_error"] = True
                                           finally:
                                               # Probe the same asset independently of Flutter's renderer.
                                               result["app_logo_http_statuses"] = list(asset_responses)
-                                              result["console_warning_error_count"] = len(console_errors)
                                               try:
                                                   result["asset_probe"] = page.evaluate("""async () => {
                                                     const path = '/assets/assets/images/iamina_logo_vertical.png';
@@ -297,14 +378,9 @@ jobs:
                                                   # Final counters include paint polling and the local asset probe.
                                                   # Close the context before recording the final verdict.
                                                   context.close()
-                                                  result["blocked_requests"] = len(blocked)
-                                                  result["page_errors"] = len(errors)
-                                                  result["console_warning_error_count"] = len(console_errors)
-                                                  if blocked or errors:
+                                                  result.update(verdict())
+                                                  if result["late_event_gate"] != "PASS":
                                                       result["result"] = "FAIL"
-                                                      result["late_event_gate"] = "FAIL"
-                                                  else:
-                                                      result["late_event_gate"] = "PASS"
                                               print("R2_BROWSER " + json.dumps(result), flush=True)
                           finally:
                               browser.close()
