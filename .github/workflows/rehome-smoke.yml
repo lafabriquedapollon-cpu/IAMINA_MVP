@@ -139,7 +139,7 @@ jobs:
           import time
           import shutil
           from PIL import Image
-          from playwright.sync_api import sync_playwright
+          from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
           web = pathlib.Path("frontend/build/web").resolve()
           proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r2-browser-proof"
@@ -216,6 +216,12 @@ jobs:
                               late_event_gate="FAIL" if blocked or errors or websocket_attempts else "PASS")
               return page, verdict
 
+          def require_cta(page, cta, timeout=30000):
+              button = page.get_by_role("button", name=cta, exact=True)
+              button.wait_for(state="visible", timeout=timeout)
+              assert button.is_enabled()
+              return button
+
           def negative_cases(browser, engine, origin):
               context = browser.new_context(viewport={"width":390,"height":844},
                                             device_scale_factor=1, service_workers="block")
@@ -233,27 +239,41 @@ jobs:
                       assert metrics["old_pixel_gate"] == (name == "fake_teal_card"), "negative fixture invalid"
                       checks.append(dict(name=name, result="PASS", metrics=metrics,
                                          screenshot_sha256=hashlib.sha256(shot.read_bytes()).hexdigest()))
-                  assert page.get_by_role("button", name="Continuer sans compte", exact=True).count() == 0
-                  checks.append(dict(name="missing_cta_fixture", result="PASS"))
-                  assert verdict()["late_event_gate"] == "PASS", "negative fixture precondition"
-                  # Inject after the initial assertion window, in the same event guard.
-                  page.evaluate("() => setTimeout(() => { throw new Error('R2 synthetic late error'); }, 25)")
-                  page.wait_for_timeout(150)
-                  state = verdict()
-                  assert state["page_errors"] > 0 and state["late_event_gate"] == "FAIL"
-                  checks.append(dict(name="late_js_error", result="PASS", observed=state))
-                  page.evaluate("(url) => fetch(url).catch(() => null)", origin + "/api/r2-negative")
-                  state = verdict()
-                  assert state["blocked_requests"] > 0 and state["late_event_gate"] == "FAIL"
-                  checks.append(dict(name="late_http_block", result="PASS", observed=state))
-                  page.evaluate("(url) => { const socket = new WebSocket(url); socket.onerror = () => {}; }",
-                                origin.replace("http:", "ws:") + "/r2-negative")
-                  page.wait_for_timeout(150)
-                  state = verdict()
-                  assert state["websocket_attempts"] > 0 and state["late_event_gate"] == "FAIL"
-                  checks.append(dict(name="late_websocket_block", result="PASS", observed=state))
+                  try:
+                      require_cta(page, "Continuer sans compte", timeout=300)
+                  except PlaywrightTimeout:
+                      checks.append(dict(name="missing_cta_fixture", result="PASS"))
+                  else:
+                      raise AssertionError("Missing CTA accepted")
               finally:
                   context.close()
+              try:
+                  # Each injection gets an independent fresh guard: a prior failure
+                  # cannot satisfy the verdict of the next case.
+                  for event, count_key in (("late_js_error", "page_errors"),
+                          ("late_http_block", "blocked_requests"),
+                          ("late_websocket_block", "websocket_attempts")):
+                      context = browser.new_context(service_workers="block")
+                      page, verdict = attach_guard(context, origin)
+                      try:
+                          page.set_content("<html><body>synthetic late-event fixture</body></html>")
+                          assert verdict()["late_event_gate"] == "PASS", "negative fixture precondition"
+                          if event == "late_js_error":
+                              page.evaluate("() => setTimeout(() => { throw new Error('R2 synthetic late error'); }, 25)")
+                          elif event == "late_http_block":
+                              page.evaluate("(url) => fetch(url).catch(() => null)", origin + "/api/r2-negative")
+                          else:
+                              page.evaluate("(url) => { const socket = new WebSocket(url); socket.onerror = () => {}; }",
+                                            origin.replace("http:", "ws:") + "/r2-negative")
+                          page.wait_for_timeout(300)
+                      finally:
+                          context.close()
+                      state = verdict()
+                      assert state[count_key] > 0 and state["late_event_gate"] == "FAIL", event + " accepted"
+                      assert all(state[k] == 0 for k in ("page_errors", "blocked_requests", "websocket_attempts")
+                                 if k != count_key), event + " not isolated"
+                      checks.append(dict(name=event, result="PASS", observed=state))
+              finally:
                   (proof / (engine + "-negative-matrix.json")).write_text(json.dumps(checks, indent=2))
               assert len(checks) == 6
               print("R2_NEGATIVE_PASS " + engine + " 6/6", flush=True)
@@ -302,9 +322,7 @@ jobs:
                                           if placeholder.count():
                                               placeholder.evaluate("(element) => element.click()")
                                           result["stage"] = "localized-cta"
-                                          button = page.get_by_role("button", name=cta, exact=True)
-                                          button.wait_for(state="visible", timeout=30000)
-                                          assert button.is_enabled()
+                                          button = require_cta(page, cta)
                                           page.wait_for_timeout(500)
                                           assert verdict()["late_event_gate"] == "PASS", "Initial browser guard failed"
                                           result["stage"] = "assertions-complete"
