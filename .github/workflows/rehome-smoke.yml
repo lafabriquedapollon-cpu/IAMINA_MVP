@@ -123,6 +123,7 @@ jobs:
           "$RUNNER_TEMP/r2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
           "$RUNNER_TEMP/r2-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
       - name: Real browser first-use baseline FR and AR
+        id: r2_browser
         timeout-minutes: 8
         working-directory: .
         env:
@@ -139,12 +140,17 @@ jobs:
           import threading
           import time
           import shutil
-          from PIL import Image
+          from PIL import Image, ImageChops
           from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
           web = pathlib.Path("frontend/build/web").resolve()
-          proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r2-browser-proof"
-          proof.mkdir()
+          experiment = os.environ.get("R2_AB_VARIANT") == "canvas-only"
+          baseline_proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r2-browser-proof"
+          proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / ("r2-ab-canvas-only" if experiment else "r2-browser-proof")
+          proof.mkdir(exist_ok=experiment)
+          if experiment:
+              with Image.open(baseline_proof / "webkit-ar-MA-390x844.png") as png:
+                  experiment_reference = png.convert("RGB").crop((0,154,390,844))
           assert (web / "index.html").is_file()
           logo_path = web / "assets/assets/images/iamina_logo_vertical.png"
           assert logo_path.is_file(), "Logo missing from compiled assets"
@@ -190,7 +196,13 @@ jobs:
               metrics["old_pixel_gate"] = (metrics["logo_teal_pixels"] >= 2000 and
                   metrics["pixel_range"] >= 80 and metrics["card_teal_pixels"] >= 5000 and
                   metrics["card_pixel_range"] >= 80)
-              metrics["complete"] = metrics["old_pixel_gate"] and metrics["reference_match"]
+                  if experiment:
+                      assert label == "webkit-ar-MA-390x844"
+                      assert card.size == experiment_reference.size
+                      metrics["ab_body_max_delta"] = max(hi for _, hi in
+                          ImageChops.difference(card, experiment_reference).getextrema())
+              metrics["complete"] = metrics["old_pixel_gate"] and (
+                  metrics["ab_body_max_delta"] <= 2 if experiment else metrics["reference_match"])
               return metrics
 
           def attach_guard(context, origin):
@@ -322,22 +334,24 @@ jobs:
               origin = f"http://127.0.0.1:{server.server_address[1]}"
               try:
                   with sync_playwright() as pw:
-                      # Four additional cold WebKit processes, not retries of failed cases.
-                      for engine, repetition in [("chromium", 0), ("webkit", 0)] + [
-                              ("webkit", n) for n in range(1, 5)]:
+                      # B is a separate experiment, never a substitute for a failed A.
+                      launches = ([("webkit", n) for n in range(5)] if experiment else
+                                  [("chromium", 0), ("webkit", 0)] + [("webkit", n) for n in range(1, 5)])
+                      for engine, repetition in launches:
                           browser = getattr(pw, engine).launch(headless=True)
                           try:
-                              if repetition == 0:
+                              if repetition == 0 and not experiment:
                                   negative_cases(browser, engine, origin)
-                              locales = (("ar-MA", "المتابعة بدون حساب"),) if repetition else (
+                              locales = (("ar-MA", "المتابعة بدون حساب"),) if experiment or repetition else (
                                   ("fr-FR", "Continuer sans compte"), ("ar-MA", "المتابعة بدون حساب"))
-                              viewports = ((390, 844),) if repetition else ((390, 844), (1180, 860))
+                              viewports = ((390, 844),) if experiment or repetition else ((390, 844), (1180, 860))
                               for locale, cta in locales:
                                   for width, height in viewports:
                                       reference_label = f"{engine}-{locale}-{width}x{height}"
                                       label = reference_label + (f"-cold-{repetition}" if repetition else "")
                                       result = dict(engine=engine, browser_version=browser.version,
                                                     repetition=repetition, label=label, reference_label=reference_label,
+                                                    experiment="canvas-only" if experiment else "baseline",
                                                     locale=locale, viewport=[width, height],
                                                     source_sha=os.environ["EXPECTED_SHA"],
                                                     result="FAIL")
@@ -362,6 +376,19 @@ jobs:
                                           result["stage"] = "localized-cta"
                                           button = require_cta(page, cta)
                                           page.wait_for_timeout(500)
+                                          if experiment:
+                                              result["native_logo_count"] = page.evaluate("""() => {
+                                                let count = 0;
+                                                const walk = root => {
+                                                  for (const e of root.querySelectorAll('*')) {
+                                                    if (e.shadowRoot) walk(e.shadowRoot);
+                                                    if (e.tagName === 'IMG' && e.src.includes('iamina_logo_vertical.png')) count++;
+                                                  }
+                                                };
+                                                walk(document);
+                                                return count;
+                                              }""")
+                                              assert result["native_logo_count"] == 0, "B still uses native logo"
                                           assert verdict()["late_event_gate"] == "PASS", "Initial browser guard failed"
                                           result["stage"] = "assertions-complete"
                                           result["result"] = "PASS"
@@ -534,13 +561,19 @@ jobs:
           baseline = [r for r in results if r["repetition"] == 0]
           cold = [r for r in results if r["engine"] == "webkit" and r["locale"] == "ar-MA"
                   and r["viewport"] == [390, 844]]
-          assert len(results) == 12 and len(baseline) == 8, "Browser matrix incomplete"
           assert sorted(r["repetition"] for r in cold) == [0, 1, 2, 3, 4], "Cold-start matrix incomplete"
-          assert all(r.get("resize_gate") == "PASS" for r in cold), "WebKit AR mobile resize matrix failed"
-          assert all(r["result"] == "PASS" for r in results), "Browser matrix or cold starts failed"
-          print("R2_BROWSER_MATRIX_PASS 8/8")
-          print("R2_WEBKIT_AR_MOBILE_PASS 5/5")
-          print("R2_WEBKIT_AR_MOBILE_RESIZE_PASS 5/5")
+          if experiment:
+              assert len(results) == 5
+              assert all(r.get("native_logo_count") == 0 for r in cold), "B native logo not excluded"
+              assert all(r.get("resize_gate") == "PASS" and r["result"] == "PASS" for r in cold), "B canvas-only experiment failed"
+              print("R2_AB_CANVAS_ONLY_PASS 5/5 (diagnostic only)")
+          else:
+              assert len(results) == 12 and len(baseline) == 8, "Browser matrix incomplete"
+              assert all(r.get("resize_gate") == "PASS" for r in cold), "WebKit AR mobile resize matrix failed"
+              assert all(r["result"] == "PASS" for r in results), "Browser matrix or cold starts failed"
+              print("R2_BROWSER_MATRIX_PASS 8/8")
+              print("R2_WEBKIT_AR_MOBILE_PASS 5/5")
+              print("R2_WEBKIT_AR_MOBILE_RESIZE_PASS 5/5")
           PY
       - name: Retain synthetic first-use screenshots and matrix
         if: always()
@@ -550,6 +583,71 @@ jobs:
           path: ${{ runner.temp }}/r2-browser-proof/
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Isolated B experiment without native logo platform view
+        if: ${{ !cancelled() && steps.r2_browser.outcome == 'failure' }}
+        timeout-minutes: 12
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          R2_AB_VARIANT: canvas-only
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -f "$RUNNER_TEMP/r2-browser-proof/webkit-ar-MA-390x844.png"
+          mkdir -p "$RUNNER_TEMP/r2-ab-canvas-only"
+          src=frontend/lib/features/auth/local_device_enrollment_screen.dart
+          git diff --exit-code -- "$src"
+          restore_source() {
+            git show "HEAD:$src" > "$src"
+            git diff --exit-code -- "$src"
+          }
+          trap restore_source EXIT
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          p = Path("frontend/lib/features/auth/local_device_enrollment_screen.dart")
+          original = p.read_bytes()
+          old = b"WebHtmlElementStrategy.prefer,"
+          new = b"WebHtmlElementStrategy.never,"
+          assert original.count(old) == 1
+          modified = original.replace(old, new)
+          p.write_bytes(modified)
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-ab-canvas-only"
+          (proof / "experiment.json").write_text(json.dumps({
+              "source_sha": os.environ["EXPECTED_SHA"],
+              "variant": "WebHtmlElementStrategy.prefer -> never",
+              "original_source_sha256": hashlib.sha256(original).hexdigest(),
+              "modified_source_sha256": hashlib.sha256(modified).hexdigest(),
+              "diagnostic_only": True,
+          }, indent=2))
+          PY
+          git diff --stat -- "$src"
+          (cd frontend && flutter build web --release --no-pub --no-web-resources-cdn --dart-define=API_BASE_URL=http://127.0.0.1:8000)
+          # Reuse the exact baseline harness, with only the explicit B mode enabled.
+          python3 - <<'PY'
+          import os
+          import textwrap
+          from pathlib import Path
+          workflow = Path(".github/workflows/rehome-smoke.yml").read_text()
+          marker = '"$RUNNER_TEMP/r2-browser-venv/bin/python" - <<\'PY\'\n'
+          assert workflow.count(marker) == 1
+          script = workflow.split(marker,1)[1].split("\n          PY",1)[0]
+          script = textwrap.dedent(script)
+          compile(script, "<r2-ab>", "exec")
+          (Path(os.environ["RUNNER_TEMP"]) / "r2-ab-harness.py").write_text(script)
+          PY
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-ab-harness.py"
+      - name: Retain isolated B experiment
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-ab-canvas-only-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-ab-canvas-only/
+          retention-days: 14
+          if-no-files-found: ignore
 
   django-pg16-baseline:
     needs: snapshot-source-checks
