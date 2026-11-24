@@ -226,24 +226,35 @@ jobs:
                                       finally:
                                           try:
                                               shot = proof / (label + ".png")
-                                              # Wait for actual painted pixels; semantics alone is insufficient.
+                                              # A native HTML logo can paint before the Flutter card.
+                                              # Require two consecutive complete frames, not logo alone.
+                                              paint_streak = 0
                                               for attempt in range(12):
                                                   page.screenshot(path=str(shot), timeout=10000)
                                                   with Image.open(shot) as png:
                                                       rgb = png.convert("RGB")
                                                       assert rgb.size == (width, height)
                                                       logo = rgb.crop((width // 2 - 66, 22, width // 2 + 66, 154))
+                                                      card = rgb.crop((0, 154, width, height))
                                                       teal = sum(1 for r, g, b in logo.getdata()
                                                                  if r < 90 and g < 160 and b < 150 and g > r + 15)
+                                                      card_teal = sum(1 for r, g, b in card.getdata()
+                                                                      if r < 90 and g < 160 and b < 150 and g > r + 15)
                                                       spread = max(hi - lo for lo, hi in rgb.getextrema())
+                                                      card_spread = max(hi - lo for lo, hi in card.getextrema())
                                                   result["logo_teal_pixels"] = teal
                                                   result["pixel_range"] = spread
-                                                  if teal >= 2000 and spread >= 80:
+                                                  result["card_teal_pixels"] = card_teal
+                                                  result["card_pixel_range"] = card_spread
+                                                  complete = teal >= 2000 and spread >= 80 and card_teal >= 5000 and card_spread >= 80
+                                                  paint_streak = paint_streak + 1 if complete else 0
+                                                  result["paint_streak"] = paint_streak
+                                                  if paint_streak >= 2:
                                                       break
                                                   page.wait_for_timeout(500)
                                               result["screenshot_sha256"] = hashlib.sha256(shot.read_bytes()).hexdigest()
                                               assert shot.stat().st_size >= 1000
-                                              assert teal >= 2000 and spread >= 80, "Visual logo/paint gate failed"
+                                              assert paint_streak >= 2, "Visual logo/card paint gate failed"
                                           except Exception:
                                               result["result"] = "FAIL"
                                               result["screenshot_error"] = True
