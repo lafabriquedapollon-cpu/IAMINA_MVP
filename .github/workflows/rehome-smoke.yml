@@ -384,6 +384,70 @@ jobs:
                                               result["result"] = "FAIL"
                                               result["screenshot_error"] = True
                                           finally:
+                                              # Diagnostic-only experiments AFTER the original verdict.
+                                              # A recovered screenshot must never promote this failed case.
+                                              if result.get("screenshot_error") and engine == "webkit" and locale == "ar-MA" and width == 390:
+                                                  diagnostic = {}
+                                                  result["composition_diagnostic"] = diagnostic
+                                                  try:
+                                                      diagnostic["dom_before"] = page.evaluate("""() => {
+                                                        const nodes = [];
+                                                        const walk = root => {
+                                                          for (const e of root.querySelectorAll('*')) {
+                                                            if (e.shadowRoot) walk(e.shadowRoot);
+                                                            if (['CANVAS','IMG','FLT-GLASS-PANE','FLT-SCENE','FLT-PLATFORM-VIEW','FLT-PLATFORM-VIEW-SLOT','FLUTTER-VIEW'].includes(e.tagName)) {
+                                                              const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+                                                              nodes.push({tag:e.tagName,x:r.x,y:r.y,w:r.width,h:r.height,
+                                                                display:s.display,visibility:s.visibility,opacity:s.opacity,
+                                                                logo:e.tagName==='IMG' && e.src.includes('iamina_logo_vertical.png')});
+                                                            }
+                                                          }
+                                                        };
+                                                        walk(document);
+                                                        return nodes.slice(0,80);
+                                                      }""")
+                                                      def diagnostic_shot(name):
+                                                          path = proof / (label + "-diag-" + name + ".png")
+                                                          page.screenshot(path=str(path), timeout=10000)
+                                                          return dict(file=path.name, sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                                                                      metrics=assess_frame(path,width,height,label))
+                                                      # Hide the native logo element only; preserve layout.
+                                                      diagnostic["hidden_logo_count"] = page.evaluate("""() => {
+                                                        const matches = [];
+                                                        const walk = root => {
+                                                          for (const e of root.querySelectorAll('*')) {
+                                                            if (e.shadowRoot) walk(e.shadowRoot);
+                                                            if (e.tagName === 'IMG' && e.src.includes('iamina_logo_vertical.png')) {
+                                                              matches.push([e,e.style.visibility]);
+                                                              e.style.visibility = 'hidden';
+                                                            }
+                                                          }
+                                                        };
+                                                        walk(document);
+                                                        window.__r2HiddenLogo = matches;
+                                                        return matches.length;
+                                                      }""")
+                                                      try:
+                                                          page.wait_for_timeout(350)
+                                                          diagnostic["hide_logo"] = diagnostic_shot("hide-logo")
+                                                      finally:
+                                                          page.evaluate("""() => {
+                                                            for (const [e,v] of window.__r2HiddenLogo || []) e.style.visibility=v;
+                                                            delete window.__r2HiddenLogo;
+                                                          }""")
+                                                      page.wait_for_timeout(350)
+                                                      diagnostic["restored_logo"] = diagnostic_shot("restore-logo")
+                                                      # Force a viewport invalidation, then restore exact original geometry.
+                                                      try:
+                                                          page.set_viewport_size({"width":width+1,"height":height})
+                                                          page.wait_for_timeout(350)
+                                                      finally:
+                                                          page.set_viewport_size({"width":width,"height":height})
+                                                      page.wait_for_timeout(350)
+                                                      diagnostic["resize_restore"] = diagnostic_shot("resize-restore")
+                                                  except Exception as exc:
+                                                      diagnostic["error_type"] = type(exc).__name__
+                                                  print("R2_COMPOSITION_DIAGNOSTIC " + json.dumps(diagnostic), flush=True)
                                               # Probe the same asset independently of Flutter's renderer.
                                               result["app_logo_http_statuses"] = list(asset_responses)
                                               try:
