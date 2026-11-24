@@ -328,6 +328,9 @@ jobs:
           from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
           fixture = os.environ.get("R2_SCREEN_FIXTURE") == "1"
+          semantics_mode = os.environ.get("R2_FIXTURE_SEMANTICS", "on")
+          assert semantics_mode in ("on", "off")
+          assert fixture or semantics_mode == "on"
           web = pathlib.Path(os.environ["R2_SCREEN_FIXTURE_WEB"] if fixture else "frontend/build/web").resolve()
           experiment = os.environ.get("R2_AB_VARIANT") == "canvas-only"
           headed = os.environ.get("R2_WEBKIT_HEADED") == "1"
@@ -337,7 +340,15 @@ jobs:
               "r2-ab-canvas-only" if experiment else
               "r2-webkit-headed-app" if headed else
               "r2-enrollment-fixture" if fixture else "r2-browser-proof")
-          proof.mkdir(exist_ok=experiment or fixture)
+          if fixture:
+              proof = proof / ("semantics-" + semantics_mode)
+          proof.mkdir(parents=True, exist_ok=experiment or fixture)
+          if fixture:
+              receipt = json.loads((proof.parent / "fixture-build.json").read_text())
+              assert receipt["source_sha"] == os.environ["EXPECTED_SHA"]
+              actual = {p.relative_to(web).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                        for p in sorted(web.rglob("*")) if p.is_file()}
+              assert actual == receipt["build_files"], "Fixture build changed between arms"
           if experiment:
               matrix = json.loads((baseline_proof / "matrix.json").read_text())
               verified_frames = [(r, frame) for r in matrix
@@ -448,6 +459,31 @@ jobs:
               assert button.is_enabled()
               return button
 
+          def observe_semantics(page):
+              # Inspect ordinary DOM only; do not request an accessibility snapshot.
+              return page.evaluate("""() => {
+                const seen = new Set();
+                let nodes = 0, buttons = 0, placeholders = 0;
+                const walk = root => {
+                  for (const e of root.querySelectorAll('*')) {
+                    if (seen.has(e)) continue;
+                    seen.add(e);
+                    if (e.tagName === 'FLT-SEMANTICS') nodes++;
+                    if (e.getAttribute('role') === 'button') buttons++;
+                    if (e.tagName === 'FLT-SEMANTICS-PLACEHOLDER') placeholders++;
+                    if (e.shadowRoot) walk(e.shadowRoot);
+                  }
+                };
+                walk(document);
+                return {nodes, buttons, placeholders};
+              }""")
+
+          def assert_fixture_semantics(state):
+              if semantics_mode == "on":
+                  assert state["nodes"] > 0 and state["buttons"] > 0, "Semantics on not demonstrated"
+              else:
+                  assert state["nodes"] == 0 and state["buttons"] == 0, "Semantics off contaminated"
+
           def negative_cases(browser, engine, origin):
               context = browser.new_context(viewport={"width":390,"height":844},
                                             device_scale_factor=1, service_workers="block")
@@ -546,9 +582,9 @@ jobs:
                           try:
                               if repetition == 0 and not experiment:
                                   negative_cases(browser, engine, origin)
-                              locales = (("ar-MA", "المتابعة بدون حساب"),) if experiment or repetition else (
+                              locales = (("ar-MA", "المتابعة بدون حساب"),) if experiment or fixture or repetition else (
                                   ("fr-FR", "Continuer sans compte"), ("ar-MA", "المتابعة بدون حساب"))
-                              viewports = ((390, 844),) if experiment or repetition else ((390, 844), (1180, 860))
+                              viewports = ((390, 844),) if experiment or fixture or repetition else ((390, 844), (1180, 860))
                               for locale, cta in locales:
                                   for width, height in viewports:
                                       reference_label = f"{engine}-{locale}-{width}x{height}"
@@ -557,6 +593,7 @@ jobs:
                                                     repetition=repetition, label=label, reference_label=reference_label,
                                                     experiment="canvas-only" if experiment else "headed" if headed else "isolated-screen" if fixture else "baseline",
                                                     headed=headed,
+                                                    fixture_semantics=semantics_mode if fixture else None,
                                                     locale=locale, viewport=[width, height],
                                                     source_sha=os.environ["EXPECTED_SHA"],
                                                     result="FAIL")
@@ -575,12 +612,21 @@ jobs:
                                           result["stage"] = "flutter-view"
                                           page.wait_for_selector("flutter-view, flt-glass-pane", timeout=60000)
                                           result["stage"] = "semantics"
-                                          placeholder = page.locator("flt-semantics-placeholder")
-                                          if placeholder.count():
-                                              placeholder.evaluate("(element) => element.click()")
-                                          result["stage"] = "localized-cta"
-                                          button = require_cta(page, cta)
+                                          if fixture and semantics_mode == "off":
+                                              # Wait for the activation placeholder without activating it.
+                                              # Never query accessibility roles on this diagnostic arm.
+                                              page.locator("flt-semantics-placeholder").wait_for(state="attached", timeout=30000)
+                                              result["stage"] = "semantics-off-observation"
+                                          else:
+                                              placeholder = page.locator("flt-semantics-placeholder")
+                                              if placeholder.count():
+                                                  placeholder.evaluate("(element) => element.click()")
+                                              result["stage"] = "localized-cta"
+                                              button = require_cta(page, cta)
                                           page.wait_for_timeout(500)
+                                          if fixture:
+                                              result["semantics_before"] = observe_semantics(page)
+                                              assert_fixture_semantics(result["semantics_before"])
                                           if experiment:
                                               result["native_logo_count"] = page.evaluate("""() => {
                                                 let count = 0;
@@ -637,6 +683,8 @@ jobs:
                                               assert paint_streak >= 2, "Reference RGB / logo / card paint gate failed"
                                               if fixture:
                                                   result["fixture_initial_rgb"] = frames[-1]["metrics"]["rgb_sha256"]
+                                                  result["semantics_at_initial_capture"] = observe_semantics(page)
+                                                  assert_fixture_semantics(result["semantics_at_initial_capture"])
                                               # Mandatory viewport round-trip on every targeted AR mobile case.
                                               # Keep the initial verdict and all post-resize frames separate.
                                               if reference_label == "webkit-ar-MA-390x844":
@@ -659,6 +707,8 @@ jobs:
                                                       if n == 1:
                                                           page.wait_for_timeout(500)
                                                   if fixture:
+                                                      result["semantics_after_resize"] = observe_semantics(page)
+                                                      assert_fixture_semantics(result["semantics_after_resize"])
                                                       assert all(frame["metrics"]["old_pixel_gate"] and
                                                           frame["metrics"]["rgb_sha256"] == result["fixture_initial_rgb"]
                                                           for frame in resize_frames), "Fixture post-resize pixels changed or incomplete"
@@ -790,10 +840,10 @@ jobs:
               assert all(r.get("resize_gate") == "PASS" and r["result"] == "PASS" for r in cold), "B canvas-only experiment failed"
               print("R2_AB_CANVAS_ONLY_PASS 5/5 (diagnostic only)")
           elif fixture:
-              assert len(results) == 8 and len(baseline) == 4, "Isolated screen matrix incomplete"
-              assert all(r.get("resize_gate") == "PASS" for r in cold), "Isolated screen resize matrix failed"
-              assert all(r["result"] == "PASS" for r in results), "Isolated screen matrix failed"
-              print("R2_ISOLATED_SCREEN_DIAGNOSTIC_PASS 8/8; AR resize 5/5; not product certification")
+              assert len(results) == 5, "Semantics arm matrix incomplete"
+              assert all(r.get("resize_gate") == "PASS" for r in cold), "Semantics arm resize matrix failed"
+              assert all(r["result"] == "PASS" for r in results), "Semantics arm initial or guard failed"
+              print("R2_SEMANTICS_DIAGNOSTIC_PASS", semantics_mode, "5/5; not product certification")
           elif headed:
               assert len(results) == 8 and len(baseline) == 4, "Headed WebKit matrix incomplete"
               assert all(r.get("resize_gate") == "PASS" for r in cold), "Headed AR mobile resize matrix failed"
@@ -933,7 +983,25 @@ jobs:
               "interaction_disabled_by_test_scope": True,
           },indent=2))
           PY
-          "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py"
+          # Both arms run even when the first fails; never replace an on-arm failure by off-arm success.
+          on_status=0
+          off_status=0
+          R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || on_status=$?
+          R2_FIXTURE_SEMANTICS=off "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || off_status=$?
+          printf 'R2_SEMANTICS_ARMS on=%s off=%s\n' "$on_status" "$off_status"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-enrollment-fixture"
+          web = Path(os.environ["R2_SCREEN_FIXTURE_WEB"])
+          expected = json.loads((proof/"fixture-build.json").read_text())["build_files"]
+          actual = {p.relative_to(web).as_posix():hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in sorted(web.rglob("*")) if p.is_file()}
+          assert actual == expected, "Fixture build changed during experiment"
+          PY
+          test "$on_status" -eq 0 && test "$off_status" -eq 0
       - name: Retain isolated enrollment screen diagnostic
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
