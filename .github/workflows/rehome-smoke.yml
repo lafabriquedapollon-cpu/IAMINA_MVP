@@ -64,6 +64,133 @@ jobs:
       - name: Run independent standard-library source regression tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -q
 
+  webgl-capture-diagnostic:
+    needs: snapshot-source-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Attest source and install pinned browser tools
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          python3 -m venv "$RUNNER_TEMP/r2-gl-venv"
+          "$RUNNER_TEMP/r2-gl-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
+          "$RUNNER_TEMP/r2-gl-venv/bin/python" -m playwright install --with-deps chromium webkit
+      - name: Compare WebGL framebuffer and captured pixels, without Flutter
+        timeout-minutes: 5
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/r2-webgl-proof"
+          cat > "$RUNNER_TEMP/r2-gl-probe.py" <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          from PIL import Image
+          from playwright.sync_api import sync_playwright
+
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-webgl-proof"
+          records = []
+          html = """<!doctype html><meta charset="utf-8">
+          <style>body{margin:0;background:white}canvas{position:absolute;left:20px}
+          #gl{top:180px;height:200px;width:calc(100vw - 40px)}
+          #control{top:440px;width:100px;height:100px}</style>
+          <canvas id="gl"></canvas><canvas id="control" width="100" height="100"></canvas>
+          <script>
+          const canvas = document.getElementById('gl');
+          const gl = canvas.getContext('webgl', {preserveDrawingBuffer:true});
+          const control = document.getElementById('control').getContext('2d');
+          control.fillStyle = 'rgb(0,128,96)'; control.fillRect(0,0,100,100);
+          window.drawProbe = () => {
+            if (!gl) return {available:false};
+            const w = Math.round(canvas.getBoundingClientRect().width);
+            if(canvas.width !== w) canvas.width = w;
+            if(canvas.height !== 200) canvas.height = 200;
+            gl.viewport(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight);
+            gl.clearColor(0,128/255,96/255,1); gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.finish();
+            const p = new Uint8Array(4);
+            gl.readPixels(Math.floor(gl.drawingBufferWidth/2),100,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);
+            return {available:true, pixel:[...p], error:gl.getError(),
+              lost:gl.isContextLost(), buffer:[gl.drawingBufferWidth,gl.drawingBufferHeight]};
+          };
+          </script>"""
+          def expected(pixel):
+              return all(abs(a-b) <= 8 for a,b in zip(pixel[:3],(0,128,96)))
+
+          with sync_playwright() as pw:
+              for engine, headed in (("chromium",False),("webkit",False),("webkit",True)):
+                  label = engine + ("-headed" if headed else "-headless")
+                  browser = getattr(pw, engine).launch(headless=not headed)
+                  try:
+                      context = browser.new_context(viewport={"width":390,"height":844},
+                                                    device_scale_factor=1, service_workers="block")
+                      try:
+                          context.route("**/*",lambda route: route.abort())
+                          page = context.new_page()
+                          page.set_content(html,timeout=10000)
+                          for stage,w in (("initial",390),("expanded",391),("restored",390)):
+                              if stage != "initial":
+                                  page.set_viewport_size({"width":w,"height":844})
+                              state = page.evaluate("() => window.drawProbe()")
+                              page.wait_for_timeout(350)
+                              shot = proof / (label+"-"+stage+".png")
+                              page.screenshot(path=str(shot),timeout=10000)
+                              with Image.open(shot) as image:
+                                  rgb = image.convert("RGB")
+                                  assert rgb.size == (w,844)
+                                  gl_pixel = rgb.getpixel((w//2,280))
+                                  control_pixel = rgb.getpixel((70,490))
+                              # Read without repainting after the screenshot.
+                              after = page.evaluate("""() => {
+                                const c=document.getElementById('gl'), g=c.getContext('webgl');
+                                if(!g)return {available:false};
+                                const p=new Uint8Array(4);
+                                g.readPixels(Math.floor(g.drawingBufferWidth/2),100,1,1,g.RGBA,g.UNSIGNED_BYTE,p);
+                                return {available:true,pixel:[...p],error:g.getError(),lost:g.isContextLost()};
+                              }""")
+                              healthy = (state.get("available") and after.get("available") and
+                                  not state["lost"] and not after["lost"] and state["error"]==0 and
+                                  after["error"]==0 and expected(state["pixel"]) and expected(after["pixel"]))
+                              receipt = dict(source_sha=os.environ["EXPECTED_SHA"],engine=engine,
+                                  browser_version=browser.version,headed=headed,stage=stage,viewport=[w,844],
+                                  framebuffer_before=state,framebuffer_after=after,
+                                  captured_gl=list(gl_pixel),captured_2d=list(control_pixel),
+                                  control_ok=expected(control_pixel),framebuffer_healthy=bool(healthy),
+                                  capture_matches=expected(gl_pixel),file=shot.name,
+                                  sha256=hashlib.sha256(shot.read_bytes()).hexdigest())
+                              records.append(receipt)
+                              (proof/"matrix.json").write_text(json.dumps(records,indent=2))
+                              print("R2_RAW_WEBGL "+json.dumps(receipt),flush=True)
+                      finally:
+                          context.close()
+                  finally:
+                      browser.close()
+          assert len(records)==9, "Incomplete diagnostic"
+          assert all(r["control_ok"] for r in records), "2D control invalid"
+          assert all(r["framebuffer_healthy"] for r in records), "WebGL framebuffer unavailable or unhealthy"
+          print("R2_RAW_WEBGL_DIAGNOSTIC_COMPLETE; capture mismatches are observations, not release PASS")
+          PY
+          "$RUNNER_TEMP/r2-gl-venv/bin/python" -m py_compile "$RUNNER_TEMP/r2-gl-probe.py"
+          xvfb-run -a -s "-screen 0 1280x1024x24" "$RUNNER_TEMP/r2-gl-venv/bin/python" "$RUNNER_TEMP/r2-gl-probe.py"
+      - name: Retain raw WebGL observations (diagnostic only)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-raw-webgl-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-webgl-proof/
+          retention-days: 14
+          if-no-files-found: warn
+
   flutter-web-baseline:
     needs: snapshot-source-checks
     runs-on: ubuntu-24.04
