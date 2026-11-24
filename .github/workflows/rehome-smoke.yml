@@ -327,15 +327,17 @@ jobs:
           from PIL import Image, ImageChops
           from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
-          web = pathlib.Path("frontend/build/web").resolve()
+          fixture = os.environ.get("R2_SCREEN_FIXTURE") == "1"
+          web = pathlib.Path(os.environ["R2_SCREEN_FIXTURE_WEB"] if fixture else "frontend/build/web").resolve()
           experiment = os.environ.get("R2_AB_VARIANT") == "canvas-only"
           headed = os.environ.get("R2_WEBKIT_HEADED") == "1"
-          assert not (experiment and headed), "Diagnostic modes must be isolated"
+          assert sum((experiment, headed, fixture)) <= 1, "Diagnostic modes must be isolated"
           baseline_proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r2-browser-proof"
           proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / (
               "r2-ab-canvas-only" if experiment else
-              "r2-webkit-headed-app" if headed else "r2-browser-proof")
-          proof.mkdir(exist_ok=experiment)
+              "r2-webkit-headed-app" if headed else
+              "r2-enrollment-fixture" if fixture else "r2-browser-proof")
+          proof.mkdir(exist_ok=experiment or fixture)
           if experiment:
               matrix = json.loads((baseline_proof / "matrix.json").read_text())
               verified_frames = [(r, frame) for r in matrix
@@ -537,7 +539,7 @@ jobs:
               try:
                   with sync_playwright() as pw:
                       # B is a separate experiment, never a substitute for a failed A.
-                      launches = ([("webkit", n) for n in range(5)] if experiment or headed else
+                      launches = ([("webkit", n) for n in range(5)] if experiment or headed or fixture else
                                   [("chromium", 0), ("webkit", 0)] + [("webkit", n) for n in range(1, 5)])
                       for engine, repetition in launches:
                           browser = getattr(pw, engine).launch(headless=not headed)
@@ -553,7 +555,7 @@ jobs:
                                       label = reference_label + (f"-cold-{repetition}" if repetition else "")
                                       result = dict(engine=engine, browser_version=browser.version,
                                                     repetition=repetition, label=label, reference_label=reference_label,
-                                                    experiment="canvas-only" if experiment else "headed" if headed else "baseline",
+                                                    experiment="canvas-only" if experiment else "headed" if headed else "isolated-screen" if fixture else "baseline",
                                                     headed=headed,
                                                     locale=locale, viewport=[width, height],
                                                     source_sha=os.environ["EXPECTED_SHA"],
@@ -614,7 +616,17 @@ jobs:
                                                   frames.append(frame)
                                                   result["frames"] = frames
                                                   result.update(metrics)
-                                                  paint_streak = paint_streak + 1 if metrics["complete"] else 0
+                                                  if fixture:
+                                                      # Diagnostic-only: require two identical structurally complete frames.
+                                                      # Keep the product reference verdict separately, never promote it.
+                                                      if not metrics["old_pixel_gate"]:
+                                                          paint_streak = 0
+                                                      elif len(frames) > 1 and frames[-2]["metrics"]["rgb_sha256"] == metrics["rgb_sha256"]:
+                                                          paint_streak += 1
+                                                      else:
+                                                          paint_streak = 1
+                                                  else:
+                                                      paint_streak = paint_streak + 1 if metrics["complete"] else 0
                                                   result["paint_streak"] = paint_streak
                                                   shutil.copyfile(candidate, shot)
                                                   if paint_streak >= 2:
@@ -623,6 +635,8 @@ jobs:
                                               result["screenshot_sha256"] = hashlib.sha256(shot.read_bytes()).hexdigest()
                                               assert shot.stat().st_size >= 1000
                                               assert paint_streak >= 2, "Reference RGB / logo / card paint gate failed"
+                                              if fixture:
+                                                  result["fixture_initial_rgb"] = frames[-1]["metrics"]["rgb_sha256"]
                                               # Mandatory viewport round-trip on every targeted AR mobile case.
                                               # Keep the initial verdict and all post-resize frames separate.
                                               if reference_label == "webkit-ar-MA-390x844":
@@ -644,7 +658,12 @@ jobs:
                                                           metrics=metrics))
                                                       if n == 1:
                                                           page.wait_for_timeout(500)
-                                                  assert all(frame["metrics"]["complete"] for frame in resize_frames), "Post-resize visual gate failed"
+                                                  if fixture:
+                                                      assert all(frame["metrics"]["old_pixel_gate"] and
+                                                          frame["metrics"]["rgb_sha256"] == result["fixture_initial_rgb"]
+                                                          for frame in resize_frames), "Fixture post-resize pixels changed or incomplete"
+                                                  else:
+                                                      assert all(frame["metrics"]["complete"] for frame in resize_frames), "Post-resize visual gate failed"
                                                   result["resize_gate"] = "PASS"
                                           except Exception:
                                               result["result"] = "FAIL"
@@ -652,7 +671,7 @@ jobs:
                                           finally:
                                               # Diagnostic-only experiments AFTER the original verdict.
                                               # A recovered screenshot must never promote this failed case.
-                                              if not experiment and result.get("screenshot_error") and engine == "webkit" and locale == "ar-MA" and width == 390:
+                                              if not experiment and not fixture and result.get("screenshot_error") and engine == "webkit" and locale == "ar-MA" and width == 390:
                                                   diagnostic = {}
                                                   result["composition_diagnostic"] = diagnostic
                                                   try:
@@ -770,6 +789,11 @@ jobs:
               assert all(r.get("native_logo_count") == 0 for r in cold), "B native logo not excluded"
               assert all(r.get("resize_gate") == "PASS" and r["result"] == "PASS" for r in cold), "B canvas-only experiment failed"
               print("R2_AB_CANVAS_ONLY_PASS 5/5 (diagnostic only)")
+          elif fixture:
+              assert len(results) == 8 and len(baseline) == 4, "Isolated screen matrix incomplete"
+              assert all(r.get("resize_gate") == "PASS" for r in cold), "Isolated screen resize matrix failed"
+              assert all(r["result"] == "PASS" for r in results), "Isolated screen matrix failed"
+              print("R2_ISOLATED_SCREEN_DIAGNOSTIC_PASS 8/8; AR resize 5/5; not product certification")
           elif headed:
               assert len(results) == 8 and len(baseline) == 4, "Headed WebKit matrix incomplete"
               assert all(r.get("resize_gate") == "PASS" for r in cold), "Headed AR mobile resize matrix failed"
@@ -836,6 +860,86 @@ jobs:
         with:
           name: r2-webkit-headed-app-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/r2-webkit-headed-app/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Reproduce actual enrollment screen without IAMINA bootstrap
+        if: ${{ !cancelled() && steps.r2_browser.outcome == 'failure' }}
+        timeout-minutes: 12
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          R2_SCREEN_FIXTURE: "1"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          screen=frontend/lib/features/auth/local_device_enrollment_screen.dart
+          git diff --exit-code -- "$screen"
+          entry=frontend/lib/r2_enrollment_probe.dart
+          test ! -e "$entry"
+          trap 'rm -f "$entry"' EXIT
+          export R2_SCREEN_FIXTURE_WEB="$RUNNER_TEMP/r2-enrollment-fixture-web"
+          mkdir -p "$RUNNER_TEMP/r2-enrollment-fixture"
+          cat > "$entry" <<'DART'
+          import 'package:flutter/material.dart';
+          import 'core/theme/amina_visual_language.dart';
+          import 'core/theme/app_theme.dart';
+          import 'features/auth/local_device_enrollment_screen.dart';
+          import 'l10n/app_localizations.dart';
+
+          void main() {
+            WidgetsFlutterBinding.ensureInitialized();
+            runApp(MaterialApp(
+              title: 'IAMINA synthetic enrollment render probe',
+              theme: AminaVisualLanguage.harmonize(AminaTheme.light),
+              themeMode: ThemeMode.light,
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              debugShowCheckedModeBanner: false,
+              home: const LocalDeviceEnrollmentScreen(),
+            ));
+          }
+          DART
+          python3 - <<'PY'
+          import os
+          import textwrap
+          from pathlib import Path
+          workflow = Path(".github/workflows/rehome-smoke.yml").read_text()
+          marker = '"$RUNNER_TEMP/r2-browser-venv/bin/python" - ' + "<<'PY'\n"
+          assert workflow.count(marker) == 1
+          script = textwrap.dedent(workflow.split(marker,1)[1].split("\n          PY",1)[0])
+          compile(script, "<r2-isolated-screen>", "exec")
+          (Path(os.environ["RUNNER_TEMP"]) / "r2-screen-fixture.py").write_text(script)
+          PY
+          (cd frontend && flutter build web --release --no-pub --no-web-resources-cdn --target=lib/r2_enrollment_probe.dart --output="$R2_SCREEN_FIXTURE_WEB" --dart-define=API_BASE_URL=http://127.0.0.1:8000)
+          git diff --exit-code -- "$screen"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          web = Path(os.environ["R2_SCREEN_FIXTURE_WEB"])
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-enrollment-fixture"
+          def digest(p):
+              return hashlib.sha256(p.read_bytes()).hexdigest()
+          assert (web/"main.dart.js").is_file()
+          (proof/"fixture-entry.dart").write_bytes(Path("frontend/lib/r2_enrollment_probe.dart").read_bytes())
+          (proof/"fixture-build.json").write_text(json.dumps({
+              "source_sha": os.environ["EXPECTED_SHA"],
+              "screen_sha256": digest(Path("frontend/lib/features/auth/local_device_enrollment_screen.dart")),
+              "entry_sha256": digest(proof/"fixture-entry.dart"),
+              "build_files": {p.relative_to(web).as_posix():digest(p) for p in sorted(web.rglob("*")) if p.is_file()},
+              "diagnostic_only": True,
+              "interaction_disabled_by_test_scope": True,
+          },indent=2))
+          PY
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py"
+      - name: Retain isolated enrollment screen diagnostic
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-enrollment-fixture-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-enrollment-fixture/
           retention-days: 14
           if-no-files-found: ignore
 
