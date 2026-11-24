@@ -157,8 +157,8 @@ jobs:
                       for engine in ("chromium", "webkit"):
                           browser = getattr(pw, engine).launch(headless=True)
                           try:
-                              for locale, cta in (("fr-FR", "Configurer cet appareil"),
-                                                  ("ar-MA", "إعداد هذا الجهاز")):
+                              for locale, cta in (("fr-FR", "Continuer sans compte"),
+                                                  ("ar-MA", "المتابعة بدون حساب")):
                                   for width, height in ((390, 844), (1180, 860)):
                                       label = f"{engine}-{locale}-{width}x{height}"
                                       result = dict(engine=engine, browser_version=browser.version,
@@ -186,12 +186,16 @@ jobs:
                                               route.abort()
                                       context.route("**/*", local_only)
                                       try:
+                                          result["stage"] = "navigate"
                                           response = page.goto(origin, wait_until="domcontentloaded", timeout=60000)
                                           assert response and response.status == 200
+                                          result["stage"] = "flutter-view"
                                           page.wait_for_selector("flutter-view, flt-glass-pane", timeout=60000)
+                                          result["stage"] = "semantics"
                                           placeholder = page.locator("flt-semantics-placeholder")
                                           if placeholder.count():
                                               placeholder.evaluate("(element) => element.click()")
+                                          result["stage"] = "localized-cta"
                                           button = page.get_by_role("button", name=cta, exact=True)
                                           button.wait_for(state="visible", timeout=30000)
                                           assert button.is_enabled()
@@ -199,6 +203,7 @@ jobs:
                                           assert not errors, "JavaScript page errors"
                                           assert not any(m not in ("GET", "HEAD", "OPTIONS") or api
                                                          for m, api in blocked), "Blocked write or API attempt"
+                                          result["stage"] = "assertions-complete"
                                           result["result"] = "PASS"
                                       except Exception as exc:
                                           result["failure_type"] = type(exc).__name__
