@@ -123,6 +123,7 @@ jobs:
           "$RUNNER_TEMP/r2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
           "$RUNNER_TEMP/r2-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
       - name: Real browser first-use baseline FR and AR
+        timeout-minutes: 8
         working-directory: .
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -199,8 +200,10 @@ jobs:
                       blocked.append(req.method)
                       route.abort()
               def block_ws(ws):
+                  # A routed WebSocket is mocked by default. Never connect to its
+                  # upstream server. Avoid a synchronous close inside the callback.
                   websocket_attempts.append(True)
-                  ws.close()
+                  print("R2_WS_ROUTE_INTERCEPTED", flush=True)
               # Register routing before any page is created (Playwright API recommendation).
               context.route("**/*", local_only)
               context.route_web_socket("**/*", block_ws)
@@ -257,19 +260,27 @@ jobs:
                       context = browser.new_context(service_workers="block")
                       page, verdict = attach_guard(context, origin)
                       try:
-                          page.set_content("<html><body>synthetic late-event fixture</body></html>")
+                          print("R2_NEGATIVE_START " + engine + " " + event, flush=True)
+                          response = page.goto(origin + "/__r2_guard_fixture", timeout=10000)
+                          assert response and response.status == 200
                           assert verdict()["late_event_gate"] == "PASS", "negative fixture precondition"
                           if event == "late_js_error":
                               page.evaluate("() => setTimeout(() => { throw new Error('R2 synthetic late error'); }, 25)")
                           elif event == "late_http_block":
                               page.evaluate("(url) => fetch(url).catch(() => null)", origin + "/api/r2-negative")
                           else:
-                              page.evaluate("(url) => { const socket = new WebSocket(url); socket.onerror = () => {}; }",
+                              page.evaluate("(url) => { setTimeout(() => { const socket = new WebSocket(url); socket.onerror = () => {}; }, 25); }",
                                             origin.replace("http:", "ws:") + "/r2-negative")
-                          page.wait_for_timeout(300)
+                          for _ in range(20):
+                              page.wait_for_timeout(100)
+                              if verdict()[count_key] > 0:
+                                  break
+                          print("R2_NEGATIVE_BEFORE_CLOSE " + engine + " " + event + " " + json.dumps(verdict()), flush=True)
                       finally:
                           context.close()
                       state = verdict()
+                      if event == "late_websocket_block":
+                          assert not websocket_upstream_hits, "WebSocket reached local upstream"
                       assert state[count_key] > 0 and state["late_event_gate"] == "FAIL", event + " accepted"
                       assert all(state[k] == 0 for k in ("page_errors", "blocked_requests", "websocket_attempts")
                                  if k != count_key), event + " not isolated"
@@ -280,9 +291,22 @@ jobs:
               print("R2_NEGATIVE_PASS " + engine + " 6/6", flush=True)
 
           results = []
+          websocket_upstream_hits = []
           class Handler(http.server.SimpleHTTPRequestHandler):
               def __init__(self, *args, **kwargs):
                   super().__init__(*args, directory=str(web), **kwargs)
+              def do_GET(self):
+                  if self.path == "/r2-negative":
+                      websocket_upstream_hits.append(True)
+                      self.send_error(403)
+                  elif self.path == "/__r2_guard_fixture":
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/html; charset=utf-8")
+                      self.end_headers()
+                      self.wfile.write(b"<!doctype html><title>R2 guard fixture</title>")
+                  else:
+                      super().do_GET()
+
               def log_message(self, *_args):
                   pass
 
