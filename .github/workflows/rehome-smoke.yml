@@ -243,6 +243,51 @@ jobs:
           echo R2_FLUTTER_BUILD_PASS
 
 
+      - name: Attest compiled build and generated localization drift
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/r2-build-attestation"
+          cat > "$RUNNER_TEMP/r2-build-attest.py" <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          def git(*args):
+              return subprocess.check_output(["git", *args])
+
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-build-attestation"
+          expected = os.environ["EXPECTED_SHA"]
+          assert git("rev-parse", "HEAD").decode().strip() == expected
+          allowed = {"frontend/lib/l10n/app_localizations" + suffix + ".dart"
+                     for suffix in ("", "_ar", "_en", "_fr")}
+          changed = sorted(filter(None, git("diff", "HEAD", "--name-only", "-z", "--", "frontend").decode().split("\0")))
+          untracked = sorted(filter(None, git("ls-files", "--others", "--exclude-standard", "-z", "--", "frontend").decode().split("\0")))
+          diff = git("diff", "--binary", "HEAD", "--", "frontend")
+          assert set(changed) <= allowed, "Unexpected tracked frontend drift"
+          assert not untracked, "Unexpected untracked frontend source"
+          web = Path("frontend/build/web")
+          files = sorted(p for p in web.rglob("*") if p.is_file())
+          assert files and (web/"main.dart.js").is_file()
+          manifest = {p.relative_to(web).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
+          receipt = dict(source_sha=expected, changed_paths=changed,
+                         diff_sha256=hashlib.sha256(diff).hexdigest(),
+                         build_files=manifest)
+          mode = sys.argv[1]
+          if mode == "record":
+              (proof/"generated-localization.diff").write_bytes(diff)
+              (proof/"manifest.json").write_text(json.dumps(receipt,sort_keys=True,indent=2))
+          else:
+              assert mode == "verify"
+              assert receipt == json.loads((proof/"manifest.json").read_text()), "Build or generated-source drift between browser tests"
+          print("R2_BUILD_ATTESTATION", mode, len(files), "files", "generated_drift", changed, flush=True)
+          PY
+          python3 "$RUNNER_TEMP/r2-build-attest.py" record
       - name: Install pinned Playwright Chromium and WebKit
         run: |
           set -euo pipefail
@@ -745,7 +790,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          git diff --exit-code -- frontend/lib
+          python3 "$RUNNER_TEMP/r2-build-attest.py" verify
           python3 - <<'PY'
           import os
           import textwrap
@@ -759,6 +804,20 @@ jobs:
           (Path(os.environ["RUNNER_TEMP"]) / "r2-headed-app.py").write_text(script)
           PY
           xvfb-run -a -s "-screen 0 1600x1200x24" "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-headed-app.py"
+      - name: Verify build identity after browser diagnostics
+        if: ${{ !cancelled() && (steps.r2_browser.outcome == 'failure' || steps.r2_browser.outcome == 'success') }}
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 "$RUNNER_TEMP/r2-build-attest.py" verify
+      - name: Retain build identity and generated localization diff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-build-attestation-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-build-attestation/
+          retention-days: 14
+          if-no-files-found: warn
       - name: Retain headed WebKit application observations
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
