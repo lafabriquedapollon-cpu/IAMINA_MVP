@@ -188,10 +188,6 @@ jobs:
 
           def attach_guard(context, origin):
               blocked, errors, websocket_attempts, console = [], [], [], []
-              page = context.new_page()
-              page.on("pageerror", lambda err: errors.append(type(err).__name__))
-              page.on("console", lambda msg: console.append(msg.type)
-                      if msg.type in ("error", "warning") else None)
               def local_only(route):
                   req = route.request
                   if req.url.startswith(("data:", "blob:")):
@@ -205,8 +201,13 @@ jobs:
               def block_ws(ws):
                   websocket_attempts.append(True)
                   ws.close()
+              # Register routing before any page is created (Playwright API recommendation).
               context.route("**/*", local_only)
               context.route_web_socket("**/*", block_ws)
+              page = context.new_page()
+              page.on("pageerror", lambda err: errors.append(type(err).__name__))
+              page.on("console", lambda msg: console.append(msg.type)
+                      if msg.type in ("error", "warning") else None)
               def verdict():
                   return dict(blocked_requests=len(blocked), page_errors=len(errors),
                               websocket_attempts=len(websocket_attempts),
