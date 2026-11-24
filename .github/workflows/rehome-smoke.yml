@@ -224,8 +224,6 @@ jobs:
                                           result["failure_type"] = type(exc).__name__
                                           print(f"R2_BROWSER {label} FAIL: {type(exc).__name__}", flush=True)
                                       finally:
-                                          result["blocked_requests"] = len(blocked)
-                                          result["page_errors"] = len(errors)
                                           try:
                                               shot = proof / (label + ".png")
                                               # Wait for actual painted pixels; semantics alone is insufficient.
@@ -285,7 +283,17 @@ jobs:
                                               except Exception as exc:
                                                   result["asset_probe"] = {"error_type": type(exc).__name__}
                                               finally:
+                                                  # Final counters include paint polling and the local asset probe.
+                                                  # Close the context before recording the final verdict.
                                                   context.close()
+                                                  result["blocked_requests"] = len(blocked)
+                                                  result["page_errors"] = len(errors)
+                                                  result["console_warning_error_count"] = len(console_errors)
+                                                  if blocked or errors:
+                                                      result["result"] = "FAIL"
+                                                      result["late_event_gate"] = "FAIL"
+                                                  else:
+                                                      result["late_event_gate"] = "PASS"
                                               print("R2_BROWSER " + json.dumps(result), flush=True)
                           finally:
                               browser.close()
