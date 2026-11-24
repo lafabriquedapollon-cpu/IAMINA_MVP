@@ -178,9 +178,15 @@ jobs:
                   def spread(image):
                       return max(hi - lo for lo, hi in image.getextrema())
                   digest = hashlib.sha256(rgb.tobytes()).hexdigest()
+                  # Second exact RGB reference approved after local full-pixel comparison:
+                  # run 45446057732 / artifact 14945469602, max channel delta 2/255.
+                  # Only this exact, complete AR-mobile image is accepted; no fuzzy threshold.
+                  known_variant = (label == "webkit-ar-MA-390x844" and
+                      digest == "cd9a9e3ae2a4ef4ffab19522614f598f0fba019ed4db0418b4b53e586d91e5c8")
                   metrics = dict(logo_teal_pixels=teal_count(logo), pixel_range=spread(rgb),
                                  card_teal_pixels=teal_count(card), card_pixel_range=spread(card),
-                                 rgb_sha256=digest, reference_match=digest == reference_rgb[label])
+                                 rgb_sha256=digest, approved_variant=known_variant,
+                                 reference_match=digest == reference_rgb[label] or known_variant)
               metrics["old_pixel_gate"] = (metrics["logo_teal_pixels"] >= 2000 and
                   metrics["pixel_range"] >= 80 and metrics["card_teal_pixels"] >= 5000 and
                   metrics["card_pixel_range"] >= 80)
@@ -387,6 +393,29 @@ jobs:
                                               result["screenshot_sha256"] = hashlib.sha256(shot.read_bytes()).hexdigest()
                                               assert shot.stat().st_size >= 1000
                                               assert paint_streak >= 2, "Reference RGB / logo / card paint gate failed"
+                                              # Mandatory viewport round-trip on every targeted AR mobile case.
+                                              # Keep the initial verdict and all post-resize frames separate.
+                                              if reference_label == "webkit-ar-MA-390x844":
+                                                  result["resize_gate"] = "FAIL"
+                                                  result["resize_frames"] = resize_frames = []
+                                                  try:
+                                                      page.set_viewport_size({"width":width+1,"height":height})
+                                                      page.wait_for_timeout(350)
+                                                  finally:
+                                                      page.set_viewport_size({"width":width,"height":height})
+                                                  page.wait_for_timeout(350)
+                                                  for n in (1, 2):
+                                                      candidate = proof / (label + "-resize-" + str(n) + ".png")
+                                                      page.screenshot(path=str(candidate), timeout=10000)
+                                                      metrics = assess_frame(candidate,width,height,reference_label)
+                                                      resize_frames.append(dict(file=candidate.name,
+                                                          monotonic_ns=time.monotonic_ns(),
+                                                          sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                                                          metrics=metrics))
+                                                      if n == 1:
+                                                          page.wait_for_timeout(500)
+                                                  assert all(frame["metrics"]["complete"] for frame in resize_frames), "Post-resize visual gate failed"
+                                                  result["resize_gate"] = "PASS"
                                           except Exception:
                                               result["result"] = "FAIL"
                                               result["screenshot_error"] = True
@@ -507,9 +536,11 @@ jobs:
                   and r["viewport"] == [390, 844]]
           assert len(results) == 12 and len(baseline) == 8, "Browser matrix incomplete"
           assert sorted(r["repetition"] for r in cold) == [0, 1, 2, 3, 4], "Cold-start matrix incomplete"
+          assert all(r.get("resize_gate") == "PASS" for r in cold), "WebKit AR mobile resize matrix failed"
           assert all(r["result"] == "PASS" for r in results), "Browser matrix or cold starts failed"
           print("R2_BROWSER_MATRIX_PASS 8/8")
           print("R2_WEBKIT_AR_MOBILE_PASS 5/5")
+          print("R2_WEBKIT_AR_MOBILE_RESIZE_PASS 5/5")
           PY
       - name: Retain synthetic first-use screenshots and matrix
         if: always()
