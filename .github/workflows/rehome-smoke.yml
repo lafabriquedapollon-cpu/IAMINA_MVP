@@ -149,8 +149,22 @@ jobs:
           proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / ("r2-ab-canvas-only" if experiment else "r2-browser-proof")
           proof.mkdir(exist_ok=experiment)
           if experiment:
-              with Image.open(baseline_proof / "webkit-ar-MA-390x844.png") as png:
-                  experiment_reference = png.convert("RGB").crop((0,154,390,844))
+              matrix = json.loads((baseline_proof / "matrix.json").read_text())
+              verified_frames = [(r, frame) for r in matrix
+                  if r.get("reference_label") == "webkit-ar-MA-390x844"
+                  for frame in r.get("frames", []) if frame["metrics"]["complete"]]
+              assert verified_frames, "No complete A frame for controlled B comparison"
+              r, frame = verified_frames[0]
+              candidate = baseline_proof / frame["file"]
+              assert hashlib.sha256(candidate.read_bytes()).hexdigest() == frame["sha256"]
+              with Image.open(candidate) as png:
+                  rgb = png.convert("RGB")
+                  assert rgb.size == (390,844)
+                  assert hashlib.sha256(rgb.tobytes()).hexdigest() == frame["metrics"]["rgb_sha256"]
+                  experiment_reference = rgb.crop((0,154,390,844))
+              (proof / "reference.json").write_text(json.dumps({
+                  "case": r["label"], "frame": frame, "source_sha": r["source_sha"],
+              }, indent=2))
           assert (web / "index.html").is_file()
           logo_path = web / "assets/assets/images/iamina_logo_vertical.png"
           assert logo_path.is_file(), "Logo missing from compiled assets"
@@ -196,11 +210,11 @@ jobs:
               metrics["old_pixel_gate"] = (metrics["logo_teal_pixels"] >= 2000 and
                   metrics["pixel_range"] >= 80 and metrics["card_teal_pixels"] >= 5000 and
                   metrics["card_pixel_range"] >= 80)
-                  if experiment:
-                      assert label == "webkit-ar-MA-390x844"
-                      assert card.size == experiment_reference.size
-                      metrics["ab_body_max_delta"] = max(hi for _, hi in
-                          ImageChops.difference(card, experiment_reference).getextrema())
+              if experiment:
+                  assert label == "webkit-ar-MA-390x844"
+                  assert card.size == experiment_reference.size
+                  metrics["ab_body_max_delta"] = max(hi for _, hi in
+                      ImageChops.difference(card, experiment_reference).getextrema())
               metrics["complete"] = metrics["old_pixel_gate"] and (
                   metrics["ab_body_max_delta"] <= 2 if experiment else metrics["reference_match"])
               return metrics
@@ -449,7 +463,7 @@ jobs:
                                           finally:
                                               # Diagnostic-only experiments AFTER the original verdict.
                                               # A recovered screenshot must never promote this failed case.
-                                              if result.get("screenshot_error") and engine == "webkit" and locale == "ar-MA" and width == 390:
+                                              if not experiment and result.get("screenshot_error") and engine == "webkit" and locale == "ar-MA" and width == 390:
                                                   diagnostic = {}
                                                   result["composition_diagnostic"] = diagnostic
                                                   try:
