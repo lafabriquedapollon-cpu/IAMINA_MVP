@@ -96,7 +96,7 @@ jobs:
           git diff --exit-code -- pubspec.lock
       - name: Analyze Flutter
         run: flutter analyze --no-fatal-infos --no-pub
-- name: Targeted synthetic Flutter VM regressions
+      - name: Targeted synthetic Flutter VM regressions
         run: |
           flutter test --no-pub --reporter expanded \
             test/data/drift/patient_vault_scope_test.dart \
@@ -190,7 +190,7 @@ jobs:
           python manage.py makemigrations --check --dry-run
       - name: Targeted synthetic health regression
         run: python -m pytest diabetes/tests/test_health_endpoint.py --tb=short -q
-- name: Targeted synthetic PostgreSQL and egress regressions
+      - name: Targeted synthetic PostgreSQL and egress regressions
         run: |
           python -m pytest --tb=short -q \
             diabetes/tests/test_entries.py \
