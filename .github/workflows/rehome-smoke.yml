@@ -316,15 +316,22 @@ jobs:
               origin = f"http://127.0.0.1:{server.server_address[1]}"
               try:
                   with sync_playwright() as pw:
-                      for engine in ("chromium", "webkit"):
+                      # Four additional cold WebKit processes, not retries of failed cases.
+                      for engine, repetition in [("chromium", 0), ("webkit", 0)] + [
+                              ("webkit", n) for n in range(1, 5)]:
                           browser = getattr(pw, engine).launch(headless=True)
                           try:
-                              negative_cases(browser, engine, origin)
-                              for locale, cta in (("fr-FR", "Continuer sans compte"),
-                                                  ("ar-MA", "المتابعة بدون حساب")):
-                                  for width, height in ((390, 844), (1180, 860)):
-                                      label = f"{engine}-{locale}-{width}x{height}"
+                              if repetition == 0:
+                                  negative_cases(browser, engine, origin)
+                              locales = (("ar-MA", "المتابعة بدون حساب"),) if repetition else (
+                                  ("fr-FR", "Continuer sans compte"), ("ar-MA", "المتابعة بدون حساب"))
+                              viewports = ((390, 844),) if repetition else ((390, 844), (1180, 860))
+                              for locale, cta in locales:
+                                  for width, height in viewports:
+                                      reference_label = f"{engine}-{locale}-{width}x{height}"
+                                      label = reference_label + (f"-cold-{repetition}" if repetition else "")
                                       result = dict(engine=engine, browser_version=browser.version,
+                                                    repetition=repetition, label=label, reference_label=reference_label,
                                                     locale=locale, viewport=[width, height],
                                                     source_sha=os.environ["EXPECTED_SHA"],
                                                     result="FAIL")
@@ -363,7 +370,7 @@ jobs:
                                               for attempt in range(12):
                                                   candidate = proof / (label + "-attempt-" + str(attempt + 1) + ".png")
                                                   page.screenshot(path=str(candidate), timeout=10000)
-                                                  metrics = assess_frame(candidate, width, height, label)
+                                                  metrics = assess_frame(candidate, width, height, reference_label)
                                                   frame = dict(file=candidate.name, attempt=attempt + 1,
                                                                monotonic_ns=time.monotonic_ns(),
                                                                sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),
@@ -410,7 +417,7 @@ jobs:
                                                           path = proof / (label + "-diag-" + name + ".png")
                                                           page.screenshot(path=str(path), timeout=10000)
                                                           return dict(file=path.name, sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                                                                      metrics=assess_frame(path,width,height,label))
+                                                                      metrics=assess_frame(path,width,height,reference_label))
                                                       # Hide the native logo element only; preserve layout.
                                                       diagnostic["hidden_logo_count"] = page.evaluate("""() => {
                                                         const matches = [];
@@ -495,8 +502,14 @@ jobs:
                   server.shutdown()
                   worker.join(timeout=5)
                   (proof / "matrix.json").write_text(json.dumps(results, indent=2))
-          assert len(results) == 8 and all(r["result"] == "PASS" for r in results), "Browser matrix incomplete or failed"
+          baseline = [r for r in results if r["repetition"] == 0]
+          cold = [r for r in results if r["engine"] == "webkit" and r["locale"] == "ar-MA"
+                  and r["viewport"] == [390, 844]]
+          assert len(results) == 12 and len(baseline) == 8, "Browser matrix incomplete"
+          assert sorted(r["repetition"] for r in cold) == [0, 1, 2, 3, 4], "Cold-start matrix incomplete"
+          assert all(r["result"] == "PASS" for r in results), "Browser matrix or cold starts failed"
           print("R2_BROWSER_MATRIX_PASS 8/8")
+          print("R2_WEBKIT_AR_MOBILE_PASS 5/5")
           PY
       - name: Retain synthetic first-use screenshots and matrix
         if: always()
