@@ -142,6 +142,14 @@ jobs:
           proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r2-browser-proof"
           proof.mkdir()
           assert (web / "index.html").is_file()
+          logo_path = web / "assets/assets/images/iamina_logo_vertical.png"
+          assert logo_path.is_file(), "Logo missing from compiled assets"
+          with Image.open(logo_path) as logo_source:
+              logo_source.load()
+              print("R2_LOGO_SOURCE " + json.dumps({
+                  "size": list(logo_source.size), "mode": logo_source.mode,
+                  "sha256": hashlib.sha256(logo_path.read_bytes()).hexdigest(),
+              }), flush=True)
           results = []
           class Handler(http.server.SimpleHTTPRequestHandler):
               def __init__(self, *args, **kwargs):
@@ -173,6 +181,11 @@ jobs:
                                       blocked, errors = [], []
                                       page = context.new_page()
                                       page.on("pageerror", lambda err: errors.append(str(err)))
+                                      asset_responses, console_errors = [], []
+                                      page.on("response", lambda res: asset_responses.append(res.status)
+                                              if res.url.split("?")[0].endswith("/iamina_logo_vertical.png") else None)
+                                      page.on("console", lambda msg: console_errors.append(msg.type)
+                                              if msg.type in ("error", "warning") else None)
                                       def local_only(route):
                                           request = route.request
                                           url = request.url
@@ -236,7 +249,42 @@ jobs:
                                               result["result"] = "FAIL"
                                               result["screenshot_error"] = True
                                           finally:
-                                              context.close()
+                                              # Probe the same asset independently of Flutter's renderer.
+                                              result["app_logo_http_statuses"] = list(asset_responses)
+                                              result["console_warning_error_count"] = len(console_errors)
+                                              try:
+                                                  result["asset_probe"] = page.evaluate("""async () => {
+                                                    const path = '/assets/assets/images/iamina_logo_vertical.png';
+                                                    const response = await fetch(path);
+                                                    const bytes = await response.arrayBuffer();
+                                                    const blob = new Blob([bytes], {type: 'image/png'});
+                                                    const url = URL.createObjectURL(blob);
+                                                    try {
+                                                      const image = new Image();
+                                                      image.src = url;
+                                                      await image.decode();
+                                                      const canvas = document.createElement('canvas');
+                                                      canvas.width = image.naturalWidth;
+                                                      canvas.height = image.naturalHeight;
+                                                      const ctx = canvas.getContext('2d');
+                                                      ctx.drawImage(image, 0, 0);
+                                                      const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                                                      let teal = 0, opaque = 0;
+                                                      for (let i = 0; i < pixels.length; i += 4) {
+                                                        if (pixels[i+3] > 127) {
+                                                          opaque++;
+                                                          if (pixels[i] < 90 && pixels[i+1] < 160 &&
+                                                              pixels[i+2] < 150 && pixels[i+1] > pixels[i] + 15) teal++;
+                                                        }
+                                                      }
+                                                      return {status: response.status, bytes: bytes.byteLength,
+                                                        width: canvas.width, height: canvas.height, opaque, teal};
+                                                    } finally { URL.revokeObjectURL(url); }
+                                                  }""")
+                                              except Exception as exc:
+                                                  result["asset_probe"] = {"error_type": type(exc).__name__}
+                                              finally:
+                                                  context.close()
                                               print("R2_BROWSER " + json.dumps(result), flush=True)
                           finally:
                               browser.close()
