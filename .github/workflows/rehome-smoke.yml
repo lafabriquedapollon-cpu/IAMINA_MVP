@@ -272,8 +272,12 @@ jobs:
 
           web = pathlib.Path("frontend/build/web").resolve()
           experiment = os.environ.get("R2_AB_VARIANT") == "canvas-only"
+          headed = os.environ.get("R2_WEBKIT_HEADED") == "1"
+          assert not (experiment and headed), "Diagnostic modes must be isolated"
           baseline_proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r2-browser-proof"
-          proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / ("r2-ab-canvas-only" if experiment else "r2-browser-proof")
+          proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / (
+              "r2-ab-canvas-only" if experiment else
+              "r2-webkit-headed-app" if headed else "r2-browser-proof")
           proof.mkdir(exist_ok=experiment)
           if experiment:
               matrix = json.loads((baseline_proof / "matrix.json").read_text())
@@ -476,10 +480,10 @@ jobs:
               try:
                   with sync_playwright() as pw:
                       # B is a separate experiment, never a substitute for a failed A.
-                      launches = ([("webkit", n) for n in range(5)] if experiment else
+                      launches = ([("webkit", n) for n in range(5)] if experiment or headed else
                                   [("chromium", 0), ("webkit", 0)] + [("webkit", n) for n in range(1, 5)])
                       for engine, repetition in launches:
-                          browser = getattr(pw, engine).launch(headless=True)
+                          browser = getattr(pw, engine).launch(headless=not headed)
                           try:
                               if repetition == 0 and not experiment:
                                   negative_cases(browser, engine, origin)
@@ -492,7 +496,8 @@ jobs:
                                       label = reference_label + (f"-cold-{repetition}" if repetition else "")
                                       result = dict(engine=engine, browser_version=browser.version,
                                                     repetition=repetition, label=label, reference_label=reference_label,
-                                                    experiment="canvas-only" if experiment else "baseline",
+                                                    experiment="canvas-only" if experiment else "headed" if headed else "baseline",
+                                                    headed=headed,
                                                     locale=locale, viewport=[width, height],
                                                     source_sha=os.environ["EXPECTED_SHA"],
                                                     result="FAIL")
@@ -708,6 +713,11 @@ jobs:
               assert all(r.get("native_logo_count") == 0 for r in cold), "B native logo not excluded"
               assert all(r.get("resize_gate") == "PASS" and r["result"] == "PASS" for r in cold), "B canvas-only experiment failed"
               print("R2_AB_CANVAS_ONLY_PASS 5/5 (diagnostic only)")
+          elif headed:
+              assert len(results) == 8 and len(baseline) == 4, "Headed WebKit matrix incomplete"
+              assert all(r.get("resize_gate") == "PASS" for r in cold), "Headed AR mobile resize matrix failed"
+              assert all(r["result"] == "PASS" for r in results), "Headed WebKit matrix failed"
+              print("R2_WEBKIT_HEADED_APP_PASS 8/8; AR resize 5/5 (diagnostic only)")
           else:
               assert len(results) == 12 and len(baseline) == 8, "Browser matrix incomplete"
               assert all(r.get("resize_gate") == "PASS" for r in cold), "WebKit AR mobile resize matrix failed"
@@ -725,8 +735,43 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: Compare unchanged application in headed WebKit under Xvfb
+        if: ${{ !cancelled() && (steps.r2_browser.outcome == 'failure' || steps.r2_browser.outcome == 'success') }}
+        timeout-minutes: 8
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          R2_WEBKIT_HEADED: "1"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git diff --exit-code -- frontend/lib
+          python3 - <<'PY'
+          import os
+          import textwrap
+          from pathlib import Path
+          workflow = Path(".github/workflows/rehome-smoke.yml").read_text()
+          # Construct the marker in pieces: it must identify the baseline block only.
+          marker = '"$RUNNER_TEMP/r2-browser-venv/bin/python" - ' + "<<'PY'\n"
+          assert workflow.count(marker) == 1
+          script = textwrap.dedent(workflow.split(marker,1)[1].split("\n          PY",1)[0])
+          compile(script, "<r2-headed-app>", "exec")
+          (Path(os.environ["RUNNER_TEMP"]) / "r2-headed-app.py").write_text(script)
+          PY
+          xvfb-run -a -s "-screen 0 1600x1200x24" "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-headed-app.py"
+      - name: Retain headed WebKit application observations
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-webkit-headed-app-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-webkit-headed-app/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # B already failed twice; retain the experiment for reproducibility,
+      # but do not rebuild a known rejected candidate on every diagnostic run.
       - name: Isolated B experiment without native logo platform view
-        if: ${{ !cancelled() && steps.r2_browser.outcome == 'failure' }}
+        if: ${{ false }}
         timeout-minutes: 12
         working-directory: .
         env:
