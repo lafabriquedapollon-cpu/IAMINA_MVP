@@ -106,10 +106,15 @@ def run():
                                 ctx = browser.new_context(locale=locale, viewport={"width":w,"height":h},
                                                           device_scale_factor=1, service_workers="block")
                                 blocked, errors, frames = [], [], []
+                                legacy_requests = []
                                 page = None
                                 try:
                                     def route(r):
                                         url = r.request.url
+                                        if cutover and any(url.split("?")[0].endswith("/"+name) for name in ("sqlite3.wasm","drift_worker.js")):
+                                            legacy_requests.append(url.split("?")[0])
+                                            r.abort()
+                                            return
                                         if url.startswith(origin + "/") and "/api/" not in url:
                                             r.continue_()
                                         else:
@@ -117,7 +122,7 @@ def run():
                                             r.abort()
                                     ctx.route("**/*", route)
                                     if cutover:
-                                        ctx.add_init_script("""() => {
+                                        ctx.add_init_script("""(() => {
                                           window.__d1StorageAttempts = [];
                                           const deny = (proto, name) => {
                                             if (typeof proto?.[name] !== "function") return;
@@ -130,7 +135,7 @@ def run():
                                           deny(IDBFactory.prototype, "deleteDatabase");
                                           deny(globalThis.StorageManager?.prototype, "getDirectory");
                                           deny(Storage.prototype, "setItem");
-                                        }""")
+                                        })()""")
                                     page = ctx.new_page()
                                     page.on("pageerror", lambda e: errors.append(str(e)[:200]))
                                     page.goto(origin, wait_until="domcontentloaded")
@@ -189,6 +194,8 @@ def run():
                                           caches: await caches.keys()
                                         })""")
                                         record["cutover_storage"] = storage
+                                        record["legacy_storage_requests"] = legacy_requests
+                                        assert not legacy_requests, legacy_requests
                                         assert storage == {"attempts": [], "databases": [], "local": 0, "session": 0, "caches": []}, storage
                                     assert not blocked, "Guest made non-static network request"
                                     assert not errors, "Browser runtime error"
