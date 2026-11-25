@@ -1473,7 +1473,7 @@ jobs:
           python manage.py makemigrations --check --dry-run
           python -m pytest -q core/tests/test_d3_feature_intents.py core/tests/test_d3_feature_intents_http.py core/tests/test_account_consent_identity_safety.py core/tests/test_ai_egress_boundary_gate.py
           if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then
-            python -m pytest -q core/tests/test_d1_cutover_freeze.py
+            python -m pytest -q core/tests/test_d1_test_access.py
           fi
 
   # Mandatory full OPFS restoration on a supporting platform; Linux must

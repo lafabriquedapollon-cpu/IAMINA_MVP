@@ -30,12 +30,6 @@ if not DEBUG and '*' in ALLOWED_HOSTS:
 # Default is False — admin must be opt-in via .env (ENABLE_DJANGO_ADMIN=True).
 ENABLE_DJANGO_ADMIN = os.environ.get('ENABLE_DJANGO_ADMIN', 'False').lower() == 'true'
 
-# Explicit temporary cutover hold; never silently accept a malformed setting.
-_d1_cutover_freeze = os.environ.get('IAMINA_D1_CUTOVER_FREEZE', 'false').strip().lower()
-if _d1_cutover_freeze not in ('true', 'false'):
-    raise ValueError('IAMINA_D1_CUTOVER_FREEZE must be true or false')
-D1_CUTOVER_FREEZE = _d1_cutover_freeze == 'true'
-
 # Legacy Kimi toggle retained for compatibility only. Text provider selection is governed by LLM_PROVIDER below.
 USE_KIMI_LLM = os.environ.get('USE_KIMI', 'False').lower() == 'true'
 MEDICAL_PILOT_MODE = os.environ.get('MEDICAL_PILOT_MODE', 'False').lower() == 'true'
@@ -69,7 +63,6 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
-    'core.middleware.d1_cutover.D1CutoverFreezeMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'core.middleware.auth_abuse.AuthAbuseProtectionMiddleware',
