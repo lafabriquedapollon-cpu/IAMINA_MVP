@@ -51,22 +51,11 @@ Future<void> main() async {
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       debugShowCheckedModeBanner: false,
-      home: D2GuestEntry(
-        registrationAvailable: kRemoteAccountSignInEnabled && kRemoteAccountEnrollmentEnabled,
-        authenticate: kRemoteAccountSignInEnabled ? (email, password, register) async {
-          final auth = AuthService();
-          try {
-            if (register) {
-              await auth.registerWithEmail(email, password);
-            } else {
-              await auth.signInWithEmail(email, password);
-            }
-            return auth.isRemoteCredentialVerified && auth.boundNativeAccountId != null;
-          } finally {
-            auth.dispose();
-          }
-        } : null,
-      ),
+      // This candidate is guest-only even if remote account flags are true.
+      // Do not persist a bearer or enroll an account outside the normal
+      // protected-state/app-lock/vault admission path. Widget tests inject
+      // synthetic authentication; real admission must be integrated separately.
+      home: const D2GuestEntry(),
     ));
     return;
   }

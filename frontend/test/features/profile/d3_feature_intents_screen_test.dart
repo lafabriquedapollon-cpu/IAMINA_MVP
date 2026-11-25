@@ -73,6 +73,47 @@ void main() {
     expect(find.byKey(const Key('d3-unknown')), findsOneWidget);
   });
 
+  testWidgets('retired scope cannot reload after locale change', (tester) async {
+    final epoch = ValueNotifier(1);
+    addTearDown(epoch.dispose);
+    var reads = 0;
+    Future<Map<String, dynamic>> read(String locale) async {
+      reads++;
+      return envelope(locale, photo: true);
+    }
+    Future<void> write(String feature, Map<String, dynamic> body) async {
+      fail('retired scope cannot write');
+    }
+    await tester.pumpWidget(app(epoch, read, write, 'fr'));
+    await tester.pumpAndSettle();
+    expect(reads, 1);
+    epoch.value = 2;
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(app(epoch, read, write, 'ar'));
+    await tester.pumpAndSettle();
+    expect(reads, 1);
+    expect(find.byType(SwitchListTile), findsNothing);
+    expect(find.byKey(const Key('d3-unknown')), findsOneWidget);
+  });
+
+  testWidgets('confirmation cannot write after scope retirement', (tester) async {
+    final epoch = ValueNotifier(1);
+    addTearDown(epoch.dispose);
+    var writes = 0;
+    await tester.pumpWidget(app(epoch, (l) async => envelope(l),
+      (_, __) async { writes++; }, 'fr'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('d3-photo')));
+    await tester.pumpAndSettle();
+    epoch.value = 2;
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('d3-confirm')));
+    await tester.pumpAndSettle();
+    expect(writes, 0);
+    expect(find.byType(SwitchListTile), findsNothing);
+    expect(find.byKey(const Key('d3-unknown')), findsOneWidget);
+  });
+
   testWidgets('missing receipt disables controls; unauthorized response is rejected', (tester) async {
     final epoch = ValueNotifier(1);
     addTearDown(epoch.dispose);

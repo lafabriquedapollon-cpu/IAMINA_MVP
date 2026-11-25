@@ -28,6 +28,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
   bool _busy = false;
   bool _confirming = false;
   bool _error = false;
+  bool _retired = false;
   String? _locale;
 
   String _t(String fr, String ar, String en) => switch (_locale) {
@@ -53,7 +54,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
     final next = ['fr', 'ar', 'en'].contains(language) ? language : 'fr';
     if (_locale != next) {
       _locale = next;
-      _invalidateAndRead();
+      if (!_retired) _invalidateAndRead();
     }
   }
 
@@ -63,22 +64,25 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
     if (oldWidget.scopeEpoch != widget.scopeEpoch) {
       oldWidget.scopeEpoch.removeListener(_scopeChanged);
       widget.scopeEpoch.addListener(_scopeChanged);
-      _invalidateAndRead();
+      _scopeChanged();
     }
   }
 
   void _scopeChanged() {
     setState(() {
+      _retired = true;
       _generation++;
       _snapshot = null;
       _busy = false;
       _confirming = false;
       _error = true;
     });
-    // Never auto-load a different account through the retiring host.
+    // Terminal retirement for this State, including subsequent locale changes.
+    // A fresh authorized host must mount a new keyed screen.
   }
 
   void _invalidateAndRead() {
+    if (_retired) return;
     _generation++;
     _snapshot = null;
     _busy = false;
@@ -118,6 +122,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
   }
 
   Future<void> _load() async {
+    if (_retired) return;
     final generation = _generation;
     final epoch = widget.scopeEpoch.value;
     final locale = _locale!;
@@ -134,7 +139,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
 
   Future<void> _change(Map item, bool enabled) async {
     final snapshot = _snapshot;
-    if (_busy || _confirming || snapshot == null) return;
+    if (_retired || _busy || _confirming || snapshot == null) return;
     final generation = _generation;
     final epoch = widget.scopeEpoch.value;
     final feature = item['feature'] as String;
