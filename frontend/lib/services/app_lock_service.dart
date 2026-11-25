@@ -30,11 +30,13 @@ final class D1VaultAdmissionGuard {
   final D1VaultAdmissionProof _proof;
   bool _claimed = false;
   bool _active = false;
+  bool _retired = false;
+  VoidCallback? _onRetired;
 
   D1VaultAdmissionGuard._(this._issuer, this._proof);
 
   bool _context(int owner, int epoch) =>
-      owner == _proof._owner && epoch == _proof._epoch &&
+      !_retired && owner == _proof._owner && epoch == _proof._epoch &&
       _issuer._unlocked &&
       _issuer._admissionGeneration == _proof._admissionGeneration &&
       _issuer._hasAdmissionContext(owner, _proof._authGeneration, epoch);
@@ -63,6 +65,26 @@ final class D1VaultAdmissionGuard {
 
   bool checkSession(int owner, int epoch) =>
       _active && _context(owner, epoch);
+
+  /// Register exactly one synchronous retirement callback before acquiring
+  /// the durable lease. A failed registration cannot authorize admission.
+  bool watchRetirement(int owner, int epoch, VoidCallback callback) {
+    if (!checkPending(owner, epoch) || _onRetired != null) return false;
+    _onRetired = callback;
+    return true;
+  }
+
+  void _retire() {
+    _retired = true;
+    final callback = _onRetired;
+    _onRetired = null;
+    if (callback != null) {
+      try { callback(); }
+      catch (error, stack) {
+        FlutterError.reportError(FlutterErrorDetails(exception: error, stack: stack));
+      }
+    }
+  }
 }
 
 class AppLockService extends ChangeNotifier {
@@ -90,6 +112,7 @@ class AppLockService extends ChangeNotifier {
   static const _admissionLifetime = Duration(seconds: 30);
   int _admissionGeneration = 0;
   D1VaultAdmissionProof? _pendingAdmission;
+  D1VaultAdmissionGuard? _currentAdmissionGuard;
 
   bool _initialized = false;
   bool _configured = false;
@@ -121,6 +144,7 @@ class AppLockService extends ChangeNotifier {
         _now = now ?? DateTime.now,
         _admissionElapsedForTesting = admissionElapsedForTesting {
     _authService?.addListener(_handleAuthChanged);
+    _authService?.addAdmissionTransitionListener(_retireAdmission);
   }
 
   bool get isInitialized => _initialized;
@@ -371,6 +395,9 @@ class AppLockService extends ChangeNotifier {
   void _retireAdmission() {
     _pendingAdmission = null;
     _admissionGeneration++;
+    final guard = _currentAdmissionGuard;
+    _currentAdmissionGuard = null;
+    guard?._retire();
   }
 
   Duration get _admissionElapsed =>
@@ -431,7 +458,9 @@ class AppLockService extends ChangeNotifier {
         now < proof._issuedAt || now - proof._issuedAt >= _admissionLifetime) {
       throw const AppLockException('vault_admission_retired');
     }
-    return D1VaultAdmissionGuard._(this, proof);
+    final guard = D1VaultAdmissionGuard._(this, proof);
+    _currentAdmissionGuard = guard;
+    return guard;
   }
 
   void _beginProof() {
@@ -601,6 +630,7 @@ class AppLockService extends ChangeNotifier {
     _proofGeneration++;
     _choiceGeneration++;
     _authService?.removeListener(_handleAuthChanged);
+    _authService?.removeAdmissionTransitionListener(_retireAdmission);
     super.dispose();
   }
 }

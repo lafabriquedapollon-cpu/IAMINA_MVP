@@ -295,6 +295,67 @@ void main() {
     f.lock.consumeVaultAdmissionProof(retry, owner: _a);
   });
 
+  test('live guard retirement is synchronous before a new login response', () async {
+    final f = _Fixture();
+    await f.start();
+    final epoch = AuthService.authEpoch;
+    final guard = f.lock.consumeVaultAdmissionProof(
+        await f.lock.issueVaultAdmissionProof(), owner: _a);
+    expect(guard.claim(_a, epoch), isTrue);
+    var calls = 0;
+    expect(guard.watchRetirement(_a, epoch, () { calls++; }), isTrue);
+    expect(guard.watchRetirement(_a, epoch, () { fail('second watcher'); }), isFalse);
+    expect(guard.activate(_a, epoch), isTrue);
+    expect(guard.checkSession(_a, epoch), isTrue);
+    f.pendingLogin = Completer<http.Response>();
+    final transition = f.auth.signInWithEmail('b@example.invalid', 'fixture');
+    expect(calls, 1);
+    expect(guard.checkSession(_a, epoch), isFalse);
+    expect(guard.activate(_a, epoch), isFalse);
+    f.pendingLogin!.complete(_login(_b));
+    await transition;
+    f.lock.lock();
+    expect(calls, 1);
+  });
+
+  test('pending guard retires on background and cannot revive on resume', () async {
+    final f = _Fixture();
+    await f.start();
+    final epoch = AuthService.authEpoch;
+    final guard = f.lock.consumeVaultAdmissionProof(
+        await f.lock.issueVaultAdmissionProof(), owner: _a);
+    expect(guard.claim(_a, epoch), isTrue);
+    var calls = 0;
+    expect(guard.watchRetirement(_a, epoch, () { calls++; }), isTrue);
+    f.lock.noteBackgrounded();
+    expect(calls, 1);
+    f.lock.noteResumed();
+    expect(guard.checkPending(_a, epoch), isFalse);
+    expect(guard.activate(_a, epoch), isFalse);
+    expect(guard.checkSession(_a, epoch), isFalse);
+    f.lock.noteDetached();
+    expect(calls, 1);
+  });
+
+  test('replacement proof retires old active guard exactly once', () async {
+    final f = _Fixture();
+    await f.start();
+    final epoch = AuthService.authEpoch;
+    final guard = f.lock.consumeVaultAdmissionProof(
+        await f.lock.issueVaultAdmissionProof(), owner: _a);
+    expect(guard.claim(_a, epoch), isTrue);
+    var calls = 0;
+    expect(guard.watchRetirement(_a, epoch, () { calls++; }), isTrue);
+    expect(guard.activate(_a, epoch), isTrue);
+    final replacement = f.lock.consumeVaultAdmissionProof(
+        await f.lock.issueVaultAdmissionProof(), owner: _a);
+    expect(calls, 1);
+    expect(guard.checkSession(_a, epoch), isFalse);
+    expect(replacement.claim(_a, epoch), isTrue);
+    expect(replacement.activate(_a, epoch), isTrue);
+    expect(replacement.checkSession(_a, epoch), isTrue);
+  });
+
   test('identity change during platform assertion rejects issuance', () async {
     final f = _Fixture();
     await f.start();

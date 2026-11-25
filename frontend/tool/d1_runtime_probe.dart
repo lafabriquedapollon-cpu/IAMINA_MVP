@@ -112,13 +112,14 @@ Future<JSFunction> _boundProof(int owner) async {
   final lock = _boundLock!;
   final ticket = await lock.issueVaultAdmissionProof();
   final guard = lock.consumeVaultAdmissionProof(ticket, owner: owner);
-  return ((JSString phase, JSNumber id, JSNumber epoch) {
+  return ((JSString phase, JSNumber id, JSNumber epoch, JSFunction? callback) {
     final o = id.toDartInt, e = epoch.toDartInt;
     return (switch (phase.toDart) {
       'claim' => guard.claim(o, e),
       'pending' => guard.checkPending(o, e),
       'activate' => guard.activate(o, e),
       'session' => guard.checkSession(o, e),
+      'watch' => callback != null && guard.watchRetirement(o, e, () { callback.callAsFunction(); }),
       _ => false,
     }).toJS;
   }).toJS;

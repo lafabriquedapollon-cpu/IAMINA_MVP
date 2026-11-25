@@ -166,13 +166,22 @@ class AuthService extends ChangeNotifier {
   bool _auditSession = false;
   bool _remoteCredentialVerified = false;
   int _identityGeneration = 0;
+  final ValueNotifier<int> _admissionTransitions = ValueNotifier<int>(0);
+
+  // Dedicated invalidation signal, not a publication of a new auth session.
+  void addAdmissionTransitionListener(VoidCallback listener) =>
+      _admissionTransitions.addListener(listener);
+  void removeAdmissionTransitionListener(VoidCallback listener) =>
+      _admissionTransitions.removeListener(listener);
   int? _verifiedIdentityGeneration;
   bool _disposed = false;
   Future<void> _identityStorageTail = Future<void>.value();
 
   int _beginIdentityTransition() {
     if (_disposed) throw const AuthTransitionRetired();
-    return ++_identityGeneration;
+    final generation = ++_identityGeneration;
+    _admissionTransitions.value = generation;
+    return generation;
   }
 
   void _requireIdentityTransition(int generation) {
@@ -643,6 +652,8 @@ class AuthService extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _identityGeneration++;
+    _admissionTransitions.value = _identityGeneration;
+    _admissionTransitions.dispose();
     _nativeToken = null;
     _nativeAccountId = null;
     _remoteCredentialVerified = false;

@@ -859,6 +859,9 @@ I5_BOUND = r"""async ()=>{
   check((await reopened.inspect()).revision===1,'Retired mutation committed');
   check((await reopened.mutate('bound-success-001')).revision===2,'Mutation missing');
   await window.d1BoundLogin(B);
+  // Observe durable retirement before attempting any operation on the old session.
+  for(let i=0;i<100&&await fence()!==null;i++)await new Promise(r=>setTimeout(r,20));
+  check(await fence()===null,'Idle identity retirement did not clear fence');
   await reject(()=>reopened.inspect(),'Bound authority retired');negatives++;
   check(await fence()===null,'Retired identity left fence');
   const bp=await window.d1BoundProof(B);
@@ -871,9 +874,12 @@ I5_BOUND = r"""async ()=>{
   const report=await as.auditSnapshot();
   check(report.revision===2&&report.tables.log_entries.length===2,'A checkpoint mismatch');
   check(report.tables.log_entries.some(x=>x.client_uuid==='d1-i1-900001-op-bound-success-001'),'A row absent');
-  await as.retire();
-  check(await fence()===null,'Final lease still active');
-  return {negativeCases:negatives,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true};
+  window.d1BoundLock();
+  for(let i=0;i<100&&await fence()!==null;i++)await new Promise(r=>setTimeout(r,20));
+  check(await fence()===null,'Idle lock retirement did not clear fence');
+  await reject(()=>as.inspect(),'Bound authority retired');
+  check(await as.retire()===true,'Retirement acknowledgement missing');
+  return {negativeCases:negatives+1,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true,idleRevocation:true};
 }"""
 
 
@@ -881,8 +887,8 @@ def exercise_bound(browser_type,profile,locale,origin):
     ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
     try:
         result=page.evaluate(I5_BOUND)
-        assert result=={"negativeCases":8,"revisionA":2,"revisionB":1,
-                       "leaseBeforeOpen":True,"retiredFenceCleared":True}
+        assert result=={"negativeCases":9,"revisionA":2,"revisionB":1,
+                       "leaseBeforeOpen":True,"retiredFenceCleared":True,"idleRevocation":True}
         assert not blocked and not errors
         return result
     except Exception:
@@ -890,6 +896,85 @@ def exercise_bound(browser_type,profile,locale,origin):
     finally:
         ctx.close()
 
+
+
+# Independent documents share the strict IDB fence, not Dart auth state.
+# Harness retains only synthetic possession secrets outside the browser.
+I5_CROSS_BOOT = r"""async ()=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const keys=await import('/d1_possession_candidate.mjs');
+  const secrets=[keys.generatePossessionSecret(),keys.generatePossessionSecret()];
+  for(let i=0;i<2;i++){
+    const owner=900001+i;
+    const s=await api.enroll(owner,1,api.syntheticProof(owner,
+      {identityVerified:true,unlocked:true,epoch:1}),secrets[i]);
+    await s.retire();
+  }
+  return secrets;
+}"""
+I5_CROSS_OPEN = r"""async ({owner,secret})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  await window.d1BoundLogin(owner);
+  const p=await window.d1BoundProof(owner);
+  window.d1CrossSession=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  return (await window.d1CrossSession.inspect()).revision;
+}"""
+I5_CROSS_FENCE = r"""async ()=>{
+  const db=await new Promise((resolve,reject)=>{
+    const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{return await new Promise((resolve,reject)=>{
+    const tx=db.transaction('state','readonly'),r=tx.objectStore('state').get('fence');
+    tx.oncomplete=()=>resolve(r.result.owner);tx.onabort=()=>reject(new Error('Store failed'));
+  });}finally{db.close();}
+}"""
+
+
+def exercise_cross_revocation(browser_type,profile,locale,origin):
+    secrets=None
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            second=ctx.new_page()
+            second.on("pageerror",lambda error: errors.append(str(error)[:300]))
+            second.goto(origin,wait_until="domcontentloaded")
+            second.wait_for_function("typeof window.d1BoundProof === 'function'",timeout=60000)
+            assert second.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+            assert page.evaluate(I5_CROSS_FENCE)==900002
+            page.evaluate("window.d1BoundLock()")
+            # Await the stale tab's proactive CAS result; it must NOT erase B.
+            assert page.evaluate("window.d1CrossSession.retire()") is False
+            assert page.evaluate("""async()=>{try{await window.d1CrossSession.inspect();return false;}
+              catch(e){return String(e).includes('Bound authority retired');}}""")
+            assert second.evaluate(I5_CROSS_FENCE)==900002
+            assert second.evaluate("window.d1CrossSession.mutate('cross-success-001')")["revision"]==2
+            assert not blocked and not errors
+            # Deliberately close without retire. An orphan fence is allowed;
+            # it is not an authority, and no key is restored from it.
+        finally:
+            ctx.close()
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            assert page.evaluate(I5_CROSS_FENCE)==900002
+            assert page.evaluate("typeof window.d1CrossSession")=="undefined"
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            assert page.evaluate(I5_CROSS_FENCE)==900001
+            assert page.evaluate("window.d1CrossSession.retire()") is True
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==2
+            assert page.evaluate("window.d1CrossSession.retire()") is True
+            assert page.evaluate(I5_CROSS_FENCE) is None
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {"staleRetirePreservesB":True,"orphanReplacedAfterRestart":True,
+                "revisionA":1,"revisionB":2}
+    except Exception:
+        raise RuntimeError("D1 cross-document revocation qualification failed") from None
+    finally:
+        secrets=None
 
 
 def run():
@@ -965,6 +1050,7 @@ def run():
                                 ctx.close()
                             record["i5_possession"]=exercise_possession(browser_type,Path(root)/(locale+"-possession"),locale,origin)
                             record["i5_bound"]=exercise_bound(browser_type,Path(root)/(locale+"-bound"),locale,origin)
+                            record["i5_cross_revocation"]=exercise_cross_revocation(browser_type,Path(root)/(locale+"-cross-revoke"),locale,origin)
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -980,6 +1066,7 @@ def run():
     print("D1_I4_COPY_MIGRATION_PASS 2/2",flush=True)
     print("D1_I5_POSSESSION_PASS 2/2",flush=True)
     print("D1_I5_BOUND_ADMISSION_PASS 2/2",flush=True)
+    print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":

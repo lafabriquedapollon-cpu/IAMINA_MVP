@@ -131,8 +131,8 @@ class AdmissionSession {
     this.#lease=lease;this.#key=key;this.#guard=guard;
   }
   #local(){
-    require(!this.#retired,'Session retired');
-    if(this.#guard&&this.#guard('session',this.#lease.owner,this.#lease.epoch)!==true){
+    require(!this.#retired,this.#guard?'Bound authority retired':'Session retired');
+    if(this.#guard&&this.#guard('session',this.#lease.owner,this.#lease.epoch,null)!==true){
       this.#retired=true;this.#key=null;throw new Error('Bound authority retired');
     }
   }
@@ -310,10 +310,22 @@ export async function importScopedArchive(owner,epoch,proof,phrase,manifest,tran
 export async function admitBound(owner,epoch,authority,phrase,{beforeLease,afterLease}={}){
   require(owners.has(owner)&&Number.isSafeInteger(epoch)&&epoch>0&&
     typeof authority==='function','Bound authority required');
-  const check=phase=>require(authority(phase,owner,epoch)===true,'Bound authority retired');
+  const check=phase=>require(authority(phase,owner,epoch,null)===true,'Bound authority retired');
   check('claim');
   requirePossessionSecret(phrase);
-  let bytes,session;
+  let bytes,session,revocation,retired=false;
+  const revoke=()=>{
+    retired=true;
+    if(!session)return Promise.resolve(false);
+    if(!revocation){
+      // retire() removes the local key synchronously, before opening IDB.
+      // Failed durable removal stays retryable; never resolve it as success.
+      revocation=session.retire().catch(error=>{revocation=null;throw error;});
+    }
+    return revocation;
+  };
+  require(authority('watch',owner,epoch,()=>{void revoke().catch(()=>{});})===true,
+    'Bound authority retired');
   try{
     check('pending');
     const {record,baseline}=await transaction(owner,false,(r,f)=>{
@@ -334,6 +346,7 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
       store.put(lease,'fence');
     });
     session=new AdmissionSession(constructorPermit,lease,key,authority);
+    if(retired){await revoke();throw new Error('Bound authority retired');}
     if(afterLease)await afterLease();
     check('pending');
     // Durable lease exists BEFORE any Drift/SQLite opening in this path.
@@ -353,16 +366,16 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
     await session.inspect();
     const perform=async fn=>{
       try{return await fn();}
-      catch(e){await session.retire();throw e;}
+      catch(e){await revoke();throw e;}
     };
     return Object.freeze({
       inspect:()=>perform(()=>session.inspect()),
       auditSnapshot:()=>perform(()=>session.auditSnapshot()),
       mutate:(operation,hooks)=>perform(()=>session.mutate(operation,hooks)),
-      retire:()=>session.retire(),
+      retire:()=>revoke(),
     });
   }catch(e){
-    if(session)await session.retire();
+    if(session)await revoke();
     throw e;
   }finally{bytes?.fill(0);}
 }
