@@ -1171,12 +1171,22 @@ def exercise_cross_hints(browser_type,profile,locale,origin):
             stage="step-21"
             page.evaluate("""()=>{window.d1SavedPost=BroadcastChannel.prototype.postMessage;
               BroadcastChannel.prototype.postMessage=function(){throw new Error('Injected hint loss');};}""")
+            admitted=False
             try:
                 stage="step-22"
                 assert page.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+                admitted=True
             finally:
-                stage="step-23"
-                page.evaluate("BroadcastChannel.prototype.postMessage=window.d1SavedPost")
+                # Return a serializable boolean, not an unbound native method.
+                # Preserve step-22 if the admission itself failed.
+                if admitted:
+                    stage="step-23"
+                assert page.evaluate("""()=>{
+                  const saved=window.d1SavedPost;
+                  if(typeof saved!=='function')return false;
+                  BroadcastChannel.prototype.postMessage=saved;
+                  return BroadcastChannel.prototype.postMessage===saved;
+                }""")
             stage="step-24"
             assert second.evaluate(I5_WAIT_SUPERSEDED)
             stage="step-25"
