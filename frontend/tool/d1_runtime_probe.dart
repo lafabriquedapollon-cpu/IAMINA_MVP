@@ -16,6 +16,7 @@ external set _snapshotFn(JSFunction function);
 @JS('d1Inspect')
 external set _inspectFn(JSFunction function);
 
+const _filename = 'vault.sqlite';
 const _path = '/vault.sqlite';
 const _marker = 'D1_I1_SYNTHETIC_NOT_PATIENT';
 const _owners = [900001, 900002];
@@ -46,7 +47,7 @@ class _MemoryVault {
         file.xClose();
       }
       // Validate the decrypted file before Drift can run migrations.
-      final raw = sqlite.open(_path, mode: OpenMode.readOnly);
+      final raw = sqlite.open(_filename, mode: OpenMode.readOnly);
       try {
         _require(raw.select('PRAGMA integrity_check').single.values.single == 'ok',
             'Integrity failure');
@@ -61,7 +62,7 @@ class _MemoryVault {
     }
     final scope = PatientVaultScope.nativeDjango(owner);
     final db = AppDatabase.testPatientVault(
-      WasmDatabase(sqlite3: sqlite, path: _path), scope,
+      WasmDatabase(sqlite3: sqlite, path: _filename), scope,
     );
     return _MemoryVault(fs, db, owner);
   }
@@ -104,7 +105,7 @@ Future<Uint8List> _snapshot(Uint8List? previous, int owner) async {
     await db.transaction(() async {
       if (previous == null) {
         await db.into(db.patientProfiles).insert(PatientProfilesCompanion.insert(
-          userId: owner, updatedAt: DateTime.utc(2026, 11, 25),
+          userId: Value(owner), updatedAt: DateTime.utc(2026, 11, 25),
         ));
       }
       final next = await db.countLogs() + 1;

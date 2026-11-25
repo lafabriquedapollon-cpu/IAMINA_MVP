@@ -68,6 +68,8 @@ export async function commitCheckpoint(owner, secret, expected, bytes) {
   let revision = 1;
   if (expected !== null) {
     validateRecord(expected);
+    // Snapshot the CAS token before the first await.
+    expected = {revision: expected.revision, archive: expected.archive.slice()};
     const old = await decode(expected, owner, secret);
     old.fill(0);
     if (expected.revision === 0xffffffff) throw new Error('Revision exhausted');
@@ -84,7 +86,12 @@ export async function commitCheckpoint(owner, secret, expected, bytes) {
     // No await inside the transaction. Read/compare/replace are atomic across
     // tabs for this origin. Success is returned only on transaction completion.
     await new Promise((resolve, reject) => {
-      const tx = db.transaction(TABLE, 'readwrite');
+      const tx = db.transaction(TABLE, 'readwrite', {durability: 'strict'});
+      if (tx.durability !== 'strict') {
+        tx.abort();
+        reject(new Error('Strict checkpoint durability unavailable'));
+        return;
+      }
       const objectStore = tx.objectStore(TABLE);
       let conflict = false;
       tx.oncomplete = () => resolve();
