@@ -74,9 +74,20 @@ def run():
     assert (WEB / "main.dart.js").stat().st_size > 1000
     build_sha = hashlib.sha256((WEB / "main.dart.js").read_bytes()).hexdigest()
     records = []
-    engines = ("webkit",) if os.environ.get("D2_MACOS_WEBKIT") == "1" else ("chromium", "webkit")
-    if len(engines) == 1:
+    target = os.environ.get("D2_BROWSER_TARGET", "diagnostic-all")
+    # One Web reference platform per engine. The Linux WebKit port remains
+    # reproducible as a separate diagnostic; its historical FAIL is not a PASS.
+    if target == "chromium":
+        assert platform.system() == "Linux"
+        engines = ("chromium",)
+    elif target == "webkit":
         assert platform.system() == "Darwin"
+        engines = ("webkit",)
+    elif target == "diagnostic-all":
+        engines = ("chromium", "webkit")
+    else:
+        raise AssertionError("Unknown browser qualification target")
+    print(f"D2_WEB_TARGET {target} platform={platform.system()}", flush=True)
     with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         origin = f"http://127.0.0.1:{server.server_port}"
@@ -85,11 +96,12 @@ def run():
                 for engine in engines:
                     browser = getattr(pw, engine).launch(headless=True)
                     try:
-                        for locale, copy in COPY.items():
-                            for w, h in ((390, 844), (1180, 860)):
+                        # Mobile FR/AR first, then desktop FR/AR, on the same Web build.
+                        for w, h in ((390, 844), (1180, 860)):
+                            for locale, copy in COPY.items():
                                 name = f"{engine}-{locale}-{w}"
                                 record = dict(source_sha=os.environ["EXPECTED_SHA"], build_sha256=build_sha,
-                                              engine=engine, browser_version=browser.version, locale=locale, viewport=[w,h], platform=platform.system())
+                                              engine=engine, browser_version=browser.version, locale=locale, viewport=[w,h], platform=platform.system(), qualification_target=target)
                                 ctx = browser.new_context(locale=locale, viewport={"width":w,"height":h},
                                                           device_scale_factor=1, service_workers="block")
                                 blocked, errors, frames = [], [], []

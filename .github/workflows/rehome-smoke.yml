@@ -1282,15 +1282,15 @@ jobs:
           flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart test/features/navigation/d2_guest_entry_test.dart
           flutter analyze --no-fatal-infos --no-pub
           flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D2_GUEST_CANDIDATE=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
-      - name: D2 compiled candidate first-use browser evidence
+      - name: D2 Web Chromium mobile-first then desktop
         if: ${{ github.head_ref == 'phase1/d2-guest' }}
         timeout-minutes: 15
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/d2-browser-venv"
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
-          "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
-          "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium
+          D2_BROWSER_TARGET=chromium "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
       - name: Retain D2 candidate screenshots and exact SHA matrix
         if: ${{ always() && github.head_ref == 'phase1/d2-guest' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -1317,14 +1317,17 @@ jobs:
           python manage.py makemigrations --check --dry-run
           python -m pytest -q core/tests/test_d3_feature_intents.py core/tests/test_account_consent_identity_safety.py core/tests/test_ai_egress_boundary_gate.py
 
-  # Independent WebKit platform comparison. Linux remains a strict gate.
+  # Web-only qualification: this runner is needed for the reference WebKit
+  # browser engine, not a native macOS application or separate product target.
+  # Linux WebKit port failures remain recorded; explicit diagnostic-all mode
+  # reproduces them without substituting them for Safari-target evidence.
   phase1-d2-macos-webkit:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && github.head_ref == 'phase1/d2-guest' }}
     runs-on: macos-15
     timeout-minutes: 25
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
-      D2_MACOS_WEBKIT: "1"
+      D2_BROWSER_TARGET: webkit
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -1349,7 +1352,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
-      - name: D2 macOS WebKit first-use and resize evidence
+      - name: D2 Web WebKit mobile-first then desktop
         timeout-minutes: 10
         run: |
           set -euo pipefail
