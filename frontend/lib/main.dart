@@ -9,6 +9,7 @@ import 'core/theme/amina_visual_language.dart';
 import 'core/theme/app_theme.dart';
 import 'data/drift/database.dart';
 import 'firebase_options.dart';
+import 'features/navigation/d2_guest_entry.dart';
 import 'l10n/app_localizations.dart';
 import 'services/api_client.dart';
 import 'services/app_lock_protected_state_policy.dart';
@@ -40,6 +41,35 @@ Future<bool> _hasProtectedLocalState({
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // D2 candidate build only. Branch before legacy DB probes or auth init.
+  // Never admit a clinical vault until the D1 integration gate is certified.
+  if (const bool.fromEnvironment('IAMINA_D2_GUEST_CANDIDATE', defaultValue: false)) {
+    runApp(MaterialApp(
+      title: 'IAmina',
+      theme: AminaVisualLanguage.harmonize(AminaTheme.light),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      debugShowCheckedModeBanner: false,
+      home: D2GuestEntry(
+        registrationAvailable: kRemoteAccountSignInEnabled && kRemoteAccountEnrollmentEnabled,
+        authenticate: kRemoteAccountSignInEnabled ? (email, password, register) async {
+          final auth = AuthService();
+          try {
+            if (register) {
+              await auth.registerWithEmail(email, password);
+            } else {
+              await auth.signInWithEmail(email, password);
+            }
+            return auth.isRemoteCredentialVerified && auth.boundNativeAccountId != null;
+          } finally {
+            auth.dispose();
+          }
+        } : null,
+      ),
+    ));
+    return;
+  }
 
   if (kFirebaseMigrationEnabled) {
     try {

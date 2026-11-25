@@ -1207,7 +1207,7 @@ jobs:
   # Full main-target gates above remain mandatory before product integration.
   phase1-focused:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && startsWith(github.head_ref, 'phase1/') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
@@ -1279,7 +1279,9 @@ jobs:
           set -euo pipefail
           flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.lock
-          flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart
+          flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart test/features/navigation/d2_guest_entry_test.dart
+          flutter analyze --no-fatal-infos --no-pub
+          flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D2_GUEST_CANDIDATE=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         if: ${{ github.head_ref == 'phase1/d3-intents' }}
         with:
