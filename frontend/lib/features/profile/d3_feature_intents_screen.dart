@@ -26,6 +26,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
   Map<String, dynamic>? _snapshot;
   int _generation = 0;
   bool _busy = false;
+  bool _confirming = false;
   bool _error = false;
   String? _locale;
 
@@ -71,6 +72,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
       _generation++;
       _snapshot = null;
       _busy = false;
+      _confirming = false;
       _error = true;
     });
     // Never auto-load a different account through the retiring host.
@@ -80,6 +82,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
     _generation++;
     _snapshot = null;
     _busy = false;
+    _confirming = false;
     _error = false;
     unawaited(_load());
   }
@@ -131,7 +134,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
 
   Future<void> _change(Map item, bool enabled) async {
     final snapshot = _snapshot;
-    if (_busy || snapshot == null) return;
+    if (_busy || _confirming || snapshot == null) return;
     final generation = _generation;
     final epoch = widget.scopeEpoch.value;
     final feature = item['feature'] as String;
@@ -139,7 +142,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
     final notice = Map<String, dynamic>.from((snapshot['notices'] as Map)[feature] as Map);
     if (enabled) {
       if (receipt == null) return;
-      setState(() => _busy = true);
+      setState(() => _confirming = true);
       final accepted = await showDialog<bool>(
         context: context,
         barrierDismissible: false,
@@ -158,11 +161,11 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
       );
       if (!mounted || generation != _generation || epoch != widget.scopeEpoch.value) return;
       if (accepted != true) {
-        setState(() => _busy = false);
+        setState(() => _confirming = false);
         return;
       }
     }
-    setState(() { _busy = true; _error = false; _snapshot = null; });
+    setState(() { _confirming = false; _busy = true; _error = false; _snapshot = null; });
     try {
       await widget.write(feature, {
         'enabled': enabled,
@@ -202,7 +205,7 @@ class _D3FeatureIntentsScreenState extends State<D3FeatureIntentsScreen> {
                 key: ValueKey('d3-${item['feature']}'),
                 title: Text(_label(item['feature'] as String)),
                 value: item['intent_enabled'] as bool,
-                onChanged: _busy || (snapshot['global_receipt_id'] == null && item['intent_enabled'] != true)
+                onChanged: _busy || _confirming || (snapshot['global_receipt_id'] == null && item['intent_enabled'] != true)
                     ? null : (enabled) => unawaited(_change(item as Map, enabled)),
               ),
         ],

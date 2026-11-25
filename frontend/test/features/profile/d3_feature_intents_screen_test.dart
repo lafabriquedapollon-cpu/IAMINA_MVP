@@ -46,6 +46,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(writes, isEmpty);
       expect(find.text('Exact synthetic notice photo $locale'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
       await tester.tap(find.byKey(const Key('d3-confirm')));
       await tester.pumpAndSettle();
       expect(writes.single['expected_global_receipt_id'], 7);
