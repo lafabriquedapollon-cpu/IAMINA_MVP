@@ -18,15 +18,17 @@ SECRET = "synthetic-only-recovery-secret"
 WORKER = b"""
 self.onmessage = async ({data}) => {
   let handle;
+  let stage = 'sync-handle';
   try {
-    const root = await navigator.storage.getDirectory();
-    const file = await root.getFileHandle('iamina-synthetic-archive.bin', {create: data.op === 'write'});
-    handle = await file.createSyncAccessHandle();
+    handle = await data.file.createSyncAccessHandle();
     let result;
     if (data.op === 'write') {
       const bytes = new Uint8Array(data.bytes);
+      stage = 'truncate';
       handle.truncate(0);
+      stage = 'write';
       if (handle.write(bytes, {at: 0}) !== bytes.length) throw new Error('short write');
+      stage = 'flush';
       handle.flush();
       result = bytes.length;
     } else if (data.op === 'read') {
@@ -36,11 +38,12 @@ self.onmessage = async ({data}) => {
       if (handle.read(bytes, {at: 0}) !== size) throw new Error('short read');
       result = Array.from(bytes);
     } else throw new Error('unknown operation');
+    stage = 'close';
     handle.close(); handle = undefined;
     self.postMessage({ok: true, result});
-  } catch (_) {
-    if (handle) handle.close();
-    self.postMessage({ok: false});
+  } catch (error) {
+    if (handle) { try { handle.close(); } catch (_) {} }
+    self.postMessage({ok: false, stage, name: error.name, message: String(error.message).slice(0, 180)});
   }
 };
 """
@@ -48,16 +51,50 @@ STORAGE = """
 async (arg) => {
   const {op, mode, bytes} = arg;
   if (mode === 'opfs') {
-    return await new Promise((resolve, reject) => {
+    let stage = 'getDirectory';
+    let writer;
+    try {
+      if (!isSecureContext || typeof navigator.storage?.getDirectory !== 'function') {
+        throw new Error('Secure OPFS unavailable');
+      }
+      const root = await navigator.storage.getDirectory();
+      stage = 'getFileHandle';
+      const file = await root.getFileHandle('iamina-synthetic-archive.bin', {create: op === 'write'});
+      if (op === 'read') {
+        stage = 'getFile';
+        const stored = await file.getFile();
+        if (stored.size < 53 || stored.size > 33554484) throw new Error('bad size');
+        return Array.from(new Uint8Array(await stored.arrayBuffer()));
+      }
+      if (op !== 'write') throw new Error('unknown operation');
+      if (typeof file.createWritable === 'function') {
+        stage = 'createWritable';
+        writer = await file.createWritable({keepExistingData: false});
+        stage = 'write';
+        await writer.write(new Uint8Array(bytes));
+        stage = 'close';
+        await writer.close();
+        writer = undefined;
+        return bytes.length;
+      }
+      // Capability-based choice before writing; no retry with a different
+      // backend after an actual error. The archive remains in OPFS.
+      stage = 'sync-worker';
+      return await new Promise((resolve, reject) => {
       const worker = new Worker('/opfs-worker.js');
       const timer = setTimeout(() => {worker.terminate(); reject(new Error('OPFS timeout'));}, 10000);
       worker.onmessage = ({data}) => {
         clearTimeout(timer); worker.terminate();
-        if (data.ok) resolve(data.result); else reject(new Error('OPFS operation failed'));
+        if (data.ok) resolve(data.result);
+        else reject(new Error('OPFS ' + data.stage + ': ' + data.name + ': ' + data.message));
       };
       worker.onerror = () => {clearTimeout(timer); worker.terminate(); reject(new Error('OPFS worker error'));};
-      worker.postMessage({op, bytes});
-    });
+        worker.postMessage({op, bytes, file});
+      });
+    } catch (error) {
+      if (writer) { try { await writer.abort(); } catch (_) {} }
+      throw new Error('OPFS ' + stage + ': ' + error.name + ': ' + error.message);
+    }
   }
   const db = await new Promise((resolve, reject) => {
     const req = indexedDB.open('iamina-d1-synthetic-archive', 1);
@@ -148,52 +185,62 @@ def run():
         try:
             with sync_playwright() as pw:
                 records = []
+                failures = []
                 for engine_name, mode in (("chromium", "idb"), ("webkit", "opfs")):
                     for locale in ("fr-FR", "ar-MA"):
-                        engine = getattr(pw, engine_name)
-                        profile = root / f"{engine_name}-{locale}"
-                        ctx, page, blocked = connect(engine, profile, locale, origin)
                         try:
-                            sealed = bytes(page.evaluate("""async ({raw, secret, owner}) => {
-                              const {sealArchive} = await import('/d1_archive_candidate.mjs');
-                              return Array.from(await sealArchive(new Uint8Array(raw), secret, owner));
-                            }""", {"raw": list(raw), "secret": SECRET, "owner": OWNER}))
-                            assert raw not in sealed
-                            assert page.evaluate(STORAGE, {"op": "write", "mode": mode, "bytes": list(sealed)}) == len(sealed)
-                            assert not blocked, "Unexpected external request"
-                        finally:
-                            ctx.close()
-                        ctx, page, blocked = connect(engine, profile, locale, origin)
-                        try:
-                            reopened = bytes(page.evaluate(STORAGE, {"op": "read", "mode": mode}))
-                            assert reopened == sealed
-                            results = page.evaluate("""async ({archive, secret, owner}) => {
-                              const {openArchive} = await import('/d1_archive_candidate.mjs');
-                              const data = new Uint8Array(archive);
-                              const plaintext = await openArchive(data, secret, owner);
-                              const altered = data.slice(); altered[altered.length-1] ^= 1;
-                              const rejected = [];
-                              for (const [a,s,o] of [[data,'wrong-synthetic-recovery-secret',owner],
-                                  [data,secret,'amina_vault_v1_native_202'],[altered,secret,owner]]) {
-                                try { await openArchive(a,s,o); rejected.push(false); }
-                                catch (_) { rejected.push(true); }
-                              }
-                              return {plaintext: Array.from(plaintext), rejected};
-                            }""", {"archive": list(reopened), "secret": SECRET, "owner": OWNER})
-                            restored = bytes(results["plaintext"])
-                            assert digest(restored) == original_digest
-                            assert results["rejected"] == [True, True, True]
-                            assert not blocked, "Unexpected external request"
-                            check_sqlite(root / f"restore-{engine_name}-{locale}.sqlite", restored)
-                            assert digest((root / "source.sqlite").read_bytes()) == original_digest
-                            record = dict(source_sha=sha, engine=engine_name, locale=locale, storage=mode,
-                                          archive_sha256=digest(sealed), restored_sha256=digest(restored),
-                                          restart=True, negative_cases=3, sqlite_integrity="PASS", result="PASS")
-                            records.append(record)
-                            print("D1_ARCHIVE_BROWSER " + json.dumps(record), flush=True)
-                        finally:
-                            ctx.close()
-                assert len(records) == 4
+                            engine = getattr(pw, engine_name)
+                            profile = root / f"{engine_name}-{locale}"
+                            ctx, page, blocked = connect(engine, profile, locale, origin)
+                            try:
+                                sealed = bytes(page.evaluate("""async ({raw, secret, owner}) => {
+                                  const {sealArchive} = await import('/d1_archive_candidate.mjs');
+                                  return Array.from(await sealArchive(new Uint8Array(raw), secret, owner));
+                                }""", {"raw": list(raw), "secret": SECRET, "owner": OWNER}))
+                                assert raw not in sealed
+                                assert page.evaluate(STORAGE, {"op": "write", "mode": mode, "bytes": list(sealed)}) == len(sealed)
+                                assert not blocked, "Unexpected external request"
+                                # Check committed encrypted bytes before process restart too.
+                                assert bytes(page.evaluate(STORAGE, {"op": "read", "mode": mode})) == sealed
+                            finally:
+                                ctx.close()
+                            ctx, page, blocked = connect(engine, profile, locale, origin)
+                            try:
+                                reopened = bytes(page.evaluate(STORAGE, {"op": "read", "mode": mode}))
+                                assert reopened == sealed
+                                results = page.evaluate("""async ({archive, secret, owner}) => {
+                                  const {openArchive} = await import('/d1_archive_candidate.mjs');
+                                  const data = new Uint8Array(archive);
+                                  const plaintext = await openArchive(data, secret, owner);
+                                  const altered = data.slice(); altered[altered.length-1] ^= 1;
+                                  const rejected = [];
+                                  for (const [a,s,o] of [[data,'wrong-synthetic-recovery-secret',owner],
+                                      [data,secret,'amina_vault_v1_native_202'],[altered,secret,owner]]) {
+                                    try { await openArchive(a,s,o); rejected.push(false); }
+                                    catch (_) { rejected.push(true); }
+                                  }
+                                  return {plaintext: Array.from(plaintext), rejected};
+                                }""", {"archive": list(reopened), "secret": SECRET, "owner": OWNER})
+                                restored = bytes(results["plaintext"])
+                                assert digest(restored) == original_digest
+                                assert results["rejected"] == [True, True, True]
+                                assert not blocked, "Unexpected external request"
+                                check_sqlite(root / f"restore-{engine_name}-{locale}.sqlite", restored)
+                                assert digest((root / "source.sqlite").read_bytes()) == original_digest
+                                record = dict(source_sha=sha, engine=engine_name, locale=locale, storage=mode,
+                                              archive_sha256=digest(sealed), restored_sha256=digest(restored),
+                                              restart=True, negative_cases=3, sqlite_integrity="PASS", result="PASS")
+                                records.append(record)
+                                print("D1_ARCHIVE_BROWSER " + json.dumps(record), flush=True)
+                            finally:
+                                ctx.close()
+                        except Exception as error:
+                            failure = dict(source_sha=sha, engine=engine_name, locale=locale, storage=mode,
+                                           result="FAIL", error=str(error)[:500])
+                            failures.append(failure)
+                            print("D1_ARCHIVE_BROWSER " + json.dumps(failure), flush=True)
+                assert len(records) + len(failures) == 4, "Incomplete matrix"
+                assert len(records) == 4 and not failures, f"Browser archive matrix: {len(records)}/4 PASS"
                 print("D1_ARCHIVE_BROWSER_PASS 4/4", flush=True)
         finally:
             server.shutdown()
