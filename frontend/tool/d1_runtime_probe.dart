@@ -29,6 +29,10 @@ external set _legacyFn(JSFunction function);
 external set _fullInspectFn(JSFunction function);
 @JS('d1Inspect')
 external set _inspectFn(JSFunction function);
+@JS('d1GlucoseDeleted')
+external set _glucoseDeletedFn(JSFunction function);
+@JS('d1GlucoseChange')
+external set _glucoseChangeFn(JSFunction function);
 @JS('d1JournalPage')
 external set _journalPageFn(JSFunction function);
 @JS('d1GlucoseRead')
@@ -201,6 +205,14 @@ class _MemoryVault {
           (row.mealDescription == _glucoseMarker && _fixtureUuid.hasMatch(row.clientUuid) &&
            row.source == 'manual' && row.bloodSugar.isFinite && row.bloodSugar > 0 &&
            row.loggedAt != null && row.insulinUnits == null && row.syncStatus == 'pending')), 'Synthetic rows mismatch');
+    if (await _hasTombstones(db)) {
+      final deleted = await db.customSelect('SELECT uuid FROM d1_fixture_deleted_glucose ORDER BY uuid').get();
+      for (final entry in deleted) {
+        final uuid = entry.data['uuid'];
+        _require(uuid is String && _fixtureUuid.hasMatch(uuid) &&
+            await _fixtureGlucose(db, uuid) == null, 'Invalid tombstone');
+      }
+    }
     final integrity = await db.customSelect('PRAGMA integrity_check').getSingle();
     final schema = await db.customSelect('PRAGMA user_version').getSingle();
     _require(integrity.data.values.single == 'ok' &&
@@ -313,6 +325,11 @@ Future<String> _fullInspect(Uint8List bytes, int owner) async {
       'reminders','patient_treatment_declarations_v1',
     ]) {
       tables[table] = (await db.customSelect('SELECT * FROM $table ORDER BY 1').get())
+          .map((r) => r.data).toList();
+    }
+    if (await _hasTombstones(db)) {
+      tables[_tombstoneTable] = (await db.customSelect(
+          'SELECT uuid FROM d1_fixture_deleted_glucose ORDER BY uuid').get())
           .map((r) => r.data).toList();
     }
     _require(tables['patient_profiles']!.length == 1 &&
@@ -429,6 +446,83 @@ Future<String> _journalPage(Uint8List input, int owner, int start, int end,
   }
 }
 
+// Auxiliary table exists only in this synthetic probe, not in product schema.
+const _tombstoneTable = 'd1_fixture_deleted_glucose';
+Future<bool> _hasTombstones(AppDatabase db) async =>
+    (await db.customSelect("SELECT name FROM sqlite_master WHERE type='table' AND name='d1_fixture_deleted_glucose'").get()).isNotEmpty;
+
+Future<bool> _isDeleted(AppDatabase db, String uuid) async {
+  _require(_fixtureUuid.hasMatch(uuid), 'Invalid measurement UUID');
+  if (!await _hasTombstones(db)) return false;
+  final rows = await db.customSelect(
+      'SELECT uuid FROM d1_fixture_deleted_glucose WHERE uuid = ?',
+      variables: [Variable<String>(uuid)]).get();
+  _require(rows.length <= 1, 'Duplicate tombstone');
+  return rows.isNotEmpty;
+}
+
+Future<bool> _glucoseDeleted(Uint8List input, int owner, String uuid) async {
+  final vault = await _MemoryVault.open(owner, input);
+  try {
+    await vault.inspect();
+    final deleted = await _isDeleted(vault.db, uuid);
+    _require(!deleted || await _fixtureGlucose(vault.db, uuid) == null,
+        'Deleted measurement present');
+    return deleted;
+  } finally {
+    try { await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
+Future<Uint8List> _changeGlucose(Uint8List input, int owner, String uuid,
+    String action, double mgDl, int seconds) async {
+  _require(_fixtureUuid.hasMatch(uuid) &&
+      (action == 'delete' || (action == 'edit' && mgDl.isFinite && mgDl > 0 &&
+          seconds > 0 && seconds <= 4102444800)), 'Invalid measurement change');
+  final vault = await _MemoryVault.open(owner, input);
+  var closed = false;
+  try {
+    await vault.inspect();
+    final db = vault.db;
+    final count = await db.countLogs();
+    final row = await _fixtureGlucose(db, uuid);
+    _require(row != null && !await _isDeleted(db, uuid), 'Measurement unavailable');
+    final original = row!;
+    final id = original.id;
+    await db.transaction(() async {
+      if (action == 'delete') {
+        await db.customStatement('CREATE TABLE IF NOT EXISTS d1_fixture_deleted_glucose (uuid TEXT NOT NULL PRIMARY KEY)');
+        await db.customStatement('INSERT INTO d1_fixture_deleted_glucose (uuid) VALUES (?)', [uuid]);
+        await db.deleteLog(id);
+        _require(await _fixtureGlucose(db, uuid) == null &&
+            await _isDeleted(db, uuid) && await db.countLogs() == count - 1,
+            'Deletion invariant failed');
+      } else {
+        final time = DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+        await db.updateLog(id, LogEntriesCompanion(
+          bloodSugar: Value(mgDl), loggedAt: Value(time),
+        ));
+        final after = await _fixtureGlucose(db, uuid);
+        _require(after != null && after.id == id &&
+            after.createdAt == original.createdAt && after.bloodSugar == mgDl &&
+            after.loggedAt!.millisecondsSinceEpoch == seconds * 1000 &&
+            await db.countLogs() == count && !await _isDeleted(db, uuid),
+            'Edit invariant failed');
+      }
+    });
+    await vault.inspect();
+    await db.close();
+    closed = true;
+    _require(vault.fs.fileData.keys.every((key) => key == _path),
+        'Unexpected SQLite auxiliary file');
+    return Uint8List.fromList(vault.fs.fileData[_path]!);
+  } finally {
+    try { if (!closed) await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
 Future<LogEntryData?> _fixtureGlucose(AppDatabase db, String uuid) async {
   _require(_fixtureUuid.hasMatch(uuid), 'Invalid measurement UUID');
   final row = await (db.select(db.logEntries)
@@ -468,6 +562,7 @@ Future<Uint8List> _insertGlucose(Uint8List input, int owner, String uuid,
     await vault.inspect();
     final db = vault.db;
     final count = await db.countLogs();
+    _require(!await _isDeleted(db, uuid), 'Measurement UUID deleted');
     _require(await _fixtureGlucose(db, uuid) == null, 'Duplicate measurement UUID');
     final time = DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
     await db.into(db.logEntries).insert(LogEntriesCompanion.insert(
@@ -503,6 +598,14 @@ void main() {
       _snapshot(bytes.toDart, owner.toDartInt, operation.toDart).then((value) => value.toJS).toJS).toJS;
   _legacyFn = ((JSNumber owner) =>
       _legacySnapshot(owner.toDartInt).then((value) => value.toJS).toJS).toJS;
+  _glucoseDeletedFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid) =>
+      _glucoseDeleted(bytes.toDart, owner.toDartInt, uuid.toDart)
+          .then((value) => value.toJS).toJS).toJS;
+  _glucoseChangeFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid,
+      JSString action, JSNumber mgDl, JSNumber seconds) =>
+      _changeGlucose(bytes.toDart, owner.toDartInt, uuid.toDart,
+          action.toDart, mgDl.toDartDouble, seconds.toDartInt)
+          .then((value) => value.toJS).toJS).toJS;
   _journalPageFn = ((JSUint8Array bytes, JSNumber owner, JSNumber start,
       JSNumber end, JSNumber limit, JSNumber offset) =>
       _journalPage(bytes.toDart, owner.toDartInt, start.toDartInt,

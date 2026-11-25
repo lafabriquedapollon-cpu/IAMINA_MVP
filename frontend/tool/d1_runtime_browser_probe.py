@@ -1670,6 +1670,174 @@ def exercise_journal(browser_type,profile,locale,origin):
         secrets=None
 
 
+I5_JOURNAL_CHANGE = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,t=1795564800;
+  const u='ad123456-1234-4abc-8def-000000000001',v='ad123456-1234-4abc-8def-000000000002';
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected refusal');return;
+  }throw new Error('Expected refusal');};
+  const open=async(owner,secret)=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  };
+  let s=await open(A,a);
+  await s.insertGlucose(1,u,120.25,'mg/dL',t);
+  await s.insertGlucose(2,v,130.25,'mg/dL',t+60);
+  const initial=await s.auditSnapshot();
+  await reject(()=>s.editGlucose(3,u,0,'mg/dL',t),'Invalid measurement change');
+  s=await open(A,a);
+  await reject(()=>s.editGlucose(2,u,121.25,'mg/dL',t),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.editGlucose(3,u,121.25,'mg/dL',t,{beforeCommit:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===initial.sha256,'Edit precommit changed data');
+  const ack=await s.editGlucose(3,u,121.25,'mg/dL',t+10);
+  check(ack.revision===4&&!ack.replay&&!ack.deleted&&ack.measurement.mgDl===121.25&&
+    ack.measurement.loggedAtSeconds===t+10,'Edit ACK mismatch');
+  const edited=await s.auditSnapshot();
+  const noOp=await s.editGlucose(4,u,121.25,'mg/dL',t+10);
+  check(noOp.revision===4&&noOp.replay&&(await s.auditSnapshot()).sha256===edited.sha256,'Edit no-op mutated data');
+  await reject(()=>s.editGlucose(4,u,122.25,'mg/dL',t+20,{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const recovered=await s.readGlucose(u);
+  check(recovered.revision===5&&recovered.measurement.mgDl===122.25,'Edit recovery mismatch');
+  await reject(()=>s.editGlucose(4,u,122.25,'mg/dL',t+20),'Checkpoint conflict');
+  s=await open(A,a);
+  const beforeDelete=await s.auditSnapshot();
+  await reject(()=>s.deleteGlucose(4,u),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.deleteGlucose(5,u,{beforeCommit:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===beforeDelete.sha256,'Delete precommit changed data');
+  await reject(()=>s.deleteGlucose(5,u,{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const del=await s.deleteGlucose(5,u);
+  check(del.revision===6&&del.replay&&del.deleted&&del.measurement===null,'Delete recovery mismatch');
+  const deleted=await s.auditSnapshot();
+  check(deleted.tables.d1_fixture_deleted_glucose.length===1&&
+    deleted.tables.d1_fixture_deleted_glucose[0].uuid===u,'Missing tombstone');
+  check((await s.readGlucose(u)).measurement===null,'Deleted measurement visible');
+  const page=await s.readJournal(6,t,t+100,50,0);
+  check(page.rows.length===1&&page.rows[0].uuid===v&&page.rows[0].mgDl===130.25,'Journal deletion mismatch');
+  await reject(()=>s.insertGlucose(6,u,120.25,'mg/dL',t),'Measurement UUID deleted');
+  s=await open(A,a);
+  await reject(()=>s.editGlucose(6,u,125.25,'mg/dL',t),'Measurement unavailable');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===deleted.sha256,'Rejected mutation changed data');
+  // Ordinary acknowledged deletion is also exercised on a second row.
+  const normal=await s.deleteGlucose(6,v);
+  check(normal.revision===7&&normal.deleted&&!normal.replay,'Delete ACK mismatch');
+  const end=await s.auditSnapshot();
+  check(end.tables.d1_fixture_deleted_glucose.length===2&&end.tables.log_entries.length===initial.tables.log_entries.length-2,
+    'Unexpected deletion count');
+  for(const k of Object.keys(initial.tables)){
+    if(k!=='log_entries')check(JSON.stringify(initial.tables[k])===JSON.stringify(end.tables[k]),'Other table changed');
+  }
+  check(initial.tables.log_entries.filter(x=>x.client_uuid!==u&&x.client_uuid!==v).every(old=>
+    end.tables.log_entries.some(row=>JSON.stringify(row)===JSON.stringify(old))),'Unrelated log changed');
+  await window.d1BoundLogin(B);
+  await reject(()=>s.deleteGlucose(7,u),'Bound authority retired');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,window.d1BoundEpoch(),bp,b);
+  await reject(()=>bs.deleteGlucose(1,u),'Measurement unavailable');
+  const b2=await open(B,b);
+  const added=await b2.insertGlucose(1,u,211.25,'mg/dL',t);
+  check(added.revision===2&&added.measurement.mgDl===211.25,'B UUID blocked by A tombstone');
+  await b2.retire();
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===end.sha256,'B changed A');
+  await s.retire();
+  return {invalidRefused:true,staleRefused:true,editPrecommitUnchanged:true,editAck:true,
+    editNoOp:true,editLostAck:true,deletePrecommitUnchanged:true,deleteLostAck:true,
+    deleteAck:true,noResurrection:true,otherTablesUnchanged:true,ownerIsolation:true};
+}"""
+I5_JOURNAL_CHANGE_RESTART = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs'),t=1795564800;
+  const u='ad123456-1234-4abc-8def-000000000001',v='ad123456-1234-4abc-8def-000000000002';
+  const result=[];
+  for(const [owner,secret,revision] of [[900001,a,7],[900002,b,2]]){
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    const s=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+    const page=await s.readJournal(revision,t,t+100,50,0);
+    const audit=await s.auditSnapshot();
+    if(owner===900001){
+      const repeat=await s.deleteGlucose(5,u);
+      if(!repeat.replay||!repeat.deleted||repeat.revision!==7)throw new Error('Deletion replay mismatch');
+      let rejected=false;
+      try{await s.insertGlucose(7,u,120.25,'mg/dL',t);}catch(e){rejected=String(e).includes('Measurement UUID deleted');}
+      if(!rejected)throw new Error('Restart resurrection');
+    }
+    result.push({revision:page.revision,values:page.rows.map(x=>x.mgDl),
+      tombstones:audit.tables.d1_fixture_deleted_glucose?.length??0});
+    await s.retire();
+  }
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{
+    const records=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),st=tx.objectStore('state');
+      const x=st.get('owner:900001'),y=st.get('owner:900002'),keys=st.getAllKeys();
+      tx.oncomplete=()=>resolve({x:x.result,y:y.result,keys:keys.result});tx.onabort=reject;
+    });
+    const check=ok=>{if(!ok)throw new Error('Unexpected durable storage');};
+    const enc=x=>new TextEncoder().encode(x);
+    const raw=x=>Uint8Array.from(x.match(/../g),y=>parseInt(y,16));
+    const needles=[enc(u),enc(v),enc('d1_fixture_deleted_glucose'),enc('SQLite format 3'),enc(a),enc(b),raw(a),raw(b)];
+    check(JSON.stringify(records.keys.sort())==='["fence","owner:900001","owner:900002"]');
+    for(const rec of [records.x,records.y]){
+      check(Object.keys(rec).sort().join(',')==='archive,envelope,revision');
+      for(const bytes of [rec.archive,rec.envelope])
+        check(bytes instanceof Uint8Array&&!needles.some(n=>bytes.some((_,i)=>n.every((x,j)=>bytes[i+j]===x))));
+    }
+    check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]');
+    check(!localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length);
+    if(navigator.storage?.getDirectory){
+      const root=await navigator.storage.getDirectory();
+      for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+    }
+  }finally{db.close();}
+  return result;
+}"""
+
+
+def exercise_journal_change(browser_type,profile,locale,origin):
+    secrets=None
+    stage="bootstrap"
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="journal-change"
+            result=page.evaluate(I5_JOURNAL_CHANGE,{"a":secrets[0],"b":secrets[1]})
+            assert result=={"invalidRefused":True,"staleRefused":True,"editPrecommitUnchanged":True,
+                "editAck":True,"editNoOp":True,"editLostAck":True,"deletePrecommitUnchanged":True,
+                "deleteLostAck":True,"deleteAck":True,"noResurrection":True,
+                "otherTablesUnchanged":True,"ownerIsolation":True}
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        stage="restart-storage"
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_JOURNAL_CHANGE_RESTART,{"a":secrets[0],"b":secrets[1]})
+            assert restored==[{"revision":7,"values":[],"tombstones":2},
+                {"revision":2,"values":[211.25],"tombstones":0}]
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {**result,"restart":True,"noKnownPlaintext":True}
+    except Exception:
+        raise RuntimeError("D1 journal change qualification failed at "+stage) from None
+    finally:
+        secrets=None
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -1749,6 +1917,7 @@ def run():
                             record["i5_clinical_store"]=exercise_clinical_store(browser_type,Path(root)/(locale+"-clinical-store"),locale,origin)
                             record["i5_glucose_store"]=exercise_glucose_store(browser_type,Path(root)/(locale+"-glucose-store"),locale,origin)
                             record["i5_journal"]=exercise_journal(browser_type,Path(root)/(locale+"-journal"),locale,origin)
+                            record["i5_journal_change"]=exercise_journal_change(browser_type,Path(root)/(locale+"-journal-change"),locale,origin)
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -1771,6 +1940,7 @@ def run():
     print("D1_I5_CLINICAL_STORAGE_PASS 2/2",flush=True)
     print("D1_I5_GLUCOSE_STORE_PASS 2/2",flush=True)
     print("D1_I5_JOURNAL_PASS 2/2",flush=True)
+    print("D1_I5_JOURNAL_CHANGE_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":

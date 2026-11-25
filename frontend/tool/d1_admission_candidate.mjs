@@ -320,6 +320,8 @@ class AdmissionSession {
     try{
       const r=await this.#read();
       bytes=await decrypt(r,key,owner);this.#local();
+      const deleted=await window.d1GlucoseDeleted(bytes,owner,uuid);this.#local();
+      require(deleted===false,'Measurement UUID deleted');
       const existing=JSON.parse(await window.d1GlucoseRead(bytes,owner,uuid));this.#local();
       if(existing!==null){
         require(matches(existing),'Measurement UUID conflict');
@@ -344,6 +346,57 @@ class AdmissionSession {
       if(beforeAck)await beforeAck();
       await this.#verifyFence();this.#local();
       return {revision,replay:false,measurement};
+    }finally{bytes?.fill(0);next?.fill(0);this.#busy=false;}
+  }
+  async changeGlucose(expectedRevision,uuid,action,mgDl,unit,seconds,{beforeCommit,beforeAck}={}){
+    require(this.#guard,'Bound authority required');this.#local();
+    require(Number.isSafeInteger(expectedRevision)&&expectedRevision>0&&
+      typeof uuid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)&&
+      (action==='delete'||(action==='edit'&&unit==='mg/dL'&&Number.isFinite(mgDl)&&mgDl>0&&
+        Number.isSafeInteger(seconds)&&seconds>0&&seconds<=4102444800)),'Invalid measurement change');
+    require(!this.#busy,'Mutation already pending');this.#busy=true;
+    let bytes,next;
+    const owner=this.#lease.owner,key=this.#key;
+    try{
+      const r=await this.#read();
+      bytes=await decrypt(r,key,owner);this.#local();
+      const deleted=await window.d1GlucoseDeleted(bytes,owner,uuid);this.#local();
+      const existing=JSON.parse(await window.d1GlucoseRead(bytes,owner,uuid));this.#local();
+      if(action==='delete'&&deleted===true){
+        require(existing===null,'Deletion invariant failed');
+        const current=await this.#read();this.#local();
+        require(sameRecord(current,r),'Checkpoint conflict');
+        return {revision:r.revision,replay:true,deleted:true,measurement:null};
+      }
+      require(!deleted&&existing!==null,'Measurement unavailable');
+      require(r.revision===expectedRevision,'Checkpoint conflict');
+      if(action==='edit'&&existing.mgDl===mgDl&&existing.loggedAtSeconds===seconds){
+        const current=await this.#read();this.#local();
+        require(sameRecord(current,r),'Checkpoint conflict');
+        return {revision:r.revision,replay:true,deleted:false,measurement:existing};
+      }
+      next=await window.d1GlucoseChange(bytes,owner,uuid,action,
+        action==='delete'?0:mgDl,action==='delete'?0:seconds);this.#local();
+      const measurement=JSON.parse(await window.d1GlucoseRead(next,owner,uuid));this.#local();
+      const gone=await window.d1GlucoseDeleted(next,owner,uuid);this.#local();
+      require(action==='delete'?(gone===true&&measurement===null):
+        (gone===false&&measurement?.uuid===uuid&&measurement.mgDl===mgDl&&
+          measurement.loggedAtSeconds===seconds&&measurement.syncStatus==='pending'&&measurement.source==='manual'),
+        'Measurement change invariant failed');
+      require(r.revision<0xffffffff,'Revision exhausted');
+      const revision=r.revision+1;
+      const archive=await encrypt(next,key,owner,revision);this.#local();
+      if(beforeCommit)await beforeCommit();
+      this.#local();
+      await transaction(owner,true,(current,f,store)=>{
+        this.#local();
+        require(fenceMatches(f,this.#lease),'Admission fence retired');
+        require(sameRecord(current,r),'Checkpoint conflict');
+        store.put({revision,envelope:r.envelope,archive},'owner:'+owner);
+      });
+      if(beforeAck)await beforeAck();
+      await this.#verifyFence();this.#local();
+      return {revision,replay:false,deleted:gone,measurement};
     }finally{bytes?.fill(0);next?.fill(0);this.#busy=false;}
   }
   async readTreatment(){
@@ -600,6 +653,8 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
       readJournal:(revision,start,end,limit,offset,hooks)=>perform(()=>session.readJournal(revision,start,end,limit,offset,hooks)),
       readGlucose:uuid=>perform(()=>session.readGlucose(uuid)),
       insertGlucose:(revision,uuid,mgDl,unit,seconds,hooks)=>perform(()=>session.insertGlucose(revision,uuid,mgDl,unit,seconds,hooks)),
+      editGlucose:(revision,uuid,mgDl,unit,seconds,hooks)=>perform(()=>session.changeGlucose(revision,uuid,'edit',mgDl,unit,seconds,hooks)),
+      deleteGlucose:(revision,uuid,hooks)=>perform(()=>session.changeGlucose(revision,uuid,'delete',0,'mg/dL',0,hooks)),
       readTreatment:()=>perform(()=>session.readTreatment()),
       writeTreatment:(revision,state,codes,hooks)=>perform(()=>session.writeTreatment(revision,state,codes,hooks)),
       mutate:(operation,hooks)=>perform(()=>session.mutate(operation,hooks)),
