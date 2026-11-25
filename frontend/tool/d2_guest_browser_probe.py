@@ -74,6 +74,7 @@ def run():
     assert (WEB / "main.dart.js").stat().st_size > 1000
     build_sha = hashlib.sha256((WEB / "main.dart.js").read_bytes()).hexdigest()
     records = []
+    cutover = os.environ.get("D1_CUTOVER_PROBE") == "1"
     target = os.environ.get("D2_BROWSER_TARGET", "diagnostic-all")
     # One Web reference platform per engine. The Linux WebKit port remains
     # reproducible as a separate diagnostic; its historical FAIL is not a PASS.
@@ -115,6 +116,21 @@ def run():
                                             blocked.append(url.split("?")[0])
                                             r.abort()
                                     ctx.route("**/*", route)
+                                    if cutover:
+                                        ctx.add_init_script("""() => {
+                                          window.__d1StorageAttempts = [];
+                                          const deny = (proto, name) => {
+                                            if (typeof proto?.[name] !== "function") return;
+                                            proto[name] = function() {
+                                              window.__d1StorageAttempts.push(name);
+                                              throw new Error("Persistent storage access forbidden");
+                                            };
+                                          };
+                                          deny(IDBFactory.prototype, "open");
+                                          deny(IDBFactory.prototype, "deleteDatabase");
+                                          deny(globalThis.StorageManager?.prototype, "getDirectory");
+                                          deny(Storage.prototype, "setItem");
+                                        }""")
                                     page = ctx.new_page()
                                     page.on("pageerror", lambda e: errors.append(str(e)[:200]))
                                     page.goto(origin, wait_until="domcontentloaded")
@@ -165,6 +181,15 @@ def run():
                                         assert frames[-3]["complete"], "Canvas incomplete at width 391"
                                         assert all(f["complete"] for f in after), "Blank or visually incomplete canvas after resize"
                                         assert all(f["rgb_sha256"] == before["rgb_sha256"] for f in after), "Post-resize RGB mismatch"
+                                    if cutover:
+                                        storage = page.evaluate("""async () => ({
+                                          attempts: window.__d1StorageAttempts,
+                                          databases: (await indexedDB.databases()).map(d => d.name),
+                                          local: localStorage.length, session: sessionStorage.length,
+                                          caches: await caches.keys()
+                                        })""")
+                                        record["cutover_storage"] = storage
+                                        assert storage == {"attempts": [], "databases": [], "local": 0, "session": 0, "caches": []}, storage
                                     assert not blocked, "Guest made non-static network request"
                                     assert not errors, "Browser runtime error"
                                     record.update(result="PASS", screenshots=frames, blocked_requests=0, page_errors=0)
@@ -187,6 +212,8 @@ def run():
             assert len(records) == len(engines) * 4
             assert all(r["result"] == "PASS" for r in records), "D2 candidate browser matrix failed"
             print(f"D2_BROWSER_PASS {len(records)}/{len(records)}")
+            if cutover:
+                print(f"D1_I5_CUTOVER_WEB_PASS {len(records)}/{len(records)}", flush=True)
         finally:
             server.shutdown()
 
