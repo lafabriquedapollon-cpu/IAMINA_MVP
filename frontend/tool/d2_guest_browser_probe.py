@@ -3,6 +3,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import threading
 
@@ -53,6 +54,15 @@ def named(page, label):
     return page.get_by_text(label, exact=True).first
 
 
+def navigation(page, label):
+    # Flutter navigation widgets expose accessible names, not necessarily DOM
+    # text nodes. Include its localized position/selection suffix, not another
+    # section heading. Never click by guessed screen coordinates.
+    pattern = re.compile(r"^" + re.escape(label) + r"(?:\s|$)")
+    candidates = page.get_by_role("tab", name=pattern).or_(page.get_by_role("button", name=pattern))
+    return candidates
+
+
 def run():
     PROOF.mkdir(parents=True, exist_ok=True)
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -74,6 +84,7 @@ def run():
                                 ctx = browser.new_context(locale=locale, viewport={"width":w,"height":h},
                                                           device_scale_factor=1, service_workers="block")
                                 blocked, errors, frames = [], [], []
+                                page = None
                                 try:
                                     def route(r):
                                         url = r.request.url
@@ -90,9 +101,16 @@ def run():
                                     home, measures, reports, profile, add, identity, back, disabled = copy
                                     expect(named(page, add)).to_be_visible(timeout=30000)
                                     frames.append(shot(page, name+"-guest"))
-                                    for label in (measures, reports, profile, home):
-                                        named(page, label).click(timeout=10000)
-                                        page.wait_for_timeout(300)
+                                    destination_actions = (
+                                        ("Traitements", "Importer un document", "Accéder à mon profil", add)
+                                        if locale == "fr-FR" else
+                                        ("الأدوية", "استيراد مستند", "الوصول إلى ملفي", add)
+                                    )
+                                    for label, action in zip((measures, reports, profile, home), destination_actions):
+                                        nav = navigation(page, label)
+                                        expect(nav).to_have_count(1, timeout=10000)
+                                        nav.click(timeout=10000)
+                                        expect(named(page, action)).to_be_visible(timeout=10000)
                                     expect(named(page, add)).to_be_visible()
                                     named(page, add).click(timeout=10000)
                                     expect(named(page, disabled)).to_be_visible(timeout=10000)
@@ -111,6 +129,12 @@ def run():
                                 except Exception as error:
                                     record.update(result="FAIL", error=str(error)[:500], blocked_requests=blocked,
                                                   page_errors=errors, screenshots=frames)
+                                    if page is not None:
+                                        try:
+                                            record["aria_tree"] = page.locator("body").aria_snapshot(timeout=5000)[:12000]
+                                            frames.append(shot(page, name+"-failure"))
+                                        except Exception as diagnostic:
+                                            record["diagnostic_error"] = str(diagnostic)[:300]
                                 finally:
                                     ctx.close()
                                 records.append(record)
