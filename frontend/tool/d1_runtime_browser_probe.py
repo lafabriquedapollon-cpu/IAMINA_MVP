@@ -696,6 +696,109 @@ def restore_i4(ctx,page,legacy_origin,errors,record):
 
 
 
+
+# I5B: random portable possession, independent of simulated identity proof.
+# Only the Python harness retains the generated secrets between browser restarts.
+# Never include secrets in JSON evidence, exception messages or screenshots.
+I5_POSSESSION = r"""async ({secrets,restore})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const key=await import('/d1_possession_candidate.mjs');
+  const A=900001,B=900002;
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,expected)=>{try{await fn();}catch(e){
+    check(String(e).includes(expected),'Unexpected rejection reason');return;
+  }throw new Error('Expected refusal');};
+  const proof=(owner,epoch)=>api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch});
+  const a=key.requirePossessionSecret(secrets[0]),b=key.requirePossessionSecret(secrets[1]);
+  check(a!==b,'Random secret collision');
+  let negatives=0;
+  for(const invalid of ['',a.slice(1),a+'0',a.toUpperCase().replace(/^./,'G'),a+'\n',null]){
+    await reject(()=>key.requirePossessionSecret(invalid),'Invalid possession secret');negatives++;
+  }
+  const epoch=restore?32:31;
+  if(!restore){
+    const sa=await api.enroll(A,epoch,proof(A,epoch),a);
+    await sa.mutate('possession-001');
+    await sa.retire();
+    const sb=await api.enroll(B,epoch,proof(B,epoch),b);
+    await sb.retire();
+  }
+  await reject(()=>api.admit(A,epoch,proof(A,epoch),b),'Archive authentication failed');negatives++;
+  await reject(()=>api.admit(B,epoch,proof(B,epoch),a),'Archive authentication failed');negatives++;
+  const bad=a.slice(0,63)+(a.endsWith('0')?'1':'0');
+  await reject(()=>api.admit(A,epoch,proof(A,epoch),bad),'Archive authentication failed');negatives++;
+  const ticket=proof(A,epoch);
+  const sa=await api.admit(A,epoch,ticket,a);
+  const ra=await sa.auditSnapshot();
+  await reject(()=>api.admit(A,epoch,ticket,a),'Admission proof rejected');negatives++;
+  check(await sa.retire(),'A retire failed');
+  const sb=await api.admit(B,epoch,proof(B,epoch),b);
+  const rb=await sb.auditSnapshot();
+  check(await sb.retire(),'B retire failed');
+  check(ra.revision===2&&rb.revision===1&&ra.sha256!==rb.sha256,'Owner/revision mismatch');
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{
+    const state=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const a=store.get('owner:900001'),b=store.get('owner:900002'),keys=store.getAllKeys();
+      tx.oncomplete=()=>resolve({a:a.result,b:b.result,keys:keys.result});
+      tx.onabort=()=>reject(new Error('Store read failed'));
+    });
+    const encode=x=>new TextEncoder().encode(x);
+    const raw=x=>Uint8Array.from(x.match(/../g),y=>parseInt(y,16));
+    const needles=[encode(a),encode(b),raw(a),raw(b),encode('SQLite format 3'),
+      encode('D1_I1_SYNTHETIC_NOT_PATIENT')];
+    const contains=(h,n)=>h.some((_,i)=>n.every((v,j)=>h[i+j]===v));
+    check(JSON.stringify(state.keys.sort())==='["fence","owner:900001","owner:900002"]','Unexpected durable keys');
+    for(const rec of [state.a,state.b]){
+      check(Object.keys(rec).sort().join(',')==='archive,envelope,revision','Unexpected record');
+      for(const bytes of [rec.archive,rec.envelope])
+        check(bytes instanceof Uint8Array&&!needles.some(n=>contains(bytes,n)),'Unexpected durable secret/plaintext');
+    }
+    check(!localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length,'Unexpected storage');
+    check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]','Unexpected database');
+    if(navigator.storage?.getDirectory){
+      const root=await navigator.storage.getDirectory();
+      for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+    }
+  }finally{db.close();}
+  return {a:ra,b:rb,negativeCases:negatives,plaintextCheck:true};
+}"""
+
+
+def exercise_possession(browser_type,profile,locale,origin):
+    secrets=None
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate("""async ()=>{
+              const k=await import('/d1_possession_candidate.mjs');
+              return [k.generatePossessionSecret(),k.generatePossessionSecret()];
+            }""")
+            assert len(secrets)==2 and all(len(s)==64 for s in secrets)
+            first=page.evaluate(I5_POSSESSION,{"secrets":secrets,"restore":False})
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_POSSESSION,{"secrets":secrets,"restore":True})
+            assert restored==first and first["negativeCases"]==10
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {"first":first,"restart":True}
+    except Exception:
+        # Never propagate Playwright arguments or arbitrary error strings.
+        raise RuntimeError("D1 possession qualification failed") from None
+    finally:
+        secrets=None
+
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -767,6 +870,7 @@ def run():
                                 assert not blocked and not errors,(blocked,errors)
                             finally:
                                 ctx.close()
+                            record["i5_possession"]=exercise_possession(browser_type,Path(root)/(locale+"-possession"),locale,origin)
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -780,6 +884,7 @@ def run():
     print("D1_I2_DURABLE_MUTATION_PASS 2/2",flush=True)
     print("D1_I3_ADMISSION_FENCE_PASS 2/2",flush=True)
     print("D1_I4_COPY_MIGRATION_PASS 2/2",flush=True)
+    print("D1_I5_POSSESSION_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":
