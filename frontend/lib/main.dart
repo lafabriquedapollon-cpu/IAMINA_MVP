@@ -16,6 +16,7 @@ import 'services/app_lock_protected_state_policy.dart';
 import 'services/app_lock_service.dart';
 import 'services/audit_access_policy.dart';
 import 'services/auth_service.dart';
+import 'services/d1_cutover_policy.dart';
 import 'services/firebase_migration_policy.dart';
 import 'services/medical_vault_protected_state.dart';
 import 'services/locale_preference_service.dart';
@@ -42,9 +43,10 @@ Future<bool> _hasProtectedLocalState({
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // D2 candidate build only. Branch before legacy DB probes or auth init.
-  // Never admit a clinical vault until the D1 integration gate is certified.
-  if (const bool.fromEnvironment('IAMINA_D2_GUEST_CANDIDATE', defaultValue: false)) {
+  // The cutover build must not initialize credentials, legacy probes, or
+  // patient providers. D2 remains available as a separate synthetic build.
+  if (kD1CutoverCandidate ||
+      const bool.fromEnvironment('IAMINA_D2_GUEST_CANDIDATE', defaultValue: false)) {
     runApp(MaterialApp(
       title: 'IAmina',
       theme: AminaVisualLanguage.harmonize(AminaTheme.light),
