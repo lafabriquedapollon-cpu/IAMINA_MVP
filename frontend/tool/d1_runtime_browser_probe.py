@@ -1303,6 +1303,84 @@ I5_CLINICAL_RESTART = r"""async ({a,b})=>{
 }"""
 
 
+
+# Inspect the accessible origin's durable state independently of the admission
+# wrapper. This is an API-visible inventory, not a disk/memory forensic audit.
+I5_CLINICAL_STORAGE = r"""async ({a,b})=>{
+  const {openArchive}=await import('/d1_archive_candidate.mjs');
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const encode=x=>new TextEncoder().encode(x);
+  const raw=x=>Uint8Array.from(x.match(/../g),y=>parseInt(y,16));
+  const hex=x=>Array.from(x,v=>v.toString(16).padStart(2,'0')).join('');
+  const contains=(hay,needle)=>hay.some((_,i)=>needle.every((v,j)=>hay[i+j]===v));
+  const names=(await indexedDB.databases()).map(x=>x.name).sort();
+  check(JSON.stringify(names)==='["iamina-d1-admission-probe-v1"]','Unexpected durable DB');
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open(names[0],1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{
+    check(JSON.stringify(Array.from(db.objectStoreNames))==='["state"]','Unexpected store');
+    const values=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const keys=store.getAllKeys(),f=store.get('fence'),x=store.get('owner:900001'),y=store.get('owner:900002');
+      tx.oncomplete=()=>resolve({keys:keys.result,f:f.result,x:x.result,y:y.result});
+      tx.onabort=()=>reject(new Error('Store read failed'));
+    });
+    check(JSON.stringify(values.keys.sort())==='["fence","owner:900001","owner:900002"]','Unexpected durable keys');
+    check(values.f&&Object.keys(values.f).sort().join(',')==='epoch,owner,token'&&
+      values.f.owner===null&&values.f.epoch===null&&/^[0-9a-f]{64}$/.test(values.f.token),'Unexpected retired fence');
+    const needles=[encode(a),encode(b),raw(a),raw(b),encode('SQLite format 3'),
+      encode('D1_I1_SYNTHETIC_NOT_PATIENT'),encode('patient_treatment_declarations_v1'),
+      encode('patient_declared'),encode('none_declared'),encode('oral_meds'),
+      encode('iamina.fixture_900001'),encode('iamina.fixture_900002')];
+    for(const [owner,rec,secret,wrongSecret,rev,expected] of [
+      [900001,values.x,a,b,3,'unsure'],[900002,values.y,b,a,2,'none_declared']]){
+      check(rec&&Object.keys(rec).sort().join(',')==='archive,envelope,revision'&&rec.revision===rev,'Unexpected record');
+      for(const bytes of [rec.archive,rec.envelope]){
+        check(bytes instanceof Uint8Array&&bytes.length>=53&&
+          [73,65,77,73,78,65,1,0].every((v,i)=>bytes[i]===v),'Unexpected archive format');
+        check(!needles.some(n=>contains(bytes,n)),'Durable plaintext or secret');
+      }
+      const scope='amina_vault_v1_native_'+owner;
+      const wrongScope='amina_vault_v1_native_'+(owner===900001?900002:900001);
+      for(const [s,p] of [[wrongSecret,scope],[secret,wrongScope]]){
+        let denied=false;
+        try{const invalid=await openArchive(rec.envelope,s,p);invalid.fill(0);}
+        catch(e){denied=String(e).includes('Archive authentication failed');}
+        check(denied,'Wrong scope or secret accepted');
+      }
+      const envelope=await openArchive(rec.envelope,secret,scope);
+      let payload,sqlite;
+      try{
+        const tag=encode('IAMINA-D1-KEY-V1');
+        check(envelope.length===tag.length+32&&tag.every((v,i)=>envelope[i]===v),'Envelope contents wrong');
+        const key=envelope.subarray(tag.length);
+        const keyHex=hex(key);
+        for(const stored of [values.x,values.y])
+          for(const bytes of [stored.archive,stored.envelope])
+            check(!contains(bytes,key)&&!contains(bytes,encode(keyHex)),'Durable clear data key');
+        payload=await openArchive(rec.archive,keyHex,scope);
+        check(payload.length>=104&&new DataView(payload.buffer,payload.byteOffset,4).getUint32(0)===rev,'Encrypted revision mismatch');
+        sqlite=payload.slice(4);
+        const tables=JSON.parse(await window.d1FullInspect(sqlite,owner));
+        const decl=tables.patient_treatment_declarations_v1;
+        check(decl.length===1&&decl[0].user_id===owner&&decl[0].declaration_state===expected&&
+          decl[0].local_generation===(owner===900001?2:1)&&decl[0].sync_status==='pending','Decrypted declaration mismatch');
+      }finally{envelope.fill(0);payload?.fill(0);sqlite?.fill(0);}
+    }
+    check(!localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length,'Unexpected browser storage');
+    const opfsChecked=typeof navigator.storage?.getDirectory==='function';
+    if(opfsChecked){
+      const root=await navigator.storage.getDirectory();
+      for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+    }
+    return {inventoryExact:true,archiveFormat:true,noKnownPlaintext:true,
+      wrongScopeSecretRefused:true,independentDecrypt:true,otherStoresEmpty:true,opfsChecked};
+  }finally{db.close();}
+}"""
+
+
 def exercise_clinical_store(browser_type,profile,locale,origin):
     secrets=None
     stage="bootstrap"
@@ -1315,6 +1393,9 @@ def exercise_clinical_store(browser_type,profile,locale,origin):
             assert result=={"invalidRefused":True,"staleRefused":True,
                 "precommitUnchanged":True,"durableAck":True,"lostAckRecovered":True,
                 "otherTablesUnchanged":True,"ownerIsolation":True}
+            stage="storage-before-restart"
+            before_storage=page.evaluate(I5_CLINICAL_STORAGE,{"a":secrets[0],"b":secrets[1]})
+            assert all(before_storage[k] is True for k in ("inventoryExact","archiveFormat","noKnownPlaintext","wrongScopeSecretRefused","independentDecrypt","otherStoresEmpty"))
             assert not blocked and not errors
         finally:
             ctx.close()
@@ -1324,10 +1405,13 @@ def exercise_clinical_store(browser_type,profile,locale,origin):
             restored=page.evaluate(I5_CLINICAL_RESTART,{"a":secrets[0],"b":secrets[1]})
             assert restored==[{"revision":3,"owner":900001,"generation":2,"state":"unsure"},
                 {"revision":2,"owner":900002,"generation":1,"state":"none_declared"}]
+            stage="storage-after-restart"
+            after_storage=page.evaluate(I5_CLINICAL_STORAGE,{"a":secrets[0],"b":secrets[1]})
+            assert after_storage==before_storage
             assert not blocked and not errors
         finally:
             ctx.close()
-        return {**result,"restart":True}
+        return {**result,"restart":True,"storageBefore":before_storage,"storageAfter":after_storage}
     except Exception:
         raise RuntimeError("D1 clinical store qualification failed at "+stage) from None
     finally:
@@ -1431,6 +1515,7 @@ def run():
     print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
     print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)
     print("D1_I5_CLINICAL_STORE_PASS 2/2",flush=True)
+    print("D1_I5_CLINICAL_STORAGE_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":
