@@ -1232,6 +1232,109 @@ def exercise_cross_hints(browser_type,profile,locale,origin):
 
 
 
+# First real clinical-store operation, isolated from application providers.
+I5_CLINICAL = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002;
+  const check=(v,m)=>{if(!v)throw new Error(m);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected refusal');return;
+  }throw new Error('Expected refusal');};
+  const open=async(owner,secret)=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  };
+  const unchanged=(before,after)=>{
+    for(const table of Object.keys(before.tables)){
+      if(table!=='patient_treatment_declarations_v1')
+        check(JSON.stringify(before.tables[table])===JSON.stringify(after.tables[table]),'Other table changed');
+    }
+  };
+  let s=await open(A,a);
+  const initial=await s.auditSnapshot();
+  check(initial.revision===1&&(await s.readTreatment()).declaration===null,'Unexpected initial declaration');
+  await reject(()=>s.writeTreatment(1,'declared',[]),'Invalid declaration');
+  s=await open(A,a);
+  await reject(()=>s.writeTreatment(2,'declared',['oral_meds']),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.writeTreatment(1,'declared',['oral_meds'],{beforeCommit:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const noWrite=await s.auditSnapshot();
+  check(noWrite.sha256===initial.sha256&&noWrite.revision===1,'Precommit retirement changed bytes');
+  const ack=await s.writeTreatment(1,'declared',['oral_meds','lifestyle']);
+  check(ack.revision===2&&ack.declaration.owner===A&&ack.declaration.generation===1&&
+    ack.declaration.syncStatus==='pending'&&ack.declaration.provenance==='patient_declared','Invalid first ACK');
+  const first=await s.auditSnapshot();
+  unchanged(initial,first);
+  check(first.tables.patient_treatment_declarations_v1.length===1,'Declaration missing');
+  await reject(()=>s.writeTreatment(2,'unsure',[],{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const recovered=await s.readTreatment();
+  check(recovered.revision===3&&recovered.declaration.generation===2&&
+    recovered.declaration.state==='unsure'&&recovered.declaration.codes.length===0,'Lost ACK recovery mismatch');
+  unchanged(initial,await s.auditSnapshot());
+  await window.d1BoundLogin(B);
+  await reject(()=>s.readTreatment(),'Bound authority retired');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,window.d1BoundEpoch(),bp,b);
+  check((await bs.readTreatment()).declaration===null,'Cross-owner declaration leak');
+  const bAck=await bs.writeTreatment(1,'none_declared',[]);
+  check(bAck.revision===2&&bAck.declaration.owner===B&&bAck.declaration.generation===1,'B ACK mismatch');
+  await bs.retire();
+  s=await open(A,a);
+  check(JSON.stringify(await s.readTreatment())===JSON.stringify(recovered),'A recovery changed');
+  await s.retire();
+  return {invalidRefused:true,staleRefused:true,precommitUnchanged:true,
+    durableAck:true,lostAckRecovered:true,otherTablesUnchanged:true,ownerIsolation:true};
+}"""
+I5_CLINICAL_RESTART = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const result=[];
+  for(const [owner,secret] of [[900001,a],[900002,b]]){
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    const s=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+    result.push(await s.readTreatment());
+    await s.retire();
+  }
+  return result.map(x=>({revision:x.revision,owner:x.declaration.owner,
+    generation:x.declaration.generation,state:x.declaration.state}));
+}"""
+
+
+def exercise_clinical_store(browser_type,profile,locale,origin):
+    secrets=None
+    stage="bootstrap"
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="clinical-operations"
+            result=page.evaluate(I5_CLINICAL,{"a":secrets[0],"b":secrets[1]})
+            assert result=={"invalidRefused":True,"staleRefused":True,
+                "precommitUnchanged":True,"durableAck":True,"lostAckRecovered":True,
+                "otherTablesUnchanged":True,"ownerIsolation":True}
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        stage="restart"
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_CLINICAL_RESTART,{"a":secrets[0],"b":secrets[1]})
+            assert restored==[{"revision":3,"owner":900001,"generation":2,"state":"unsure"},
+                {"revision":2,"owner":900002,"generation":1,"state":"none_declared"}]
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {**result,"restart":True}
+    except Exception:
+        raise RuntimeError("D1 clinical store qualification failed at "+stage) from None
+    finally:
+        secrets=None
+
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -1308,6 +1411,7 @@ def run():
                             record["i5_cross_revocation"]=exercise_cross_revocation(browser_type,Path(root)/(locale+"-cross-revoke"),locale,origin)
                             record["i5_revocation_failure"]=exercise_revocation_failure(browser_type,Path(root)/(locale+"-revoke-fault"),locale,origin)
                             record["i5_cross_hints"]=exercise_cross_hints(browser_type,Path(root)/(locale+"-cross-hints"),locale,origin)
+                            record["i5_clinical_store"]=exercise_clinical_store(browser_type,Path(root)/(locale+"-clinical-store"),locale,origin)
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -1326,6 +1430,7 @@ def run():
     print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
     print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
     print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)
+    print("D1_I5_CLINICAL_STORE_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":

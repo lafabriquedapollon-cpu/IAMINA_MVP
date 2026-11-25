@@ -271,6 +271,55 @@ class AdmissionSession {
       return {sha256,revision:r.revision,tables};
     }finally{bytes?.fill(0);}
   }
+  async readTreatment(){
+    require(this.#guard,'Bound authority required');
+    const r=await this.#read();
+    let bytes;
+    try{
+      bytes=await decrypt(r,this.#key,this.#lease.owner);this.#local();
+      const declaration=JSON.parse(await window.d1TreatmentRead(bytes,this.#lease.owner));
+      await this.#verifyFence();
+      return {revision:r.revision,declaration};
+    }finally{bytes?.fill(0);}
+  }
+  async writeTreatment(expectedRevision,state,codes,{beforeCommit,beforeAck}={}){
+    require(this.#guard,'Bound authority required');
+    this.#local();
+    require(Number.isSafeInteger(expectedRevision)&&expectedRevision>0&&
+      ['not_answered','unsure','declared','none_declared'].includes(state)&&
+      Array.isArray(codes)&&codes.length<=4&&new Set(codes).size===codes.length&&
+      codes.every(x=>['insulin','oral_meds','lifestyle','other'].includes(x))&&
+      ((state==='declared')===(codes.length>0)),'Invalid declaration');
+    const codesJson=JSON.stringify(codes);
+    require(!this.#busy,'Mutation already pending');
+    this.#busy=true;
+    let bytes,next;
+    const owner=this.#lease.owner,key=this.#key;
+    try{
+      const r=await this.#read();
+      require(r.revision===expectedRevision,'Checkpoint conflict');
+      bytes=await decrypt(r,key,owner);this.#local();
+      next=await window.d1TreatmentChange(bytes,owner,state,codesJson);this.#local();
+      const declaration=JSON.parse(await window.d1TreatmentRead(next,owner));this.#local();
+      require(declaration&&declaration.owner===owner&&declaration.state===state&&
+        JSON.stringify(declaration.codes)===codesJson&&declaration.syncStatus==='pending',
+        'Declaration invariant failed');
+      require(r.revision<0xffffffff,'Revision exhausted');
+      const revision=r.revision+1;
+      const archive=await encrypt(next,key,owner,revision);this.#local();
+      if(beforeCommit)await beforeCommit();
+      this.#local();
+      await transaction(owner,true,(current,f,store)=>{
+        this.#local();
+        require(fenceMatches(f,this.#lease),'Admission fence retired');
+        require(sameRecord(current,r),'Checkpoint conflict');
+        store.put({revision,envelope:r.envelope,archive},'owner:'+owner);
+      });
+      if(beforeAck)await beforeAck();
+      await this.#verifyFence();
+      return {revision,declaration};
+    }finally{bytes?.fill(0);next?.fill(0);this.#busy=false;}
+  }
   retireLocal(){
     this.#retired=true;this.#key=null;
   }
@@ -473,6 +522,8 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
     return Object.freeze({
       inspect:()=>perform(()=>session.inspect()),
       auditSnapshot:()=>perform(()=>session.auditSnapshot()),
+      readTreatment:()=>perform(()=>session.readTreatment()),
+      writeTreatment:(revision,state,codes,hooks)=>perform(()=>session.writeTreatment(revision,state,codes,hooks)),
       mutate:(operation,hooks)=>perform(()=>session.mutate(operation,hooks)),
       retire:()=>revoke(),
       revocationStatus:()=>retirement.status,

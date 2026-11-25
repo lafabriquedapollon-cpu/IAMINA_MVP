@@ -6,9 +6,11 @@ import 'dart:typed_data';
 
 import 'package:amina/data/drift/database.dart';
 import 'package:amina/data/drift/patient_vault_scope.dart';
+import 'package:amina/data/drift/patient_treatment_declaration_store.dart';
 import 'package:drift/drift.dart';
 import 'package:drift/wasm.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:amina/services/auth_service.dart';
 import 'package:amina/services/app_lock_service.dart';
 import 'package:amina/services/app_lock_authenticator.dart';
@@ -27,6 +29,10 @@ external set _legacyFn(JSFunction function);
 external set _fullInspectFn(JSFunction function);
 @JS('d1Inspect')
 external set _inspectFn(JSFunction function);
+@JS('d1TreatmentRead')
+external set _treatmentReadFn(JSFunction function);
+@JS('d1TreatmentChange')
+external set _treatmentChangeFn(JSFunction function);
 
 // This synthetic entrypoint is built only by the isolated browser harness.
 @JS('d1BoundLogin')
@@ -312,6 +318,62 @@ Future<String> _fullInspect(Uint8List bytes, int owner) async {
   }
 }
 
+Map<String, Object?>? _declarationJson(PatientTreatmentDeclarationRecord? record) {
+  if (record == null) return null;
+  return {
+    'owner': record.ownerId, 'state': record.state, 'codes': record.codes,
+    'generation': record.localGeneration, 'syncStatus': record.syncStatus,
+    'version': record.version, 'provenance': record.provenance,
+  };
+}
+
+// Isolated synthetic bridge to the real patient-declaration store. No DB
+// escapes the operation; no network, provider, or clinical recommendation.
+Future<String> _readTreatment(Uint8List input, int owner) async {
+  final vault = await _MemoryVault.open(owner, input);
+  try {
+    await vault.inspect();
+    final record = await PatientTreatmentDeclarationStore(vault.db).read();
+    _require(record == null || record.ownerId == owner, 'Declaration owner mismatch');
+    return jsonEncode(_declarationJson(record));
+  } finally {
+    try { await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
+Future<Uint8List> _changeTreatment(
+    Uint8List input, int owner, String state, String codesJson) async {
+  final raw = jsonDecode(codesJson);
+  _require(raw is List && raw.every((item) => item is String), 'Invalid codes');
+  final codes = (raw as List).cast<String>().toList(growable: false);
+  validatePatientTreatmentDeclarationV1(state: state, codes: codes);
+  final vault = await _MemoryVault.open(owner, input);
+  var closed = false;
+  try {
+    await vault.inspect();
+    final store = PatientTreatmentDeclarationStore(vault.db);
+    final before = await store.read();
+    // This tranche has no conflict resolution or remote synchronization.
+    _require(before == null || (before.ownerId == owner && before.syncStatus == 'pending'),
+        'Unsupported declaration sync state');
+    await store.write(state: state, codes: codes);
+    final after = await store.read();
+    _require(after != null && after.ownerId == owner && after.state == state &&
+        listEquals(after.codes, codes) && after.localGeneration == (before?.localGeneration ?? 0) + 1 &&
+        after.syncStatus == 'pending', 'Declaration invariant failed');
+    await vault.inspect();
+    await vault.db.close();
+    closed = true;
+    _require(vault.fs.fileData.keys.every((key) => key == _path),
+        'Unexpected SQLite auxiliary file');
+    return Uint8List.fromList(vault.fs.fileData[_path]!);
+  } finally {
+    try { if (!closed) await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   _boundLoginFn = ((JSNumber owner) =>
@@ -325,6 +387,11 @@ void main() {
       _snapshot(bytes.toDart, owner.toDartInt, operation.toDart).then((value) => value.toJS).toJS).toJS;
   _legacyFn = ((JSNumber owner) =>
       _legacySnapshot(owner.toDartInt).then((value) => value.toJS).toJS).toJS;
+  _treatmentReadFn = ((JSUint8Array bytes, JSNumber owner) =>
+      _readTreatment(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
+  _treatmentChangeFn = ((JSUint8Array bytes, JSNumber owner, JSString state, JSString codes) =>
+      _changeTreatment(bytes.toDart, owner.toDartInt, state.toDart, codes.toDart)
+          .then((value) => value.toJS).toJS).toJS;
   _fullInspectFn = ((JSUint8Array bytes, JSNumber owner) =>
       _fullInspect(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
   _inspectFn = ((JSUint8Array bytes, JSNumber owner) =>
