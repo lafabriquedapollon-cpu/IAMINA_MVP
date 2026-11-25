@@ -1557,6 +1557,119 @@ def exercise_glucose_store(browser_type,profile,locale,origin):
         secrets=None
 
 
+I5_JOURNAL = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,t=1795564800;
+  const u='ac123456-1234-4abc-8def-000000000001',v='ac123456-1234-4abc-8def-000000000002';
+  const w='ac123456-1234-4abc-8def-000000000003',z='ac123456-1234-4abc-8def-000000000004';
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected refusal');return;
+  }throw new Error('Expected refusal');};
+  const open=async(owner,secret)=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  };
+  let s=await open(A,a);
+  const empty=await s.readJournal(1,t-1,t+100,2,0);
+  check(empty.rows.length===0&&empty.nextOffset===null,'Legacy row disclosed');
+  await s.insertGlucose(1,v,120.25,'mg/dL',t+30);
+  await s.insertGlucose(2,u,121.25,'mg/dL',t+30);
+  await s.insertGlucose(3,w,122.25,'mg/dL',t);
+  await s.insertGlucose(4,z,123.25,'mg/dL',t+100);
+  const before=await s.auditSnapshot();
+  const first=await s.readJournal(5,t,t+100,2,0);
+  const second=await s.readJournal(5,t,t+100,2,first.nextOffset);
+  check(first.revision===5&&first.nextOffset===2&&first.rows.map(x=>x.uuid).join(',')===[u,v].join(',')&&
+    first.rows[0].mgDl===121.25&&second.rows.length===1&&second.rows[0].uuid===w&&second.nextOffset===null,
+    'Pagination, tie or bounds mismatch');
+  const narrow=await s.readJournal(5,t+30,t+31,50,0);
+  check(narrow.rows.length===2&&narrow.rows.every(x=>x.loggedAtSeconds===t+30),'Range mismatch');
+  check((await s.readJournal(5,t,t+100,2,3)).rows.length===0,'Past end mismatch');
+  check((await s.auditSnapshot()).sha256===before.sha256,'Read mutated snapshot');
+  await reject(()=>s.readJournal(5,t,t+100,51,0),'Invalid journal range');
+  s=await open(A,a);
+  await reject(()=>s.readJournal(5,t,t,2,0),'Invalid journal range');
+  s=await open(A,a);
+  await reject(()=>s.readJournal(5,t,t+100,2,-1),'Invalid journal range');
+  s=await open(A,a);
+  await reject(()=>s.readJournal(4,t,t+100,2,0),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.readJournal(5,t,t+100,2,0,{beforeReturn:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===before.sha256,'Lock changed snapshot');
+  // A successful new insert within the same session changes the revision.
+  // The old page must be withheld, even if the owner and fence still match.
+  const q='ac123456-1234-4abc-8def-000000000005';
+  await reject(()=>s.readJournal(5,t,t+100,2,0,{
+    beforeReturn:()=>s.insertGlucose(5,q,125.25,'mg/dL',t+60)}),'Checkpoint conflict');
+  s=await open(A,a);
+  const after=await s.readJournal(6,t,t+100,50,0);
+  check(after.rows.map(x=>x.uuid).join(',')===[q,u,v,w].join(','),'Concurrent update missing');
+  const aSnapshot=await s.auditSnapshot();
+  await window.d1BoundLogin(B);
+  await reject(()=>s.readJournal(6,t,t+100,2,0),'Bound authority retired');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,window.d1BoundEpoch(),bp,b);
+  check((await bs.readJournal(1,t,t+100,50,0)).rows.length===0,'A rows visible in B');
+  await bs.insertGlucose(1,u,211.25,'mg/dL',t+30);
+  const bpage=await bs.readJournal(2,t,t+100,50,0);
+  check(bpage.rows.length===1&&bpage.rows[0].uuid===u&&bpage.rows[0].mgDl===211.25,'B page mismatch');
+  await bs.retire();
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===aSnapshot.sha256,'B changed A');
+  check(JSON.stringify(await s.readJournal(6,t,t+100,50,0))===JSON.stringify(after),'A page mismatch');
+  await s.retire();
+  return {legacyExcluded:true,stablePagination:true,rangeBoundaries:true,invalidRefused:true,
+    staleRefused:true,readOnly:true,lockDuringRead:true,concurrentRevisionRefused:true,ownerIsolation:true};
+}"""
+I5_JOURNAL_RESTART = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const results=[];
+  for(const [owner,secret,revision] of [[900001,a,6],[900002,b,2]]){
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    const s=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+    const page=await s.readJournal(revision,1795564800,1795564900,50,0);
+    results.push({revision:page.revision,values:page.rows.map(x=>x.mgDl),next:page.nextOffset});
+    await s.retire();
+  }
+  return results;
+}"""
+
+
+def exercise_journal(browser_type,profile,locale,origin):
+    secrets=None
+    stage="bootstrap"
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="journal-operations"
+            result=page.evaluate(I5_JOURNAL,{"a":secrets[0],"b":secrets[1]})
+            assert result=={"legacyExcluded":True,"stablePagination":True,"rangeBoundaries":True,
+                "invalidRefused":True,"staleRefused":True,"readOnly":True,"lockDuringRead":True,
+                "concurrentRevisionRefused":True,"ownerIsolation":True}
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        stage="restart"
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_JOURNAL_RESTART,{"a":secrets[0],"b":secrets[1]})
+            assert restored==[{"revision":6,"values":[125.25,121.25,120.25,122.25],"next":None},
+                {"revision":2,"values":[211.25],"next":None}]
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {**result,"restart":True}
+    except Exception:
+        raise RuntimeError("D1 journal qualification failed at "+stage) from None
+    finally:
+        secrets=None
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -1635,6 +1748,7 @@ def run():
                             record["i5_cross_hints"]=exercise_cross_hints(browser_type,Path(root)/(locale+"-cross-hints"),locale,origin)
                             record["i5_clinical_store"]=exercise_clinical_store(browser_type,Path(root)/(locale+"-clinical-store"),locale,origin)
                             record["i5_glucose_store"]=exercise_glucose_store(browser_type,Path(root)/(locale+"-glucose-store"),locale,origin)
+                            record["i5_journal"]=exercise_journal(browser_type,Path(root)/(locale+"-journal"),locale,origin)
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -1656,6 +1770,7 @@ def run():
     print("D1_I5_CLINICAL_STORE_PASS 2/2",flush=True)
     print("D1_I5_CLINICAL_STORAGE_PASS 2/2",flush=True)
     print("D1_I5_GLUCOSE_STORE_PASS 2/2",flush=True)
+    print("D1_I5_JOURNAL_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":

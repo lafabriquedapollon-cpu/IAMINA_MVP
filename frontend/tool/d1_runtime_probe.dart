@@ -29,6 +29,8 @@ external set _legacyFn(JSFunction function);
 external set _fullInspectFn(JSFunction function);
 @JS('d1Inspect')
 external set _inspectFn(JSFunction function);
+@JS('d1JournalPage')
+external set _journalPageFn(JSFunction function);
 @JS('d1GlucoseRead')
 external set _glucoseReadFn(JSFunction function);
 @JS('d1GlucoseInsert')
@@ -383,6 +385,50 @@ Future<Uint8List> _changeTreatment(
   }
 }
 
+// Bounded, snapshot-local journal query. Legacy rows have no explicit
+// source-unit evidence and are excluded, not silently interpreted as mg/dL.
+Future<String> _journalPage(Uint8List input, int owner, int start, int end,
+    int limit, int offset) async {
+  _require(start > 0 && end > start && end <= 4102444800 &&
+      limit >= 1 && limit <= 50 && offset >= 0 && offset <= 10000,
+      'Invalid journal range');
+  final vault = await _MemoryVault.open(owner, input);
+  try {
+    await vault.inspect();
+    final db = vault.db;
+    final from = DateTime.fromMillisecondsSinceEpoch(start * 1000, isUtc: true);
+    final until = DateTime.fromMillisecondsSinceEpoch(end * 1000, isUtc: true);
+    final rows = await (db.select(db.logEntries)
+      ..where((t) => t.mealDescription.equals(_glucoseMarker) &
+          t.loggedAt.isBiggerOrEqualValue(from) & t.loggedAt.isSmallerThanValue(until))
+      ..orderBy([
+        (t) => OrderingTerm(expression: t.loggedAt, mode: OrderingMode.desc),
+        (t) => OrderingTerm(expression: t.createdAt, mode: OrderingMode.desc),
+        (t) => OrderingTerm(expression: t.clientUuid, mode: OrderingMode.asc),
+      ])
+      ..limit(limit + 1, offset: offset)).get();
+    for (final row in rows) {
+      _require(_fixtureUuid.hasMatch(row.clientUuid) && row.loggedAt != null &&
+          row.bloodSugar.isFinite && row.bloodSugar > 0 && row.source == 'manual' &&
+          row.insulinUnits == null && row.syncStatus == 'pending',
+          'Unexpected measurement row');
+    }
+    _require(rows.length <= limit || offset + limit <= 10000,
+        'Journal pagination bound exceeded');
+    return jsonEncode({
+      'rows': rows.take(limit).map((row) => {
+        'uuid': row.clientUuid, 'mgDl': row.bloodSugar,
+        'loggedAtSeconds': row.loggedAt!.millisecondsSinceEpoch ~/ 1000,
+        'source': row.source, 'syncStatus': row.syncStatus,
+      }).toList(),
+      'nextOffset': rows.length > limit ? offset + limit : null,
+    });
+  } finally {
+    try { await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
 Future<LogEntryData?> _fixtureGlucose(AppDatabase db, String uuid) async {
   _require(_fixtureUuid.hasMatch(uuid), 'Invalid measurement UUID');
   final row = await (db.select(db.logEntries)
@@ -457,6 +503,11 @@ void main() {
       _snapshot(bytes.toDart, owner.toDartInt, operation.toDart).then((value) => value.toJS).toJS).toJS;
   _legacyFn = ((JSNumber owner) =>
       _legacySnapshot(owner.toDartInt).then((value) => value.toJS).toJS).toJS;
+  _journalPageFn = ((JSUint8Array bytes, JSNumber owner, JSNumber start,
+      JSNumber end, JSNumber limit, JSNumber offset) =>
+      _journalPage(bytes.toDart, owner.toDartInt, start.toDartInt,
+          end.toDartInt, limit.toDartInt, offset.toDartInt)
+          .then((value) => value.toJS).toJS).toJS;
   _glucoseReadFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid) =>
       _readGlucose(bytes.toDart, owner.toDartInt, uuid.toDart)
           .then((value) => value.toJS).toJS).toJS;

@@ -271,6 +271,29 @@ class AdmissionSession {
       return {sha256,revision:r.revision,tables};
     }finally{bytes?.fill(0);}
   }
+  async readJournal(expectedRevision,start,end,limit,offset,{beforeReturn}={}){
+    require(this.#guard,'Bound authority required');this.#local();
+    require([expectedRevision,start,end,limit,offset].every(Number.isSafeInteger)&&
+      expectedRevision>0&&start>0&&end>start&&end<=4102444800&&
+      limit>=1&&limit<=50&&offset>=0&&offset<=10000,'Invalid journal range');
+    const r=await this.#read();
+    require(r.revision===expectedRevision,'Checkpoint conflict');
+    let bytes;
+    try{
+      bytes=await decrypt(r,this.#key,this.#lease.owner);this.#local();
+      const result=JSON.parse(await window.d1JournalPage(bytes,this.#lease.owner,start,end,limit,offset));
+      this.#local();
+      require(Array.isArray(result.rows)&&result.rows.length<=limit&&
+        (result.nextOffset===null||(result.nextOffset===offset+limit&&result.nextOffset<=10000)),
+        'Journal page invariant failed');
+      if(beforeReturn)await beforeReturn();
+      // A concurrent same-session mutation invalidates the page too, not only
+      // a change of owner. No asynchronous work after the final local check.
+      const current=await this.#read();this.#local();
+      require(sameRecord(current,r),'Checkpoint conflict');
+      return {revision:r.revision,rows:result.rows,nextOffset:result.nextOffset};
+    }finally{bytes?.fill(0);}
+  }
   async readGlucose(uuid){
     require(this.#guard,'Bound authority required');
     require(typeof uuid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid),'Invalid measurement UUID');
@@ -574,6 +597,7 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
     return Object.freeze({
       inspect:()=>perform(()=>session.inspect()),
       auditSnapshot:()=>perform(()=>session.auditSnapshot()),
+      readJournal:(revision,start,end,limit,offset,hooks)=>perform(()=>session.readJournal(revision,start,end,limit,offset,hooks)),
       readGlucose:uuid=>perform(()=>session.readGlucose(uuid)),
       insertGlucose:(revision,uuid,mgDl,unit,seconds,hooks)=>perform(()=>session.insertGlucose(revision,uuid,mgDl,unit,seconds,hooks)),
       readTreatment:()=>perform(()=>session.readTreatment()),
