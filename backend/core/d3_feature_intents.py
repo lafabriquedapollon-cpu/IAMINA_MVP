@@ -1,4 +1,4 @@
-"""D3 candidate preference service, intentionally not exposed by API/UI.
+"""D3 candidate preference service; HTTP access is separately default-denied.
 
 A true intent is not consent to send data or activate a provider. No provider
 authorization is returned. Notice strings are candidate product copy; the exact
@@ -63,16 +63,23 @@ def _status(feature, row, receipt):
     }
 
 
-def read_feature_intents(patient):
+def read_feature_intent_envelope(patient):
     owner_id = _owner(patient)
     profile = BasePatientProfile.objects.filter(patient_id=owner_id).first()
     receipt = _current_receipt(owner_id, profile)
     rows = {row.feature: row for row in D3FeatureIntent.objects.filter(patient_id=owner_id)}
-    return [_status(feature, rows.get(feature), receipt) for feature in FEATURES]
+    return {
+        "global_receipt_id": receipt.pk if receipt else None,
+        "features": [_status(feature, rows.get(feature), receipt) for feature in FEATURES],
+    }
+
+
+def read_feature_intents(patient):
+    return read_feature_intent_envelope(patient)["features"]
 
 
 @transaction.atomic
-def record_feature_intent(patient, *, feature, enabled, expected_revision, notice=None):
+def record_feature_intent(patient, *, feature, enabled, expected_revision, notice=None, expected_global_receipt_id=None):
     owner_id = _owner(patient)
     if feature not in FEATURES or type(enabled) is not bool or type(expected_revision) is not int or expected_revision < 0:
         raise ValueError("Invalid feature intent")
@@ -87,6 +94,8 @@ def record_feature_intent(patient, *, feature, enabled, expected_revision, notic
     if enabled:
         if receipt is None or not isinstance(notice, dict):
             raise ValueError("Current global receipt and exact feature notice required")
+        if expected_global_receipt_id is not None and receipt.pk != expected_global_receipt_id:
+            raise ValueError("Stale global consent receipt")
         expected = notice_for(feature, notice.get("locale"))
         if notice != expected:
             raise ValueError("Feature notice mismatch")

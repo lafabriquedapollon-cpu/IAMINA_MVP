@@ -1207,7 +1207,7 @@ jobs:
   # Full main-target gates above remain mandatory before product integration.
   phase1-focused:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && startsWith(github.head_ref, 'phase1/') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
@@ -1296,4 +1296,4 @@ jobs:
           python manage.py check
           python manage.py migrate --noinput
           python manage.py makemigrations --check --dry-run
-          python -m pytest -q core/tests/test_d3_feature_intents.py core/tests/test_account_consent_identity_safety.py core/tests/test_ai_egress_boundary_gate.py
+          python -m pytest -q core/tests/test_d3_feature_intents.py core/tests/test_d3_feature_intents_http.py core/tests/test_account_consent_identity_safety.py core/tests/test_ai_egress_boundary_gate.py
