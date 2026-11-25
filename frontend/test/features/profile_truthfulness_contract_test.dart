@@ -1,0 +1,53 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+
+String _read(String path) => File(path).readAsStringSync();
+
+String _readProfileLibrary() => [
+  _read('lib/features/profile/profile_screen.dart'),
+  _read('lib/features/profile/profile_screen_presentation.dart'),
+].join('\n');
+
+void main() {
+  test('new profile does not preselect medical facts or inject target defaults', () {
+    final source = _read('lib/features/profile/profile_screen.dart');
+
+    expect(source, contains('String? _diabetesType;'));
+    expect(source, contains('String? _treatment;'));
+    expect(source, isNot(contains("String _diabetesType = 'type1'")));
+    expect(source, isNot(contains("String _treatment = 'insulin'")));
+    expect(source, isNot(contains("profile.diabetesType ?? 'type1'")));
+    expect(source, isNot(contains("profile.treatment ?? 'insulin'")));
+    expect(source, isNot(contains('?? 70.0')));
+    expect(source, isNot(contains('?? 180.0')));
+  });
+
+  test('D22 Gate A profile save preserves unverified target bounds', () {
+    final source = _read('lib/features/profile/profile_screen.dart');
+
+    expect(source, contains('final diabetesType = _diabetesType;'));
+    expect(source, contains('final treatment = _treatment;'));
+    expect(source, contains('getProfileForLocalUserId(userId)'));
+    expect(source, contains('.write(PatientProfilesCompanion('));
+    expect(source, isNot(contains('targetRangeLow: drift.Value(')));
+    expect(source, isNot(contains('targetRangeHigh: drift.Value(')));
+    expect(source, contains('drift.Value(diabetesType)'));
+    expect(source, contains('drift.Value(treatment)'));
+  });
+
+  test('profile persists the active locale and keeps FR EN AR choice available', () {
+    final profile = _readProfileLibrary();
+    final onboarding = _read('lib/features/auth/onboarding_chat_screen.dart');
+
+    expect(profile, isNot(contains("preferredLanguage: const drift.Value('fr')")));
+    expect(profile, contains('Localizations.localeOf(context).languageCode'));
+    expect(profile, contains("context.push('/preferences')"));
+    expect(onboarding, contains('final bool preferencesOnly;'));
+    expect(onboarding, contains('widget.preferencesOnly ? preferenceSteps : onboardingSteps'));
+    expect(onboarding, contains('if (widget.preferencesOnly)'));
+    expect(onboarding, contains("_selectLanguage('fr')"));
+    expect(onboarding, contains("_selectLanguage('en')"));
+    expect(onboarding, contains("_selectLanguage('ar')"));
+  });
+}

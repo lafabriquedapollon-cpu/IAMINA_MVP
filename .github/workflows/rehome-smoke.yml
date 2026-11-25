@@ -1,0 +1,1204 @@
+name: IAMINA Rehome Smoke
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - '.github/workflows/rehome-smoke.yml'
+      - 'backend/**'
+      - 'scripts/**'
+      - 'frontend/**'
+      - 'vercel.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot-source-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout exact PR commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Attest checked-out source SHA
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          test "$actual_sha" = "$EXPECTED_SHA"
+          printf 'SOURCE_SHA=%s\n' "$actual_sha"
+
+      - name: Verify source tree and Python syntax (static only)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import ast
+          import subprocess
+          from pathlib import Path
+          root = Path('.')
+          for name in ('frontend/pubspec.yaml', 'backend/manage.py'):
+              if not (root / name).is_file():
+                  raise SystemExit(f'Missing required source: {name}')
+          files = [*Path('backend').rglob('*.py'), *Path('scripts').rglob('*.py')]
+          if len(files) < 900:
+              raise SystemExit(f'Unexpected Python source count: {len(files)}')
+          for item in files:
+              ast.parse(item.read_text(encoding='utf-8'), filename=str(item))
+          tracked = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          forbidden = [p for p in tracked if p and (Path(p).name.startswith('.env') or p.endswith(('.pem', '.p12', '.pfx', '.sqlite', '.sqlite3')))]
+          if forbidden:
+              raise SystemExit(f'Forbidden tracked paths: {len(forbidden)} (names withheld)')
+          workflows = [p.name for p in Path('.github/workflows').iterdir() if p.is_file()]
+          if workflows != ['rehome-smoke.yml']:
+              raise SystemExit('Unexpected active workflow(s)')
+          print(f'SOURCE_CONTRACT_PASS: {len(files)} Python files parsed; tracked path guard PASS')
+          PY
+
+      - name: Run independent standard-library source regression tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -q
+
+  webgl-capture-diagnostic:
+    needs: snapshot-source-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Attest source and install pinned browser tools
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          python3 -m venv "$RUNNER_TEMP/r2-gl-venv"
+          "$RUNNER_TEMP/r2-gl-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
+          "$RUNNER_TEMP/r2-gl-venv/bin/python" -m playwright install --with-deps chromium webkit
+      - name: Compare WebGL framebuffer and captured pixels, without Flutter
+        timeout-minutes: 5
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/r2-webgl-proof"
+          cat > "$RUNNER_TEMP/r2-gl-probe.py" <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          from PIL import Image
+          from playwright.sync_api import sync_playwright
+
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-webgl-proof"
+          records = []
+          html = """<!doctype html><meta charset="utf-8">
+          <style>body{margin:0;background:white}canvas{position:absolute;left:20px}
+          #gl{top:180px;height:200px;width:calc(100vw - 40px)}
+          #control{top:440px;width:100px;height:100px}</style>
+          <canvas id="gl"></canvas><canvas id="control" width="100" height="100"></canvas>
+          <script>
+          const canvas = document.getElementById('gl');
+          const gl = canvas.getContext('webgl', {preserveDrawingBuffer:true});
+          const control = document.getElementById('control').getContext('2d');
+          control.fillStyle = 'rgb(0,128,96)'; control.fillRect(0,0,100,100);
+          window.drawProbe = () => {
+            if (!gl) return {available:false};
+            const w = Math.round(canvas.getBoundingClientRect().width);
+            if(canvas.width !== w) canvas.width = w;
+            if(canvas.height !== 200) canvas.height = 200;
+            gl.viewport(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight);
+            gl.clearColor(0,128/255,96/255,1); gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.finish();
+            const p = new Uint8Array(4);
+            gl.readPixels(Math.floor(gl.drawingBufferWidth/2),100,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);
+            return {available:true, pixel:[...p], error:gl.getError(),
+              lost:gl.isContextLost(), buffer:[gl.drawingBufferWidth,gl.drawingBufferHeight]};
+          };
+          </script>"""
+          def expected(pixel):
+              return all(abs(a-b) <= 8 for a,b in zip(pixel[:3],(0,128,96)))
+
+          with sync_playwright() as pw:
+              for engine, headed in (("chromium",False),("webkit",False),("webkit",True)):
+                  label = engine + ("-headed" if headed else "-headless")
+                  browser = getattr(pw, engine).launch(headless=not headed)
+                  try:
+                      context = browser.new_context(viewport={"width":390,"height":844},
+                                                    device_scale_factor=1, service_workers="block")
+                      try:
+                          context.route("**/*",lambda route: route.abort())
+                          page = context.new_page()
+                          page.set_content(html,timeout=10000)
+                          for stage,w in (("initial",390),("expanded",391),("restored",390)):
+                              if stage != "initial":
+                                  page.set_viewport_size({"width":w,"height":844})
+                              state = page.evaluate("() => window.drawProbe()")
+                              page.wait_for_timeout(350)
+                              shot = proof / (label+"-"+stage+".png")
+                              page.screenshot(path=str(shot),timeout=10000)
+                              with Image.open(shot) as image:
+                                  rgb = image.convert("RGB")
+                                  assert rgb.size == (w,844)
+                                  gl_pixel = rgb.getpixel((w//2,280))
+                                  control_pixel = rgb.getpixel((70,490))
+                              # Read without repainting after the screenshot.
+                              after = page.evaluate("""() => {
+                                const c=document.getElementById('gl'), g=c.getContext('webgl');
+                                if(!g)return {available:false};
+                                const p=new Uint8Array(4);
+                                g.readPixels(Math.floor(g.drawingBufferWidth/2),100,1,1,g.RGBA,g.UNSIGNED_BYTE,p);
+                                return {available:true,pixel:[...p],error:g.getError(),lost:g.isContextLost()};
+                              }""")
+                              healthy = (state.get("available") and after.get("available") and
+                                  not state["lost"] and not after["lost"] and state["error"]==0 and
+                                  after["error"]==0 and expected(state["pixel"]) and expected(after["pixel"]))
+                              receipt = dict(source_sha=os.environ["EXPECTED_SHA"],engine=engine,
+                                  browser_version=browser.version,headed=headed,stage=stage,viewport=[w,844],
+                                  framebuffer_before=state,framebuffer_after=after,
+                                  captured_gl=list(gl_pixel),captured_2d=list(control_pixel),
+                                  control_ok=expected(control_pixel),framebuffer_healthy=bool(healthy),
+                                  capture_matches=expected(gl_pixel),file=shot.name,
+                                  sha256=hashlib.sha256(shot.read_bytes()).hexdigest())
+                              records.append(receipt)
+                              (proof/"matrix.json").write_text(json.dumps(records,indent=2))
+                              print("R2_RAW_WEBGL "+json.dumps(receipt),flush=True)
+                      finally:
+                          context.close()
+                  finally:
+                      browser.close()
+          assert len(records)==9, "Incomplete diagnostic"
+          assert all(r["control_ok"] for r in records), "2D control invalid"
+          assert all(r["framebuffer_healthy"] for r in records), "WebGL framebuffer unavailable or unhealthy"
+          print("R2_RAW_WEBGL_DIAGNOSTIC_COMPLETE; capture mismatches are observations, not release PASS")
+          PY
+          "$RUNNER_TEMP/r2-gl-venv/bin/python" -m py_compile "$RUNNER_TEMP/r2-gl-probe.py"
+          xvfb-run -a -s "-screen 0 1280x1024x24" "$RUNNER_TEMP/r2-gl-venv/bin/python" "$RUNNER_TEMP/r2-gl-probe.py"
+      - name: Retain raw WebGL observations (diagnostic only)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-raw-webgl-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-webgl-proof/
+          retention-days: 14
+          if-no-files-found: warn
+
+  flutter-web-baseline:
+    needs: snapshot-source-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+      CI: "true"
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Attest source and install pinned Flutter SDK
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter-sdk"
+          test "$(git -C "$RUNNER_TEMP/flutter-sdk" rev-parse HEAD)" = cc0734ac716fbb8b90f3f9db8020958b1553afa7
+          echo "$RUNNER_TEMP/flutter-sdk/bin" >> "$GITHUB_PATH"
+      - name: Resolve exact locked dependencies
+        run: |
+          flutter --version
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+      - name: Analyze Flutter
+        run: flutter analyze --no-fatal-infos --no-pub
+      - name: Targeted synthetic Flutter VM regressions
+        run: |
+          flutter test --no-pub --reporter expanded \
+            test/data/drift/patient_vault_scope_test.dart \
+            test/data/drift/patient_vault_profile_write_isolation_test.dart \
+            test/services/patient_vault_session_controller_test.dart \
+            test/services/sync_service_test.dart \
+            test/local_device_enrollment_ui_contract_test.dart
+
+      - name: Build Web without deployment or CDN
+        run: flutter build web --release --no-pub --no-web-resources-cdn --dart-define=API_BASE_URL=http://127.0.0.1:8000
+      - name: Verify PWA files
+        run: |
+          set -euo pipefail
+          for f in index.html manifest.json flutter_bootstrap.js main.dart.js iamina_service_worker.js sqlite3.wasm drift_worker.js; do
+            test -s "build/web/$f"
+          done
+          echo R2_FLUTTER_BUILD_PASS
+
+
+      - name: Attest compiled build and generated localization drift
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/r2-build-attestation"
+          cat > "$RUNNER_TEMP/r2-build-attest.py" <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          def git(*args):
+              return subprocess.check_output(["git", *args])
+
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-build-attestation"
+          expected = os.environ["EXPECTED_SHA"]
+          assert git("rev-parse", "HEAD").decode().strip() == expected
+          allowed = {"frontend/lib/l10n/app_localizations" + suffix + ".dart"
+                     for suffix in ("", "_ar", "_en", "_fr")}
+          changed = sorted(filter(None, git("diff", "HEAD", "--name-only", "-z", "--", "frontend").decode().split("\0")))
+          untracked = sorted(filter(None, git("ls-files", "--others", "--exclude-standard", "-z", "--", "frontend").decode().split("\0")))
+          diff = git("diff", "--binary", "HEAD", "--", "frontend")
+          unexpected = sorted(set(changed) - allowed)
+          # Preserve only metadata for unexpected source changes, not file contents.
+          untracked_hashes = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+                              for p in untracked if Path(p).is_file() and not Path(p).is_symlink()}
+          web = Path("frontend/build/web")
+          files = sorted(p for p in web.rglob("*") if p.is_file())
+          assert files and (web/"main.dart.js").is_file()
+          manifest = {p.relative_to(web).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
+          receipt = dict(source_sha=expected, changed_paths=changed,
+                         unexpected_paths=unexpected, untracked_paths=untracked,
+                         untracked_sha256=untracked_hashes,
+                         provenance_gate="FAIL" if unexpected or untracked else "PASS",
+                         diff_sha256=hashlib.sha256(diff).hexdigest(),
+                         build_files=manifest)
+          mode = sys.argv[1]
+          if mode == "record":
+              (proof/"generated-localization.diff").write_bytes(
+                  git("diff", "--binary", "HEAD", "--", *sorted(allowed)))
+              (proof/"manifest.json").write_text(json.dumps(receipt,sort_keys=True,indent=2))
+          elif mode in ("verify", "policy"):
+              assert receipt == json.loads((proof/"manifest.json").read_text()), "Build or generated-source drift between browser tests"
+          else:
+              raise AssertionError("Unknown attestation mode")
+          print("R2_BUILD_ATTESTATION", mode, len(files), "files",
+                "provenance", receipt["provenance_gate"],
+                "unexpected_count", len(unexpected), "untracked_count", len(untracked), flush=True)
+          if mode == "policy":
+              assert receipt["provenance_gate"] == "PASS", "Unexpected frontend drift; see retained manifest"
+          PY
+          python3 "$RUNNER_TEMP/r2-build-attest.py" record
+      - name: Install pinned Playwright Chromium and WebKit
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/r2-browser-venv"
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
+      - name: Real browser first-use baseline FR and AR
+        id: r2_browser
+        timeout-minutes: 8
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 "$RUNNER_TEMP/r2-build-attest.py" verify
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" - <<'PY'
+          import hashlib
+          import http.server
+          import json
+          import os
+          import pathlib
+          import threading
+          import time
+          import shutil
+          from PIL import Image, ImageChops
+          from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+          fixture = os.environ.get("R2_SCREEN_FIXTURE") == "1"
+          semantics_mode = os.environ.get("R2_FIXTURE_SEMANTICS", "on")
+          fixture_direction = os.environ.get("R2_FIXTURE_DIRECTION", "")
+          assert (fixture_direction in ("rtl", "ltr")) if fixture else not fixture_direction
+          assert semantics_mode in ("on", "off")
+          assert fixture or semantics_mode == "on"
+          web = pathlib.Path(os.environ["R2_SCREEN_FIXTURE_WEB"] if fixture else "frontend/build/web").resolve()
+          experiment = os.environ.get("R2_AB_VARIANT") == "canvas-only"
+          headed = os.environ.get("R2_WEBKIT_HEADED") == "1"
+          assert sum((experiment, headed, fixture)) <= 1, "Diagnostic modes must be isolated"
+          baseline_proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r2-browser-proof"
+          proof = pathlib.Path(os.environ["RUNNER_TEMP"]) / (
+              "r2-ab-canvas-only" if experiment else
+              "r2-webkit-headed-app" if headed else
+              "r2-enrollment-fixture" if fixture else "r2-browser-proof")
+          if fixture:
+              from importlib.metadata import version
+              playwright_version = version("playwright")
+              assert playwright_version == "1.55.0", "Unpinned Playwright version"
+              assert semantics_mode == "on", "Direction experiment requires accessibility"
+              proof = proof / ("direction-" + fixture_direction)
+          proof.mkdir(parents=True, exist_ok=experiment or fixture)
+          if fixture:
+              receipt = json.loads((proof.parent / "fixture-build.json").read_text())
+              assert receipt["source_sha"] == os.environ["EXPECTED_SHA"]
+              actual = {p.relative_to(web).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                        for p in sorted(web.rglob("*")) if p.is_file()}
+              assert actual == receipt["build_files"], "Fixture build changed between arms"
+          if experiment:
+              matrix = json.loads((baseline_proof / "matrix.json").read_text())
+              verified_frames = [(r, frame) for r in matrix
+                  if r.get("reference_label") == "webkit-ar-MA-390x844"
+                  for frame in r.get("frames", []) if frame["metrics"]["complete"]]
+              assert verified_frames, "No complete A frame for controlled B comparison"
+              r, frame = verified_frames[0]
+              candidate = baseline_proof / frame["file"]
+              assert hashlib.sha256(candidate.read_bytes()).hexdigest() == frame["sha256"]
+              with Image.open(candidate) as png:
+                  rgb = png.convert("RGB")
+                  assert rgb.size == (390,844)
+                  assert hashlib.sha256(rgb.tobytes()).hexdigest() == frame["metrics"]["rgb_sha256"]
+                  experiment_reference = rgb.crop((0,154,390,844))
+              (proof / "reference.json").write_text(json.dumps({
+                  "case": r["label"], "frame": frame, "source_sha": r["source_sha"],
+              }, indent=2))
+          assert (web / "index.html").is_file()
+          logo_path = web / "assets/assets/images/iamina_logo_vertical.png"
+          assert logo_path.is_file(), "Logo missing from compiled assets"
+          with Image.open(logo_path) as logo_source:
+              logo_source.load()
+              print("R2_LOGO_SOURCE " + json.dumps({
+                  "size": list(logo_source.size), "mode": logo_source.mode,
+                  "sha256": hashlib.sha256(logo_path.read_bytes()).hexdigest(),
+              }), flush=True)
+          # Immutable, reviewed RGB references from run 45378100000 / artifact 14912323052,
+          # independently confirmed in artifact 14916834190. No automatic rebaseline.
+          reference_rgb = {
+              "chromium-ar-MA-1180x860": "e52a1785cd37a4993aea90bb63f239accbddac09667e107032e31d48c381994d",
+              "chromium-ar-MA-390x844": "eef3a466b44749fc173143bca056c862c99c91d4827feddf41fb219e8ab965bb",
+              "chromium-fr-FR-1180x860": "49e5c1c6c5a2827ac226d3d26356c0478bb9d2eb3463ca26add2ff7c61db9de8",
+              "chromium-fr-FR-390x844": "1f33f487022a813e8cc1324486732c25b952fc72d010f9bed8f2f66c85abf49f",
+              "webkit-ar-MA-1180x860": "db8b5c8fe925ef18d7d33ad893c47843353b0fef71c4cf633632c932e2bc58d7",
+              "webkit-ar-MA-390x844": "6e835341c91af6c0fc933fef5db7a092cfa1b579033ee0b8298fd76f0a076046",
+              "webkit-fr-FR-1180x860": "f8fda05aa25417114b20e8d9a737457193de2377010700b48dfe5419f5487a0a",
+              "webkit-fr-FR-390x844": "959ce31f26975c2cfebcad77742f640c0d13c4786718bc8dbd260a0849fc9257",
+          }
+          def assess_frame(path, width, height, label):
+              with Image.open(path) as png:
+                  rgb = png.convert("RGB")
+                  assert rgb.size == (width, height)
+                  logo = rgb.crop((width // 2 - 66, 22, width // 2 + 66, 154))
+                  card = rgb.crop((0, 154, width, height))
+                  def teal_count(image):
+                      return sum(1 for r, g, b in image.getdata()
+                                 if r < 90 and g < 160 and b < 150 and g > r + 15)
+                  def spread(image):
+                      return max(hi - lo for lo, hi in image.getextrema())
+                  digest = hashlib.sha256(rgb.tobytes()).hexdigest()
+                  # Second exact RGB reference approved after local full-pixel comparison:
+                  # run 45446057732 / artifact 14945469602, max channel delta 2/255.
+                  # Only this exact, complete AR-mobile image is accepted; no fuzzy threshold.
+                  known_variant = (label == "webkit-ar-MA-390x844" and
+                      digest == "cd9a9e3ae2a4ef4ffab19522614f598f0fba019ed4db0418b4b53e586d91e5c8")
+                  metrics = dict(logo_teal_pixels=teal_count(logo), pixel_range=spread(rgb),
+                                 card_teal_pixels=teal_count(card), card_pixel_range=spread(card),
+                                 rgb_sha256=digest, approved_variant=known_variant,
+                                 reference_match=digest == reference_rgb[label] or known_variant)
+              metrics["old_pixel_gate"] = (metrics["logo_teal_pixels"] >= 2000 and
+                  metrics["pixel_range"] >= 80 and metrics["card_teal_pixels"] >= 5000 and
+                  metrics["card_pixel_range"] >= 80)
+              if experiment:
+                  assert label == "webkit-ar-MA-390x844"
+                  assert card.size == experiment_reference.size
+                  metrics["ab_body_max_delta"] = max(hi for _, hi in
+                      ImageChops.difference(card, experiment_reference).getextrema())
+              metrics["complete"] = metrics["old_pixel_gate"] and (
+                  metrics["ab_body_max_delta"] <= 2 if experiment else metrics["reference_match"])
+              return metrics
+
+          def attach_guard(context, origin):
+              blocked, errors, websocket_attempts, console = [], [], [], []
+              def local_only(route):
+                  req = route.request
+                  if req.url.startswith(("data:", "blob:")):
+                      route.continue_()
+                  elif (req.url.startswith(origin + "/") and req.method in ("GET", "HEAD")
+                        and "/api/" not in req.url.lower()):
+                      route.continue_()
+                  else:
+                      blocked.append(req.method)
+                      route.abort()
+              def block_ws(ws):
+                  # A routed WebSocket is mocked by default. Never connect to its
+                  # upstream server. Avoid a synchronous close inside the callback.
+                  websocket_attempts.append(True)
+                  print("R2_WS_ROUTE_INTERCEPTED", flush=True)
+              # Register routing before any page is created (Playwright API recommendation).
+              context.route("**/*", local_only)
+              context.route_web_socket("**/*", block_ws)
+              page = context.new_page()
+              page.on("pageerror", lambda err: errors.append(type(err).__name__))
+              page.on("console", lambda msg: console.append(msg.type)
+                      if msg.type in ("error", "warning") else None)
+              def verdict():
+                  return dict(blocked_requests=len(blocked), page_errors=len(errors),
+                              websocket_attempts=len(websocket_attempts),
+                              console_warning_count=console.count("warning"),
+                              console_error_count=console.count("error"),
+                              console_warning_error_count=len(console),
+                              late_event_gate="FAIL" if blocked or errors or websocket_attempts else "PASS")
+              return page, verdict
+
+          def require_cta(page, cta, timeout=30000):
+              button = page.get_by_role("button", name=cta, exact=True)
+              button.wait_for(state="visible", timeout=timeout)
+              assert button.is_enabled()
+              return button
+
+          def observe_semantics(page):
+              # Inspect ordinary DOM only; do not request an accessibility snapshot.
+              return page.evaluate("""() => {
+                const seen = new Set();
+                let nodes = 0, buttons = 0, placeholders = 0;
+                let activationButtons = 0, activeButtons = 0;
+                const buttonTags = [];
+                const walk = root => {
+                  for (const e of root.querySelectorAll('*')) {
+                    if (seen.has(e)) continue;
+                    seen.add(e);
+                    if (e.tagName === 'FLT-SEMANTICS') nodes++;
+                    const placeholder = e.tagName === 'FLT-SEMANTICS-PLACEHOLDER';
+                    if (placeholder) placeholders++;
+                    if (e.getAttribute('role') === 'button') {
+                      buttons++;
+                      buttonTags.push(e.tagName);
+                      if (placeholder) activationButtons++;
+                      else activeButtons++;
+                    }
+                    if (e.shadowRoot) walk(e.shadowRoot);
+                  }
+                };
+                walk(document);
+                return {nodes, buttons, placeholders, activationButtons, activeButtons, buttonTags};
+              }""")
+
+          def assert_fixture_semantics(state):
+              if semantics_mode == "on":
+                  assert state["nodes"] > 0 and state["activeButtons"] > 0 and state["placeholders"] == 0, "Semantics on not demonstrated"
+              else:
+                  assert state["nodes"] == 0 and state["activeButtons"] == 0 and state["placeholders"] == 1, "Semantics off contaminated"
+                  assert state["buttons"] == state["activationButtons"], "Unexpected non-activation button"
+
+          def negative_cases(browser, engine, origin):
+              context = browser.new_context(viewport={"width":390,"height":844},
+                                            device_scale_factor=1, service_workers="block")
+              page, verdict = attach_guard(context, origin)
+              checks = []
+              label = engine + "-fr-FR-390x844"
+              try:
+                  for name, card in (("logo_only", ""), ("fake_teal_card",
+                          '<div style="position:absolute;top:200px;left:90px;width:210px;height:100px;background:#007c68"></div>')):
+                      page.set_content('<body style="margin:0;background:white"><div style="position:absolute;top:22px;left:145px;width:100px;height:100px;background:#007c68"></div>' + card + '</body>')
+                      shot = proof / (engine + "-negative-" + name + ".png")
+                      page.screenshot(path=str(shot))
+                      metrics = assess_frame(shot,390,844,label)
+                      assert not metrics["complete"], name + " accepted"
+                      assert metrics["old_pixel_gate"] == (name == "fake_teal_card"), "negative fixture invalid"
+                      checks.append(dict(name=name, result="PASS", metrics=metrics,
+                                         screenshot_sha256=hashlib.sha256(shot.read_bytes()).hexdigest()))
+                  try:
+                      require_cta(page, "Continuer sans compte", timeout=300)
+                  except PlaywrightTimeout:
+                      checks.append(dict(name="missing_cta_fixture", result="PASS"))
+                  else:
+                      raise AssertionError("Missing CTA accepted")
+              finally:
+                  context.close()
+              try:
+                  # Each injection gets an independent fresh guard: a prior failure
+                  # cannot satisfy the verdict of the next case.
+                  for event, count_key in (("late_js_error", "page_errors"),
+                          ("late_http_block", "blocked_requests"),
+                          ("late_websocket_block", "websocket_attempts")):
+                      context = browser.new_context(service_workers="block")
+                      page, verdict = attach_guard(context, origin)
+                      try:
+                          print("R2_NEGATIVE_START " + engine + " " + event, flush=True)
+                          response = page.goto(origin + "/__r2_guard_fixture", timeout=10000)
+                          assert response and response.status == 200
+                          assert verdict()["late_event_gate"] == "PASS", "negative fixture precondition"
+                          if event == "late_js_error":
+                              page.evaluate("() => setTimeout(() => { throw new Error('R2 synthetic late error'); }, 25)")
+                          elif event == "late_http_block":
+                              page.evaluate("(url) => fetch(url).catch(() => null)", origin + "/api/r2-negative")
+                          else:
+                              page.evaluate("(url) => { setTimeout(() => { const socket = new WebSocket(url); socket.onerror = () => {}; }, 25); }",
+                                            origin.replace("http:", "ws:") + "/r2-negative")
+                          for _ in range(20):
+                              page.wait_for_timeout(100)
+                              if verdict()[count_key] > 0:
+                                  break
+                          print("R2_NEGATIVE_BEFORE_CLOSE " + engine + " " + event + " " + json.dumps(verdict()), flush=True)
+                      finally:
+                          context.close()
+                      state = verdict()
+                      if event == "late_websocket_block":
+                          assert not websocket_upstream_hits, "WebSocket reached local upstream"
+                      assert state[count_key] > 0 and state["late_event_gate"] == "FAIL", event + " accepted"
+                      assert all(state[k] == 0 for k in ("page_errors", "blocked_requests", "websocket_attempts")
+                                 if k != count_key), event + " not isolated"
+                      checks.append(dict(name=event, result="PASS", observed=state))
+              finally:
+                  (proof / (engine + "-negative-matrix.json")).write_text(json.dumps(checks, indent=2))
+              assert len(checks) == 6
+              print("R2_NEGATIVE_PASS " + engine + " 6/6", flush=True)
+
+          results = []
+          websocket_upstream_hits = []
+          class Handler(http.server.SimpleHTTPRequestHandler):
+              def __init__(self, *args, **kwargs):
+                  super().__init__(*args, directory=str(web), **kwargs)
+              def do_GET(self):
+                  if self.path == "/r2-negative":
+                      websocket_upstream_hits.append(True)
+                      self.send_error(403)
+                  elif self.path == "/__r2_guard_fixture":
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/html; charset=utf-8")
+                      self.end_headers()
+                      self.wfile.write(b"<!doctype html><title>R2 guard fixture</title>")
+                  else:
+                      super().do_GET()
+
+              def log_message(self, *_args):
+                  pass
+
+          with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+              worker = threading.Thread(target=server.serve_forever, daemon=True)
+              worker.start()
+              origin = f"http://127.0.0.1:{server.server_address[1]}"
+              try:
+                  with sync_playwright() as pw:
+                      # B is a separate experiment, never a substitute for a failed A.
+                      launches = ([("webkit", n) for n in range(5)] if experiment or headed or fixture else
+                                  [("chromium", 0), ("webkit", 0)] + [("webkit", n) for n in range(1, 5)])
+                      for engine, repetition in launches:
+                          browser = getattr(pw, engine).launch(headless=not headed)
+                          try:
+                              if repetition == 0 and not experiment:
+                                  negative_cases(browser, engine, origin)
+                              locales = (("ar-MA", "المتابعة بدون حساب"),) if experiment or fixture or repetition else (
+                                  ("fr-FR", "Continuer sans compte"), ("ar-MA", "المتابعة بدون حساب"))
+                              viewports = ((390, 844),) if experiment or fixture or repetition else ((390, 844), (1180, 860))
+                              for locale, cta in locales:
+                                  for width, height in viewports:
+                                      reference_label = f"{engine}-{locale}-{width}x{height}"
+                                      label = reference_label + (f"-cold-{repetition}" if repetition else "")
+                                      result = dict(engine=engine, browser_version=browser.version,
+                                                    repetition=repetition, label=label, reference_label=reference_label,
+                                                    experiment="canvas-only" if experiment else "headed" if headed else "isolated-screen" if fixture else "baseline",
+                                                    headed=headed,
+                                                    fixture_semantics=semantics_mode if fixture else None,
+                                                    fixture_playwright=playwright_version if fixture else None,
+                                                    fixture_direction=fixture_direction if fixture else None,
+                                                    locale=locale, viewport=[width, height],
+                                                    source_sha=os.environ["EXPECTED_SHA"],
+                                                    result="FAIL")
+                                      results.append(result)
+                                      context = browser.new_context(
+                                          locale=locale, viewport={"width": width, "height": height},
+                                          device_scale_factor=1, service_workers="block")
+                                      page, verdict = attach_guard(context, origin)
+                                      asset_responses = []
+                                      direction_messages = []
+                                      if fixture:
+                                          page.on("console", lambda msg: direction_messages.append(msg.text)
+                                                  if msg.text.startswith("R2_DIRECTION_ACTUAL=") else None)
+                                      page.on("response", lambda res: asset_responses.append(res.status)
+                                              if res.url.split("?")[0].endswith("/iamina_logo_vertical.png") else None)
+                                      try:
+                                          result["stage"] = "navigate"
+                                          target = origin + "/?r2_direction=" + fixture_direction if fixture else origin
+                                          response = page.goto(target, wait_until="domcontentloaded", timeout=60000)
+                                          assert response and response.status == 200
+                                          result["stage"] = "flutter-view"
+                                          page.wait_for_selector("flutter-view, flt-glass-pane", timeout=60000)
+                                          result["stage"] = "semantics"
+                                          if fixture and semantics_mode == "off":
+                                              # Wait for the activation placeholder without activating it.
+                                              # Never query accessibility roles on this diagnostic arm.
+                                              page.locator("flt-semantics-placeholder").wait_for(state="attached", timeout=30000)
+                                              result["stage"] = "semantics-off-observation"
+                                          else:
+                                              placeholder = page.locator("flt-semantics-placeholder")
+                                              if placeholder.count():
+                                                  placeholder.evaluate("(element) => element.click()")
+                                              result["stage"] = "localized-cta"
+                                              button = require_cta(page, cta)
+                                          page.wait_for_timeout(500)
+                                          if fixture:
+                                              expected_direction = "R2_DIRECTION_ACTUAL=" + fixture_direction + ";locale=ar"
+                                              result["direction_messages"] = list(direction_messages)
+                                              assert expected_direction in direction_messages, "Effective direction/locale not observed"
+                                              assert all(m == expected_direction for m in direction_messages), "Mixed direction/locale"
+                                              result["semantics_before"] = observe_semantics(page)
+                                              assert_fixture_semantics(result["semantics_before"])
+                                          if experiment:
+                                              result["native_logo_count"] = page.evaluate("""() => {
+                                                let count = 0;
+                                                const walk = root => {
+                                                  for (const e of root.querySelectorAll('*')) {
+                                                    if (e.shadowRoot) walk(e.shadowRoot);
+                                                    if (e.tagName === 'IMG' && e.src.includes('iamina_logo_vertical.png')) count++;
+                                                  }
+                                                };
+                                                walk(document);
+                                                return count;
+                                              }""")
+                                              assert result["native_logo_count"] == 0, "B still uses native logo"
+                                          assert verdict()["late_event_gate"] == "PASS", "Initial browser guard failed"
+                                          result["stage"] = "assertions-complete"
+                                          result["result"] = "PASS"
+                                      except Exception as exc:
+                                          result["failure_type"] = type(exc).__name__
+                                          print(f"R2_BROWSER {label} FAIL: {type(exc).__name__}", flush=True)
+                                      finally:
+                                          try:
+                                              shot = proof / (label + ".png")
+                                              paint_streak = 0
+                                              frames = []
+                                              for attempt in range(12):
+                                                  candidate = proof / (label + "-attempt-" + str(attempt + 1) + ".png")
+                                                  page.screenshot(path=str(candidate), timeout=10000)
+                                                  metrics = assess_frame(candidate, width, height, reference_label)
+                                                  frame = dict(file=candidate.name, attempt=attempt + 1,
+                                                               monotonic_ns=time.monotonic_ns(),
+                                                               sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                                                               metrics=metrics)
+                                                  frames.append(frame)
+                                                  result["frames"] = frames
+                                                  result.update(metrics)
+                                                  if fixture:
+                                                      # Diagnostic-only: require two identical structurally complete frames.
+                                                      # Keep the product reference verdict separately, never promote it.
+                                                      if not metrics["old_pixel_gate"]:
+                                                          paint_streak = 0
+                                                      elif len(frames) > 1 and frames[-2]["metrics"]["rgb_sha256"] == metrics["rgb_sha256"]:
+                                                          paint_streak += 1
+                                                      else:
+                                                          paint_streak = 1
+                                                  else:
+                                                      paint_streak = paint_streak + 1 if metrics["complete"] else 0
+                                                  result["paint_streak"] = paint_streak
+                                                  shutil.copyfile(candidate, shot)
+                                                  if paint_streak >= 2:
+                                                      break
+                                                  page.wait_for_timeout(500)
+                                              result["screenshot_sha256"] = hashlib.sha256(shot.read_bytes()).hexdigest()
+                                              assert shot.stat().st_size >= 1000
+                                              assert paint_streak >= 2, "Reference RGB / logo / card paint gate failed"
+                                              if fixture:
+                                                  result["fixture_initial_rgb"] = frames[-1]["metrics"]["rgb_sha256"]
+                                                  result["semantics_at_initial_capture"] = observe_semantics(page)
+                                                  assert_fixture_semantics(result["semantics_at_initial_capture"])
+                                              # Mandatory viewport round-trip on every targeted AR mobile case.
+                                              # Keep the initial verdict and all post-resize frames separate.
+                                              if reference_label == "webkit-ar-MA-390x844":
+                                                  result["resize_gate"] = "FAIL"
+                                                  result["resize_frames"] = resize_frames = []
+                                                  try:
+                                                      page.set_viewport_size({"width":width+1,"height":height})
+                                                      page.wait_for_timeout(350)
+                                                  finally:
+                                                      page.set_viewport_size({"width":width,"height":height})
+                                                  page.wait_for_timeout(350)
+                                                  for n in (1, 2):
+                                                      candidate = proof / (label + "-resize-" + str(n) + ".png")
+                                                      page.screenshot(path=str(candidate), timeout=10000)
+                                                      metrics = assess_frame(candidate,width,height,reference_label)
+                                                      resize_frames.append(dict(file=candidate.name,
+                                                          monotonic_ns=time.monotonic_ns(),
+                                                          sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                                                          metrics=metrics))
+                                                      if n == 1:
+                                                          page.wait_for_timeout(500)
+                                                  if fixture:
+                                                      result["direction_messages_after_resize"] = list(direction_messages)
+                                                      assert expected_direction in direction_messages and all(m == expected_direction for m in direction_messages), "Direction/locale changed"
+                                                      result["semantics_after_resize"] = observe_semantics(page)
+                                                      assert_fixture_semantics(result["semantics_after_resize"])
+                                                      assert all(frame["metrics"]["old_pixel_gate"] and
+                                                          frame["metrics"]["rgb_sha256"] == result["fixture_initial_rgb"]
+                                                          for frame in resize_frames), "Fixture post-resize pixels changed or incomplete"
+                                                  else:
+                                                      assert all(frame["metrics"]["complete"] for frame in resize_frames), "Post-resize visual gate failed"
+                                                  result["resize_gate"] = "PASS"
+                                          except Exception:
+                                              result["result"] = "FAIL"
+                                              result["screenshot_error"] = True
+                                          finally:
+                                              # Diagnostic-only experiments AFTER the original verdict.
+                                              # A recovered screenshot must never promote this failed case.
+                                              if not experiment and not fixture and result.get("screenshot_error") and engine == "webkit" and locale == "ar-MA" and width == 390:
+                                                  diagnostic = {}
+                                                  result["composition_diagnostic"] = diagnostic
+                                                  try:
+                                                      diagnostic["dom_before"] = page.evaluate("""() => {
+                                                        const nodes = [];
+                                                        const walk = root => {
+                                                          for (const e of root.querySelectorAll('*')) {
+                                                            if (e.shadowRoot) walk(e.shadowRoot);
+                                                            if (['CANVAS','IMG','FLT-GLASS-PANE','FLT-SCENE','FLT-PLATFORM-VIEW','FLT-PLATFORM-VIEW-SLOT','FLUTTER-VIEW'].includes(e.tagName)) {
+                                                              const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+                                                              nodes.push({tag:e.tagName,x:r.x,y:r.y,w:r.width,h:r.height,
+                                                                display:s.display,visibility:s.visibility,opacity:s.opacity,
+                                                                logo:e.tagName==='IMG' && e.src.includes('iamina_logo_vertical.png')});
+                                                            }
+                                                          }
+                                                        };
+                                                        walk(document);
+                                                        return nodes.slice(0,80);
+                                                      }""")
+                                                      def diagnostic_shot(name):
+                                                          path = proof / (label + "-diag-" + name + ".png")
+                                                          page.screenshot(path=str(path), timeout=10000)
+                                                          return dict(file=path.name, sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                                                                      metrics=assess_frame(path,width,height,reference_label))
+                                                      # Hide the native logo element only; preserve layout.
+                                                      diagnostic["hidden_logo_count"] = page.evaluate("""() => {
+                                                        const matches = [];
+                                                        const walk = root => {
+                                                          for (const e of root.querySelectorAll('*')) {
+                                                            if (e.shadowRoot) walk(e.shadowRoot);
+                                                            if (e.tagName === 'IMG' && e.src.includes('iamina_logo_vertical.png')) {
+                                                              matches.push([e,e.style.visibility]);
+                                                              e.style.visibility = 'hidden';
+                                                            }
+                                                          }
+                                                        };
+                                                        walk(document);
+                                                        window.__r2HiddenLogo = matches;
+                                                        return matches.length;
+                                                      }""")
+                                                      try:
+                                                          page.wait_for_timeout(350)
+                                                          diagnostic["hide_logo"] = diagnostic_shot("hide-logo")
+                                                      finally:
+                                                          page.evaluate("""() => {
+                                                            for (const [e,v] of window.__r2HiddenLogo || []) e.style.visibility=v;
+                                                            delete window.__r2HiddenLogo;
+                                                          }""")
+                                                      page.wait_for_timeout(350)
+                                                      diagnostic["restored_logo"] = diagnostic_shot("restore-logo")
+                                                      # Force a viewport invalidation, then restore exact original geometry.
+                                                      try:
+                                                          page.set_viewport_size({"width":width+1,"height":height})
+                                                          page.wait_for_timeout(350)
+                                                      finally:
+                                                          page.set_viewport_size({"width":width,"height":height})
+                                                      page.wait_for_timeout(350)
+                                                      diagnostic["resize_restore"] = diagnostic_shot("resize-restore")
+                                                  except Exception as exc:
+                                                      diagnostic["error_type"] = type(exc).__name__
+                                                  print("R2_COMPOSITION_DIAGNOSTIC " + json.dumps(diagnostic), flush=True)
+                                              # Probe the same asset independently of Flutter's renderer.
+                                              result["app_logo_http_statuses"] = list(asset_responses)
+                                              try:
+                                                  result["asset_probe"] = page.evaluate("""async () => {
+                                                    const path = '/assets/assets/images/iamina_logo_vertical.png';
+                                                    const response = await fetch(path);
+                                                    const bytes = await response.arrayBuffer();
+                                                    const blob = new Blob([bytes], {type: 'image/png'});
+                                                    const url = URL.createObjectURL(blob);
+                                                    try {
+                                                      const image = new Image();
+                                                      image.src = url;
+                                                      await image.decode();
+                                                      const canvas = document.createElement('canvas');
+                                                      canvas.width = image.naturalWidth;
+                                                      canvas.height = image.naturalHeight;
+                                                      const ctx = canvas.getContext('2d');
+                                                      ctx.drawImage(image, 0, 0);
+                                                      const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                                                      let teal = 0, opaque = 0;
+                                                      for (let i = 0; i < pixels.length; i += 4) {
+                                                        if (pixels[i+3] > 127) {
+                                                          opaque++;
+                                                          if (pixels[i] < 90 && pixels[i+1] < 160 &&
+                                                              pixels[i+2] < 150 && pixels[i+1] > pixels[i] + 15) teal++;
+                                                        }
+                                                      }
+                                                      return {status: response.status, bytes: bytes.byteLength,
+                                                        width: canvas.width, height: canvas.height, opaque, teal};
+                                                    } finally { URL.revokeObjectURL(url); }
+                                                  }""")
+                                              except Exception as exc:
+                                                  result["asset_probe"] = {"error_type": type(exc).__name__}
+                                              finally:
+                                                  # Final counters include paint polling and the local asset probe.
+                                                  # Close the context before recording the final verdict.
+                                                  context.close()
+                                                  result.update(verdict())
+                                                  if result["late_event_gate"] != "PASS":
+                                                      result["result"] = "FAIL"
+                                              print("R2_BROWSER " + json.dumps(result), flush=True)
+                          finally:
+                              browser.close()
+              finally:
+                  server.shutdown()
+                  worker.join(timeout=5)
+                  (proof / "matrix.json").write_text(json.dumps(results, indent=2))
+          baseline = [r for r in results if r["repetition"] == 0]
+          cold = [r for r in results if r["engine"] == "webkit" and r["locale"] == "ar-MA"
+                  and r["viewport"] == [390, 844]]
+          assert sorted(r["repetition"] for r in cold) == [0, 1, 2, 3, 4], "Cold-start matrix incomplete"
+          if experiment:
+              assert len(results) == 5
+              assert all(r.get("native_logo_count") == 0 for r in cold), "B native logo not excluded"
+              assert all(r.get("resize_gate") == "PASS" and r["result"] == "PASS" for r in cold), "B canvas-only experiment failed"
+              print("R2_AB_CANVAS_ONLY_PASS 5/5 (diagnostic only)")
+          elif fixture:
+              assert len(results) == 5, "Direction arm matrix incomplete"
+              assert all(r.get("resize_gate") == "PASS" for r in cold), "Direction arm resize matrix failed"
+              assert all(r["result"] == "PASS" for r in results), "Direction arm initial or guard failed"
+              print("R2_ENGINE_DIAGNOSTIC_PASS", playwright_version, "5/5; not product certification")
+          elif headed:
+              assert len(results) == 8 and len(baseline) == 4, "Headed WebKit matrix incomplete"
+              assert all(r.get("resize_gate") == "PASS" for r in cold), "Headed AR mobile resize matrix failed"
+              assert all(r["result"] == "PASS" for r in results), "Headed WebKit matrix failed"
+              print("R2_WEBKIT_HEADED_APP_PASS 8/8; AR resize 5/5 (diagnostic only)")
+          else:
+              assert len(results) == 12 and len(baseline) == 8, "Browser matrix incomplete"
+              assert all(r.get("resize_gate") == "PASS" for r in cold), "WebKit AR mobile resize matrix failed"
+              assert all(r["result"] == "PASS" for r in results), "Browser matrix or cold starts failed"
+              print("R2_BROWSER_MATRIX_PASS 8/8")
+              print("R2_WEBKIT_AR_MOBILE_PASS 5/5")
+              print("R2_WEBKIT_AR_MOBILE_RESIZE_PASS 5/5")
+          PY
+      - name: Retain synthetic first-use screenshots and matrix
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-browser-first-use-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-browser-proof/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Compare unchanged application in headed WebKit under Xvfb
+        if: ${{ !cancelled() && (steps.r2_browser.outcome == 'failure' || steps.r2_browser.outcome == 'success') }}
+        timeout-minutes: 8
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          R2_WEBKIT_HEADED: "1"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 "$RUNNER_TEMP/r2-build-attest.py" verify
+          python3 - <<'PY'
+          import os
+          import textwrap
+          from pathlib import Path
+          workflow = Path(".github/workflows/rehome-smoke.yml").read_text()
+          # Construct the marker in pieces: it must identify the baseline block only.
+          marker = '"$RUNNER_TEMP/r2-browser-venv/bin/python" - ' + "<<'PY'\n"
+          assert workflow.count(marker) == 1
+          script = textwrap.dedent(workflow.split(marker,1)[1].split("\n          PY",1)[0])
+          compile(script, "<r2-headed-app>", "exec")
+          (Path(os.environ["RUNNER_TEMP"]) / "r2-headed-app.py").write_text(script)
+          PY
+          xvfb-run -a -s "-screen 0 1600x1200x24" "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-headed-app.py"
+      - name: Enforce build identity and provenance after browser diagnostics
+        if: ${{ !cancelled() && (steps.r2_browser.outcome == 'failure' || steps.r2_browser.outcome == 'success') }}
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 "$RUNNER_TEMP/r2-build-attest.py" policy
+      - name: Retain build identity and generated localization diff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-build-attestation-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-build-attestation/
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Retain headed WebKit application observations
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-webkit-headed-app-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-webkit-headed-app/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Compare RTL and LTR on identical Arabic enrollment fixture
+        if: ${{ !cancelled() && steps.r2_browser.outcome == 'failure' }}
+        timeout-minutes: 18
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          R2_SCREEN_FIXTURE: "1"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          screen=frontend/lib/features/auth/local_device_enrollment_screen.dart
+          git diff --exit-code -- "$screen"
+          entry=frontend/lib/r2_enrollment_probe.dart
+          test ! -e "$entry"
+          trap 'rm -f "$entry"' EXIT
+          export R2_SCREEN_FIXTURE_WEB="$RUNNER_TEMP/r2-enrollment-fixture-web"
+          mkdir -p "$RUNNER_TEMP/r2-enrollment-fixture"
+          cat > "$entry" <<'DART'
+          import 'package:flutter/material.dart';
+          import 'core/theme/amina_visual_language.dart';
+          import 'core/theme/app_theme.dart';
+          import 'features/auth/local_device_enrollment_screen.dart';
+          import 'l10n/app_localizations.dart';
+
+          void main() {
+            WidgetsFlutterBinding.ensureInitialized();
+            runApp(MaterialApp(
+              title: 'IAMINA synthetic enrollment render probe',
+              locale: const Locale('ar'),
+              theme: AminaVisualLanguage.harmonize(AminaTheme.light),
+              themeMode: ThemeMode.light,
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              debugShowCheckedModeBanner: false,
+              home: Builder(builder: (context) {
+                final mode = Uri.base.queryParameters['r2_direction'];
+                if (mode != 'rtl' && mode != 'ltr') {
+                  throw StateError('Missing or invalid diagnostic direction');
+                }
+                return Directionality(
+                  textDirection: mode == 'rtl' ? TextDirection.rtl : TextDirection.ltr,
+                  child: Builder(builder: (context) {
+                    debugPrint('R2_DIRECTION_ACTUAL=${Directionality.of(context).name};locale=${Localizations.localeOf(context).languageCode}');
+                    return const LocalDeviceEnrollmentScreen();
+                  }),
+                );
+              }),
+            ));
+          }
+          DART
+          python3 - <<'PY'
+          import os
+          import textwrap
+          from pathlib import Path
+          workflow = Path(".github/workflows/rehome-smoke.yml").read_text()
+          marker = '"$RUNNER_TEMP/r2-browser-venv/bin/python" - ' + "<<'PY'\n"
+          assert workflow.count(marker) == 1
+          script = textwrap.dedent(workflow.split(marker,1)[1].split("\n          PY",1)[0])
+          compile(script, "<r2-isolated-screen>", "exec")
+          (Path(os.environ["RUNNER_TEMP"]) / "r2-screen-fixture.py").write_text(script)
+          PY
+          (cd frontend && flutter build web --release --no-pub --no-web-resources-cdn --target=lib/r2_enrollment_probe.dart --output="$R2_SCREEN_FIXTURE_WEB" --dart-define=API_BASE_URL=http://127.0.0.1:8000)
+          git diff --exit-code -- "$screen"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          web = Path(os.environ["R2_SCREEN_FIXTURE_WEB"])
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-enrollment-fixture"
+          def digest(p):
+              return hashlib.sha256(p.read_bytes()).hexdigest()
+          assert (web/"main.dart.js").is_file()
+          (proof/"fixture-entry.dart").write_bytes(Path("frontend/lib/r2_enrollment_probe.dart").read_bytes())
+          (proof/"fixture-build.json").write_text(json.dumps({
+              "source_sha": os.environ["EXPECTED_SHA"],
+              "screen_sha256": digest(Path("frontend/lib/features/auth/local_device_enrollment_screen.dart")),
+              "entry_sha256": digest(proof/"fixture-entry.dart"),
+              "build_files": {p.relative_to(web).as_posix():digest(p) for p in sorted(web.rglob("*")) if p.is_file()},
+              "diagnostic_only": True,
+              "interaction_disabled_by_test_scope": True,
+          },indent=2))
+          PY
+          # Same fixture, SDK, browser, locale, semantics and guard; direction is the only arm variable.
+          rtl_status=0
+          ltr_status=0
+          R2_FIXTURE_DIRECTION=rtl R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || rtl_status=$?
+          R2_FIXTURE_DIRECTION=ltr R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || ltr_status=$?
+          printf 'R2_DIRECTION_ARMS rtl=%s ltr=%s\n' "$rtl_status" "$ltr_status"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-enrollment-fixture"
+          web = Path(os.environ["R2_SCREEN_FIXTURE_WEB"])
+          expected = json.loads((proof/"fixture-build.json").read_text())["build_files"]
+          actual = {p.relative_to(web).as_posix():hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in sorted(web.rglob("*")) if p.is_file()}
+          assert actual == expected, "Fixture build changed during experiment"
+          PY
+          test "$rtl_status" -eq 0 && test "$ltr_status" -eq 0
+      - name: Retain isolated enrollment screen diagnostic
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-enrollment-fixture-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-enrollment-fixture/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # B already failed twice; retain the experiment for reproducibility,
+      # but do not rebuild a known rejected candidate on every diagnostic run.
+      - name: Isolated B experiment without native logo platform view
+        if: ${{ false }}
+        timeout-minutes: 12
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          R2_AB_VARIANT: canvas-only
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -f "$RUNNER_TEMP/r2-browser-proof/webkit-ar-MA-390x844.png"
+          mkdir -p "$RUNNER_TEMP/r2-ab-canvas-only"
+          src=frontend/lib/features/auth/local_device_enrollment_screen.dart
+          git diff --exit-code -- "$src"
+          restore_source() {
+            git show "HEAD:$src" > "$src"
+            git diff --exit-code -- "$src"
+          }
+          trap restore_source EXIT
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          p = Path("frontend/lib/features/auth/local_device_enrollment_screen.dart")
+          original = p.read_bytes()
+          old = b"WebHtmlElementStrategy.prefer,"
+          new = b"WebHtmlElementStrategy.never,"
+          assert original.count(old) == 1
+          modified = original.replace(old, new)
+          p.write_bytes(modified)
+          proof = Path(os.environ["RUNNER_TEMP"]) / "r2-ab-canvas-only"
+          (proof / "experiment.json").write_text(json.dumps({
+              "source_sha": os.environ["EXPECTED_SHA"],
+              "variant": "WebHtmlElementStrategy.prefer -> never",
+              "original_source_sha256": hashlib.sha256(original).hexdigest(),
+              "modified_source_sha256": hashlib.sha256(modified).hexdigest(),
+              "diagnostic_only": True,
+          }, indent=2))
+          PY
+          git diff --stat -- "$src"
+          (cd frontend && flutter build web --release --no-pub --no-web-resources-cdn --dart-define=API_BASE_URL=http://127.0.0.1:8000)
+          # Reuse the exact baseline harness, with only the explicit B mode enabled.
+          python3 - <<'PY'
+          import os
+          import textwrap
+          from pathlib import Path
+          workflow = Path(".github/workflows/rehome-smoke.yml").read_text()
+          marker = '"$RUNNER_TEMP/r2-browser-venv/bin/python" - <<\'PY\'\n'
+          assert workflow.count(marker) == 1
+          script = workflow.split(marker,1)[1].split("\n          PY",1)[0]
+          script = textwrap.dedent(script)
+          compile(script, "<r2-ab>", "exec")
+          (Path(os.environ["RUNNER_TEMP"]) / "r2-ab-harness.py").write_text(script)
+          PY
+          "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-ab-harness.py"
+      - name: Retain isolated B experiment
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r2-ab-canvas-only-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/r2-ab-canvas-only/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  django-pg16-baseline:
+    needs: snapshot-source-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: iamina_r2_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d iamina_r2_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: amina.settings
+      SECRET_KEY: ci-r2-synthetic-not-for-production
+      DEBUG: "True"
+      ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      CORS_ALLOWED_ORIGINS: http://127.0.0.1:8000
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/iamina_r2_ci
+      REDIS_URL: redis://127.0.0.1:6379/0
+      FIREBASE_CREDENTIALS_PATH: ""
+      ENABLE_FIREBASE_MIGRATION: "False"
+      GEMINI_API_KEY: ""
+      GOOGLE_API_KEY: ""
+      GROQ_API_KEY: ""
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      KIMI_API_KEY: ""
+      LLM_PROVIDER: fallback
+      USE_KIMI: "False"
+      MEDICAL_PILOT_MODE: "False"
+      LLM_MEDICAL_STREAMING: "False"
+      NARRATION_PROTECTED_PROVIDER_SHADOW: "False"
+      NARRATION_PROTECTED_PROVIDER_INTERNAL_LIVE: "False"
+      ALLOW_INSULIN_ADVICE: "False"
+      ALLOW_DIAGNOSIS: "False"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Attest source
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install existing requirements and report resolved versions
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip check
+          python -m pip freeze
+      - name: Guard isolated database and validate schema
+        run: |
+          set -euo pipefail
+          test "$DATABASE_URL" = 'postgresql://postgres:postgres@127.0.0.1:5432/iamina_r2_ci'
+          test ! -e ../.env
+          python manage.py shell -c "from django.db import connection; assert connection.vendor == 'postgresql'; assert connection.settings_dict['HOST'] == '127.0.0.1'; assert connection.settings_dict['NAME'] == 'iamina_r2_ci'; connection.ensure_connection(); assert 160000 <= connection.pg_version < 170000; print('R2_PG16_ISOLATED_PASS')"
+          python manage.py check
+          python manage.py migrate --noinput
+          python manage.py migrate --check
+          python manage.py makemigrations --check --dry-run
+      - name: Targeted synthetic health regression
+        run: python -m pytest diabetes/tests/test_health_endpoint.py --tb=short -q
+      - name: Targeted synthetic PostgreSQL and egress regressions
+        run: |
+          python -m pytest --tb=short -q \
+            diabetes/tests/test_entries.py \
+            diabetes/tests/test_d7_profile_http_isolation.py \
+            core/tests/test_ai_egress_boundary_gate.py
+

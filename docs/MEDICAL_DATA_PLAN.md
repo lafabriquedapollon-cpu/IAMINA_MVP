@@ -1,0 +1,368 @@
+# IAmina — Clinical Data and Safety Plan
+
+> **Status:** CURRENT SAFETY/DATA CONTRACT
+>
+> This file replaces the older implementation backlog that mixed product scope, clinical guidance, detector ideas, and treatment-oriented recommendations.
+>
+> IAmina is a **diabetes companion**. It does not diagnose, prescribe, calculate medication doses, or optimize treatment.
+
+## 1. Clinical authority model
+
+IAmina must keep four layers distinct:
+
+1. **Observed / patient-entered data**  
+   Glucose readings, timestamps, meals/context, imported device/lab data, patient-entered treatment context.
+
+2. **Deterministic calculated metrics**  
+   Metrics produced by validated formulas/queries from eligible data.
+
+3. **Deterministic detected patterns / safety rules**  
+   Rule-based outputs with explicit evidence requirements and test coverage.
+
+4. **Narrative presentation**  
+   Human-readable wording produced from approved structured results. A generative model may help verbalize; it does not become the source of clinical truth.
+
+Every patient-facing output should be traceable to one of these layers.
+
+## 2. Product safety boundary
+
+### Allowed
+
+IAmina may:
+
+- help patients record and organize diabetes-related data;
+- display validated metrics and trends;
+- surface deterministic patterns when evidence requirements are met;
+- explain results in accessible language;
+- encourage appropriate professional follow-up;
+- provide pre-approved safety information and emergency routing.
+
+### Not allowed without a separate explicit product/regulatory decision
+
+IAmina must not:
+
+- diagnose a disease or complication;
+- prescribe medication;
+- recommend or calculate an insulin/medication dose;
+- tell a patient to start, stop, increase, or decrease treatment;
+- claim that a model prediction replaces laboratory/clinical assessment;
+- use an LLM as the authority for emergency classification.
+
+## 3. Data-quality contract
+
+Every metric/pattern must define:
+
+- required input fields;
+- minimum data sufficiency;
+- accepted sources;
+- time window;
+- unit normalization;
+- missing-data behavior;
+- confidence/eligibility state;
+- deterministic fallback when evidence is insufficient;
+- source/version of the clinical definition;
+- tests for edge cases and invalid data.
+
+Do not hide insufficient data behind confident prose.
+
+### Canonical clinical input facts
+
+PR #481 adds the chassis-owned `CanonicalClinicalFact` compatibility contract so heterogeneous source adapters can express the same normalized clinical shape without moving diabetes-specific clinical authority into shared core. Current adapters cover manual/import/voice `LogEntry`, normalized `CGMReadingRecord`, and neutral Pulper `DocumentExtraction`; they do **not** yet replace the authoritative persistence models.
+
+Canonical facts must preserve patient subject reference, normalized concept/value, effective time when known, source/provenance, confidence and an explicit `accepted` / `review_required` / `rejected` decision. Pulper-derived facts retain available source hash/reference, extractor/version, schema, model/prompt version and evidence-verification metadata. Any supporting timestamp/context/attribute actually used by a fact contributes to the fact's review state: a used `review_required` field prevents silent promotion to `accepted`, while rejected supporting metadata is omitted rather than treated as trusted context.
+
+FHIR/LOINC/UCUM are interoperability vocabularies, not permission to invent semantics. An adapter may attach a coding system only when it can prove the relevant meaning. Unknown units must not be auto-labelled UCUM, and no LOINC code may be inferred merely from a broad label such as “glucose” when specimen/method semantics are absent.
+
+### Governed multi-source glucose fusion
+
+V2-C permits multi-source glucose fusion only through an explicit versioned contract. The default V2-B Journal intelligence boundary remains unchanged: patient-authored Journal evidence is limited to `manual` and `voice`. A fusion caller must explicitly request Journal plus CGM and/or import; no additional population may enter implicitly.
+
+Imported `LogEntry` rows remain a distinct import population, and `source="import"` / `source="cgm"` are reserved from patient `/logs` create/batch inputs so those provenance labels cannot be self-asserted through the Journal API. Fusion admits an import row only when its stored timestamp/glucose/patient reproduce the current deterministic server import identity; legacy or otherwise unverifiable import rows fail closed rather than being silently trusted. CGM fusion may consume only normalized `CGMReadingRecord` rows with a same-patient coherent sensor-session link, matching source and timestamps inside the declared session interval. Legacy `LogEntry(source="cgm")`, demo rows, unlinked CGM transport rows and source/session mismatches are not silently promoted.
+
+Every included item must retain its canonical `source_type`, `source_ref` and provenance. Equal values or timestamps from different source populations are preserved as separate observations; V2-C does not authorize heuristic or probabilistic cross-source deduplication. Fusion is descriptive data organization only: it grants no diagnosis, causality, prediction, normative metric promotion, treatment optimization, dose authority or autonomous recommendation. Invalid subject/window/contract inputs fail closed.
+
+### Context observations
+
+Illness, stress, activity, sleep and fatigue context are observational patient-entered data. Missing context is **unknown**, not evidence of a negative/normal state. New logging paths must therefore avoid manufacturing `no`, `good` or `ok` values when the patient did not report them. Existing historical rows are not retrospectively rewritten to guess intent. Context may later support explicitly governed observational pattern detection, but it must not be presented as a proven cause of a glucose change or converted into treatment/dose advice.
+
+### Personal metabolic response patterns and Clinical Twin lifecycle
+
+Personal metabolic response is a **deterministic detected-pattern layer**, not a diagnosis, prediction or treatment engine. Source Journal rows remain authoritative. Eligible approved `personal_response` derivations may also be materialized as a diabetes-owned, recomputable `ClinicalObservationState` lifecycle so IAmina can preserve first/last seen history, recurrence episodes, active/inactive state, evidence-density evolution, baseline-relative descriptive evolution and governed provenance without promoting the derivation into diagnosis/problem-list truth.
+
+The canonical lifecycle uses a maximum 90-day synchronized-data window independently of shorter display queries. Eligibility remains deliberately conservative: at least 3 matching observations across at least 2 distinct days. Demo rows are excluded. Only the approved deterministic producer/evidence identity may write Clinical Twin state; patient claims, companion/conversational memory, heuristic inference and model inference cannot directly create this clinical-observation truth.
+
+Context-derived patterns may use only explicit positive observations. Missing context remains unknown, and historical negative/neutral values such as `no`, `good` or `ok` must not become a synthetic control population because earlier schemas could materialize defaults. Meal patterns require an explicitly recorded `post_meal` measurement context and meal type.
+
+Patient-facing evidence may include observation count, distinct-day count, the median for matching observations and the median across all eligible synchronized readings in the same window. A product repetition grade may summarize evidence density, but it must be described as neither a probability nor statistical/clinical confidence. Comparing those descriptive medians must not be presented as a causal effect, treatment response estimate or predicted future glucose. No detector output may be converted into diagnosis, dose calculation, treatment optimization or autonomous advice. Insufficient evidence must fail closed.
+
+Normal sparse refresh is not equivalent to source erasure: insufficient current support must not silently destroy longitudinal history. Explicit destructive source mutation is different. DELETE, clinically relevant PATCH and batch replacement of an existing authoritative source row must purge the affected persisted derivation and rebuild only from surviving authoritative source rows. Canonical refresh and destructive-source reconciliation share a patient-scoped serialization lock so a concurrent pre-erasure refresh cannot re-materialize stale derived state after source deletion. If surviving evidence is insufficient, no erased derivation may remain persisted.
+
+Successful non-demo authoritative Journal creates and new-row batch synchronization trigger a deterministic Clinical Twin refresh after the source write so read-only longitudinal/proactive projections can observe fresh governed state without requiring a separate patient action. Batch insertion refreshes once per successful batch rather than once per row. This refresh does not consume proactive delivery signatures, surfacing timestamps or the non-urgent attention budget. A derived refresh failure must not roll back or misrepresent a successfully committed authoritative Journal source write; the source remains primary and the refresh failure is observable for later remediation. Read-only proactive GET projections remain non-mutating.
+
+Patient-account deletion, portability export and retention/deletion governance apply to the patient-owned derived Clinical Twin state. Downstream proactive workflow state is subordinate to Clinical Twin state and cannot survive destruction of its source derivation.
+
+### Proactive insight lifecycle
+
+The proactive workflow is **delivery/prioritization state derived from approved `ClinicalObservationState`**, not a new source of clinical truth.
+
+For the current descriptive `personal_response` source:
+
+- lifecycle states are `new`, `monitoring`, `persisting`, `improving` and `resolved`;
+- `escalated` exists in the wider vocabulary but is database-rejected for this source;
+- only `MONITOR` and `PREPARE_CLINICIAN_DISCUSSION` actions are authorized;
+- prioritization must remain auditable through explicit dimensions rather than an opaque clinical risk score;
+- unchanged material state is suppressed and at most one non-urgent item may consume the 24-hour attention budget;
+- that 24-hour value is product interruption-cost policy, not a clinical follow-up interval;
+- `resolved` requires an eligible Clinical Twin refresh demonstrating eligible absence; insufficient data cannot resolve prior state;
+- deterministic emergency routing remains separate/upstream and cannot be suppressed by the proactive attention budget;
+- no proactive state may diagnose, prescribe, calculate a dose, infer causality, optimize/change treatment or grant a generative model clinical authority.
+
+Evaluation that consumes delivery state is an explicit authenticated state-changing command; safe GET requests must not consume delivery history or attention budget.
+
+### Immediate post-save presentation
+
+The immediate post-save surface belongs to the **observed / patient-entered data presentation layer**. It may confirm that a local Journal write succeeded and restate the facts just stored, but that success event does not create new clinical meaning. A single saved glucose reading, meal/context label or already-taken insulin quantity must not be turned into a good/bad judgment, causal interpretation, prediction, treatment response estimate, dose recommendation or treatment adjustment.
+
+The storage statement must match the evidence available at that moment. A successful local Drift insertion may be described as saved on the device; it must not be upgraded into a server-sync, cloud-backup or external-processing claim without separate proof. Longitudinal associations remain a different deterministic pattern layer and may surface only through the P2-JOURNAL-8 sufficiency and wording contract. Draft clearing after a successful write is a data-integrity behavior: a subsequent entry starts without silently carrying forward the prior meal/context/insulin observations.
+
+### Ramadan profile context
+
+Ramadan is represented only as an **explicit patient-configured profile period**, not as an inferred fasting state. The period is valid only when both start and end dates are present and ordered; absent, partial or inverted data must fail closed instead of being completed from the calendar, location, time of day, meal timing or cultural assumptions.
+
+Within an explicitly configured period, Journal may adapt meal vocabulary to **Suhoor / Iftar / Snack / Other** for an event whose logged date falls inside that period. This vocabulary change is organizational context only: no meal is preselected, and Suhoor/Iftar labels do not prove that the patient fasted, completed a fast, skipped a meal or followed any treatment plan. Outside the configured period, or when no valid period is available, Ramadan-specific vocabulary must not be activated.
+
+Ramadan context must not trigger diagnosis, medication or insulin-dose calculation, treatment optimization, causal inference or autonomous advice. The Django and Drift schema changes are additive and nullable; historical logs and stable `client_uuid` values are preserved, and the legacy per-log `ramadan_mode` field is not retrospectively rewritten or reinterpreted as authoritative fasting evidence. Local Ramadan persistence must fail closed when no local medical profile exists rather than creating a profile that materializes default clinical values; when a profile does exist, changing the Ramadan period must preserve its diabetes type, treatment, unit and target values. Patient-facing save feedback must reflect whether persistence succeeded locally, on the server, on only one side, or nowhere.
+
+### Nutrition-derived observations
+
+Nutrition values are deterministic derived data, not treatment authority. A patient-facing number requires source/version provenance, compatible food identity/preparation and an explicit portion basis. If those requirements are not met, numeric nutrition must fail closed. Patient-entered portion observations may be stored, but derived carbohydrate values remain recalculable from the versioned catalogue and must not be treated as immutable clinical facts. Uncertainty must remain visible when the source supports only a range. Nutrition-derived output must not be converted into an insulin dose, treatment adjustment, diagnosis or autonomous recommendation.
+
+## 4. Metrics
+
+Current/representative diabetes analytics include metrics such as:
+
+- Time in Range;
+- glucose mean/distribution metrics;
+- GMI estimation where eligible;
+- coefficient of variation;
+- AGP percentile representation;
+- GRI and other implemented diabetes analytics.
+
+Rules:
+
+- KPI authority remains SQL-first where ADR-0007 applies.
+- Units are normalized before calculation and unexpected normalization failure must fail closed on protected clinical routes.
+- Confidence/eligibility must be explicit when a metric requires sufficient data density/duration.
+- A narrative model may explain a metric but must not recalculate or override it.
+- Clinical thresholds/formulas must be versioned, cited in implementation documentation/tests, and reviewed when standards change.
+- A metric must not be presented outside the population/data modality for which its normative definition is valid.
+- PostgreSQL-specific analytical SQL requires PostgreSQL validation; SQLite fallback success alone is not certification.
+
+## 5. Pattern detection
+
+A detector must be treated as a deterministic product rule, not as free-form AI interpretation.
+
+Each detector requires:
+
+- a precise rule specification;
+- minimum evidence criteria;
+- positive and negative fixtures;
+- unit and time-zone handling;
+- false-positive analysis;
+- treatment-context-safe wording;
+- locale safety parity for every enabled patient language/dialect.
+
+Do not add treatment-adjustment logic to pattern detectors.
+
+### 5.1 Companion personal-pattern projection boundary
+
+A personal-pattern explanation may only project already-governed Clinical Twin state; it cannot create a stronger clinical claim:
+
+- accepted source rows remain deterministic `personal_response` observations with the existing evidence ID, producer, minimum repetition criteria and canonical 90-day window;
+- key/kind/recorded-context provenance, evidence-density history and baseline history must be internally consistent or the projection fails closed;
+- first-observed time, activation recurrence, persistence/resolution, evidence density/trend and baseline-relative descriptive values may be exposed as structured facts/derivations;
+- a move toward the patient's own eligible window median may be labelled only `improving_descriptively`; the median is not a clinical target and the movement is not treatment response, outcome or causality;
+- inactive patterns retain historical last-eligible-active numeric evidence only with that limitation explicit;
+- absence of governed patterns does not establish absence of disease/clinical issue; output order does not establish clinical priority;
+- no detector, threshold, causal inference, prediction, treatment optimization, dose advice or model-created clinical authority may be introduced by the projection layer.
+
+### 5.2 Companion longitudinal-comparison boundary
+
+A claim about what changed since a prior IAmina review requires a governed comparison anchor; review history must never be inferred from app activity or model context:
+
+- the anchor is server-timestamped only after an explicit companion-review action and is patient-scoped;
+- the anchor snapshots only already-governed deterministic Clinical Twin observations and carries no independent clinical authority;
+- only `new`, `persisting`, descriptive `improving`, governed `resolved` and `unknown` are permitted comparison states;
+- `improving` means movement of the descriptive baseline-relative delta toward the patient's own eligible window baseline; it is not evidence of treatment response, clinical outcome or causality;
+- no anchor is `insufficient_anchor`; missing current state, insufficient post-review evidence or ambiguous transition is `unknown`; missing data must not become resolution;
+- explicit deletion/replacement of clinically contributive source data invalidates derived review anchors before Clinical Twin recomputation so erased evidence cannot remain in historical comparison state;
+- anchor/snapshot persistence remains patient-owned application data subject to export, account deletion and retention rules;
+- this product review anchor is not a clinician consultation checkpoint and cannot be used to fabricate consultation history.
+
+### 5.3 Companion evidence + uncertainty boundary
+
+Material Companion observations must expose why they are allowed to exist and what remains unknown without inventing a confidence score:
+
+- P2-COMPANION-1 change items and P2-COMPANION-2 pattern items use one immutable evidence/uncertainty envelope;
+- runtime admission requires a current versioned internal product rule with `GOVERNED_RULE` authority plus an explicit Companion rule↔producer registration; a governed rule from another product surface is not automatically Companion authority;
+- the initial admission set contains only `rule.personal-response.repetition.v1` produced by `diabetes.personal_response.v1`;
+- provenance must preserve evidence/rule ID, producer, rule summary, maturity, authority, finality, review date, applicability metadata and registered supporting-source records;
+- a supporting external source keeps its own evidence maturity/finality and cannot be promoted into runtime patient authority through citation;
+- evidence maturity and repetition density are separate concepts. `limited` / `moderate` / `strong` describes repetition density only and must not become probability, p-value, significance or clinical confidence;
+- missing longitudinal/current evidence must be explicit: unprovable change stays `unknown`, initial density/baseline history remains missing, and resolved pattern numerics remain historical rather than current physiology;
+- source-only, candidate, narrative-only, unknown, superseded, non-versioned or wrong-producer inputs fail closed;
+- this explainability layer does not add a clinical detector, threshold, diagnosis, causality, prediction, treatment/dose rule, urgency, suggestion or prioritization authority.
+
+### 5.4 Consultation-intelligence evidence boundary
+
+Before any clinician brief is exposed, its structured source contract must be deterministic, provenance-qualified and fail closed:
+
+- `consultation-brief.v1` may carry only observed facts and deterministic derivations approved for this contract;
+- each deterministic derivation requires a registered evidence ID pointing to a versioned product rule with `GOVERNED_RULE` authority; raw literature/source records and candidate/narrative-only rules cannot become consultation truth merely by being cited;
+- source identity/version, evidence window where applicable, evidence density, missing data and limitations remain explicit; evidence density is not probability, statistical significance or clinical confidence;
+- a `since last review` statement requires an explicit authoritative review checkpoint. If none exists, the system must use current-snapshot semantics and disclose that change-since-review is unavailable;
+- model/heuristic/conversational inference and unverified user claims are outside v1 consultation truth; later support for patient-reported claims requires an explicit contract extension that preserves their claim provenance;
+- consultation actions are restricted to monitoring, collecting missing data or preparing clinician discussion. The contract contains no diagnosis, prescription, dose or treatment-change authority;
+- free-form model output may not be used to populate or override contract fields. Any future narrator may only reformulate a fully assembled approved structured brief;
+- the certified PR #143 contract is retained as restricted P2-COMPANION-5 consultation support. P2-COMPANION-1 companion-review anchors do not establish clinician consultation history; consultation assembly, endpoint replacement and clinician UX remain separate release-gated work.
+
+## 6. Treatment and insulin data
+
+IAmina may store patient-entered treatment/insulin context when needed for logging and interpretation. In Journal, an insulin quantity is an **observed historical fact**: the amount the patient reports was already administered. It is not a recommendation, target, correction factor or optimization output.
+
+Durable insulin-data requirements:
+
+- absence of a reported dose remains null rather than being fabricated as `0`;
+- decimal patient-entered quantities must not be silently rounded in create, edit, history or sync;
+- negative administered-dose input is invalid;
+- editing an insulin quantity must not rewrite unrelated meal/context observations;
+- offline reconciliation may update the same patient's log through its stable `client_uuid`, but cross-patient UUID ownership must fail closed;
+- no preset, score, calculator, suggested unit or treatment-adjustment logic may be inferred from logged insulin data.
+
+That data must not be used to generate autonomous dose recommendations or treatment changes.
+
+Requests asking IAmina to decide or adjust dosing/treatment must follow deterministic refusal/safety behavior and appropriate professional follow-up guidance defined by the product safety policy.
+
+## 7. Emergency / high-severity safety
+
+Emergency handling is a deterministic pre-model gate.
+
+Requirements:
+
+- no generative model is required to decide whether the emergency path triggers;
+- authoritative deterministic triage logic belongs on the shared safety side of the architecture boundary, not behind a disease-module dependency;
+- enabled languages/dialects must have safety-equivalent coverage;
+- mixed-language and transliterated input must be tested where relevant;
+- country-specific emergency resources must be validated before locale launch;
+- emergency events must follow the operating model in the roadmap, including monitored escalation where required.
+
+## 8. Input/unit safety
+
+Clinical inputs must reach domain/AI logic only after deterministic normalization and validation.
+
+Current invariants:
+
+- protected legacy and registry-mounted module routes are covered by the unit guard;
+- namespaced routes such as `/api/v1/diabetes/...` must not bypass normalization;
+- unexpected normalization failures are fail-closed rather than allowing unvalidated clinical payloads to continue;
+- where an input adapter emits `CanonicalClinicalFact`, source provenance and review state must be preserved rather than inferred away;
+- interoperability coding is explicit: unknown units remain without a claimed unit system and missing specimen/method semantics must not be filled with guessed LOINC codes.
+
+## 9. MENA locale safety
+
+Clinical meaning and safety must remain equivalent across enabled locales.
+
+For every pilot language/dialect:
+
+- native-speaker review is required;
+- dangerous ambiguity and common orthographic variants must be covered by the safety corpus;
+- MSA/English/French deterministic fallback behavior must be defined;
+- RTL/script rendering must be validated where applicable;
+- location may suggest locale choices but never silently determines them.
+
+A translation being linguistically correct is not sufficient; the safety intent must remain equivalent.
+
+## 10. AI/model use with clinical data
+
+### Current enforced egress governance layer
+
+P0-MENA-1 completed the central server-side AI/data-egress boundary for currently wired live external operations. PR #481 strengthens the text boundary so it independently resolves the currently scoped patient's known identity and denies the final text payload if a known direct identifier survives caller-side pseudonymization.
+
+Before a real external model/media call, the system requires:
+
+- an authenticated patient scope;
+- a registered purpose;
+- an authorized modality;
+- server-side patient AI consent;
+- purpose-specific payload allowlisting/minimization;
+- the governed processor/provider policy required for that path.
+
+The following conditions deny egress by default:
+
+- no active egress scope;
+- missing consent record or no consent;
+- unknown purpose;
+- undeclared/unauthorized modality;
+- payload outside the sanctioned minimization/allowlist contract;
+- provider/path outside the governed egress policy;
+- a final text payload that still contains a known direct identifier of the scoped patient.
+
+This authorization is intentionally evaluated at real egress time so deterministic emergency/safety handling remains available even when a patient declines AI.
+
+### Data minimization and raw-media contract
+
+External models may receive only the minimum approved payload for an explicit purpose. Do not send by default:
+
+- direct identity/contact fields;
+- internal/external user identifiers;
+- raw unrelated history;
+- raw unrelated clinical logs;
+- unrelated health data.
+
+The patient-aware last-mile text check covers identity values IAMINA can authoritatively resolve from its current identity model (Django name/email/username and profile date of birth), while generic DLP independently targets structured identifiers such as CIN, email, phone and account-like IDs. This is strong pseudonymization, not a proof that every possible free-form identifier has been anonymized: IAMINA currently has no canonical address field to exact-match an unlabeled address, and heuristic address guessing must not be sold as certainty.
+
+Raw audio/images/documents require stronger treatment because sensitive content can be embedded in the media itself and therefore require the applicable granular consent/policy boundary. In particular, patient `document_ingest` images fail closed before cloud OCR until a qualified local OCR/de-identification lane exists; redacting OCR text after raw pixels have already left IAMINA would be too late.
+
+Repository-level implementation of the authorization/minimization contract does not itself constitute external legal or deployment approval. Any release-time processor/residency/consent requirements remain governed by the active roadmap and deployment policy rather than being inferred from adapter existence.
+
+CI must prevent new live direct provider callsites from bypassing the sanctioned authorization boundary.
+
+## 11. Clinical feature acceptance checklist
+
+Before enabling a new metric, detector, or patient-facing clinical insight:
+
+- [ ] deterministic definition exists;
+- [ ] source/version is documented;
+- [ ] data sufficiency and modality eligibility are explicit;
+- [ ] unit/time handling is tested;
+- [ ] PostgreSQL behavior is tested when production SQL differs from SQLite fallback;
+- [ ] no diagnosis/prescription/treatment-optimization boundary is crossed;
+- [ ] positive + negative + edge-case tests exist;
+- [ ] patient wording is safe for relevant treatment contexts;
+- [ ] every enabled locale has safety-equivalent reviewed wording/tests;
+- [ ] outbound AI usage, if any, passes patient/purpose/modality/consent authorization;
+- [ ] outbound AI payload, if any, is explicitly minimized/allowlisted for that purpose;
+- [ ] fallback behavior is deterministic when AI/provider services fail.
+
+## 12. Documentation closeout rule
+
+After a merged clinical/safety task:
+
+1. update `docs/ROADMAP.md` with the actual closeout state;
+2. update this file only if the clinical/data/safety contract changed;
+3. update `docs/SPECS.md` if a durable capability changed;
+4. update `docs/architecture/ARCHITECTURE.md` if an as-built boundary changed;
+5. remove or rewrite resolved debt in `docs/TECHDEBT.md`.
+
+A code merge is not a complete closeout while canonical documentation still describes the previous behavior.
+
+## 13. Backlog ownership
+
+This file is not a feature backlog.
+
+- New implementation work → `docs/ROADMAP.md`.
+- Current capability → `docs/SPECS.md`.
+- Architecture boundary → `docs/architecture/ARCHITECTURE.md`.
+- Unresolved technical compromise → `docs/TECHDEBT.md`.
+
+Do not reintroduce standalone clinical milestone lists here; they drift from the roadmap and can accidentally turn speculative guidance into apparent product requirements.

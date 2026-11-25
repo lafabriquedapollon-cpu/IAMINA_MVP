@@ -1,0 +1,278 @@
+const {chromium} = require('playwright');
+const fs = require('fs');
+
+const base = process.env.AUDIT_URL || 'http://127.0.0.1:7366';
+const out = process.env.AUDIT_OUT || 'onboarding-sticky-proof';
+fs.mkdirSync(out, {recursive: true});
+const sleep = n => new Promise(resolve => setTimeout(resolve, n));
+
+async function enableSemantics(page) {
+  const placeholder = page.locator('flt-semantics-placeholder');
+  if (await placeholder.count()) {
+    await placeholder.first().focus();
+    await page.keyboard.press('Enter');
+    await sleep(350);
+  }
+}
+
+async function choose(page, label) {
+  const candidates = [
+    page.getByRole('checkbox', {name: label, exact: true}),
+    page.getByRole('button', {name: label, exact: false}),
+    page.getByRole('radio', {name: label, exact: false}),
+    page.getByText(label, {exact: true}),
+  ];
+  for (let attempt = 0; attempt < 45; attempt++) {
+    for (const locator of candidates) {
+      const count = await locator.count();
+      for (let index = 0; index < count; index++) {
+        const el = locator.nth(index);
+        if (!await el.isVisible().catch(() => false)) continue;
+        if (!await el.isEnabled().catch(() => false)) continue;
+        await el.scrollIntoViewIfNeeded().catch(() => {});
+        await el.click({timeout: 2500});
+        await sleep(350);
+        return;
+      }
+    }
+    await sleep(300);
+  }
+  throw new Error('Cannot select onboarding choice: ' + label);
+}
+
+async function assertStepInViewport(page, label, width, height, name) {
+  // Flutter CanvasKit renders text inside an accessibility node. Inspect
+  // role-bound chips first, without any test-induced scrolling.
+  const candidates = [
+    page.getByRole('checkbox', {name:label, exact:true}),
+    page.getByRole('button', {name:label, exact:true}),
+    page.getByRole('radio', {name:label, exact:true}),
+    page.getByText(label, {exact:false}),
+  ];
+  let rect = null;
+  for (const candidate of candidates) {
+    if (!(await candidate.count())) continue;
+    for (let index = 0; index < await candidate.count(); index++) {
+      const control = candidate.nth(index);
+      if (!(await control.isVisible().catch(() => false))) continue;
+      rect = await control.boundingBox().catch(() => null);
+      if (rect) break;
+    }
+    if (rect) break;
+  }
+  if (!rect || rect.y < -1 || rect.y > height - 60) {
+    throw new Error('Next onboarding step not revealed: ' +
+      JSON.stringify({name, label, width, height, rect}));
+  }
+  await page.screenshot({
+    path: out + '/onboarding-step-' + name + '-' + width + 'x' + height + '.png',
+    fullPage:false,
+  });
+  return rect;
+}
+
+async function chooseCountry(page, width, height) {
+  const probes = [
+    page.getByRole('textbox', {name:/Rechercher un pays|Pays/i}),
+    page.getByRole('combobox', {name:/Rechercher un pays|Pays/i}),
+    page.getByText('Rechercher un pays', {exact:false}),
+  ];
+  let field = null;
+  for (const probe of probes) {
+    if (await probe.count() && await probe.first().isVisible().catch(()=>false)) {
+      field = probe.first();
+      break;
+    }
+  }
+  if (!field) throw new Error('Country search control unavailable');
+  await field.click({timeout:5000});
+  // Flutter's text-editing host can detach between count() and fill().
+  // Use the focused keyboard path; assert that the suggestion is rendered.
+  await page.keyboard.type('Mar');
+  await page.waitForTimeout(250);
+  // The open search suggestions must be visible at the same three viewport
+  // sizes; capture *before* selecting, so the user can validate UX.
+  const proposed = page.getByText('Maroc', {exact:true});
+  await proposed.last().waitFor({state:'visible',timeout:8000});
+  await page.screenshot({
+    path: out + '/onboarding-country-suggestions-' + width + 'x' + height + '.png',
+    fullPage:false,
+  });
+  await choose(page, 'Maroc');
+}
+
+(async () => {
+  const browser = await chromium.launch({
+    headless: true, args: ['--force-renderer-accessibility'],
+  });
+  const results = [];
+  try {
+    for (const [width, height] of [[390,844], [768,1024], [1280,900]]) {
+      const ctx = await browser.newContext({
+        viewport: {width, height}, locale: 'fr-FR',
+        deviceScaleFactor: 1, colorScheme: 'light', serviceWorkers: 'block',
+      });
+      try {
+        const page = await ctx.newPage();
+        await page.goto(base + '/?surface=onboarding&seed=0',
+          {waitUntil: 'domcontentloaded', timeout: 30000});
+        await sleep(7000);
+        await enableSemantics(page);
+        await page.screenshot({
+          path: out + '/debug-onboarding-initial-' + width + 'x' + height + '.png',
+          fullPage: false,
+        });
+        const sem = await page.locator('flt-semantics').evaluateAll(elements =>
+          elements.map(el => ({
+            label: el.getAttribute('aria-label'),
+            text: el.textContent?.trim()?.slice(0, 200),
+            outer: el.outerHTML.slice(0, 450),
+          })),
+        ).catch(() => []);
+        const placeholderCount = await page.locator('flt-semantics-placeholder').count();
+        const body = await page.locator('body').innerText().catch(() => '');
+        fs.writeFileSync(out + '/debug-dom-' + width + 'x' + height + '.json',
+          JSON.stringify({
+            url: page.url(), placeholderCount, semantics: sem.slice(0, 80),
+            visibleText: body.slice(0, 2000),
+          }, null, 2));
+        // V1 decision #6 removes tone selection entirely. Explicitly assert
+        // that neither legacy tone choice nor its question is present.
+        const obsoleteTone = ['Quel ton préférez-vous ?', 'Simple et chaleureux',
+                              'Neutre et professionnel'];
+        for (const legacy of obsoleteTone) {
+          const match = page.getByText(legacy, {exact: true});
+          if (await match.count()) {
+            throw new Error('Obsolete tone picker still exposed: ' + legacy);
+          }
+        }
+        await choose(page, 'Français');
+        // Country should be revealed by the PRODUCT, not by test scrolling.
+        await sleep(500);
+        const countryCandidates = [
+          page.getByRole('textbox', {name:/Rechercher un pays|Pays/i}),
+          page.getByRole('combobox', {name:/Rechercher un pays|Pays/i}),
+          page.getByText('Rechercher un pays', {exact:false}),
+        ];
+        let countryRect = null;
+        for (const candidate of countryCandidates) {
+          if (!(await candidate.count())) continue;
+          countryRect = await candidate.first().boundingBox().catch(() => null);
+          if (countryRect) break;
+        }
+        if (!countryRect || countryRect.y < -1 ||
+            countryRect.y > height - 60) {
+          throw new Error('Country not visible after language: ' +
+            JSON.stringify({width,height,countryRect}));
+        }
+        await page.screenshot({
+          path:out+'/onboarding-step-country-'+width+'x'+height+'.png',
+          fullPage:false,
+        });
+        await chooseCountry(page, width, height);
+        await sleep(500);
+        // Snapshot the actual browser state before asserting the next step.
+        await page.screenshot({
+          path:out+'/debug-after-country-'+width+'x'+height+'.png',
+          fullPage:false,
+        });
+        await assertStepInViewport(page,
+          'Pré-diabète',
+          width, height, 'diabetes');
+        await choose(page, 'Pré-diabète');
+        await sleep(500);
+        await assertStepInViewport(page,
+          'Habitudes de vie',
+          width, height, 'treatments');
+        // D7: the FIRST view must not present insulin as a routine prediabetes
+        // choice; the user may still explicitly report a treatment they take.
+        const insulin = page.getByText('Insuline', {exact:true});
+        if (await insulin.first().isVisible().catch(() => false)) {
+          throw new Error('D7: prediabetes first view foregrounds insulin');
+        }
+        await page.getByText('Habitudes de vie', {exact:true}).last()
+          .scrollIntoViewIfNeeded().catch(()=>{});
+        await page.screenshot({
+          path: out + '/d7-prediabetes-first-view-' + width + 'x' + height + '.png',
+          fullPage: false,
+        });
+        await choose(page, 'Déclarer un autre traitement');
+        await page.screenshot({
+          path: out + '/d7-prediabetes-expanded-' + width + 'x' + height + '.png',
+          fullPage: false,
+        });
+        await choose(page, 'Diabète Type 2');
+        await choose(page, 'Médicaments oraux pris');
+        // The treatment multi-selector never auto-jumps on individual chips.
+        // The explicit continue action reveals units without selecting one.
+        if (width < 900) {
+          await choose(page, 'Continuer vers les unités');
+          await sleep(500);
+          await assertStepInViewport(page,
+            'mg/dL',
+            width, height, 'units');
+        } else {
+          const unexpected = page.getByText('Continuer vers les unités');
+          if (await unexpected.count()) {
+            throw new Error('Redundant scroll-to-units link on desktop');
+          }
+          await page.screenshot({
+            path:out+'/onboarding-step-units-'+width+'x'+height+'.png',
+            fullPage:false,
+          });
+        }
+        // Actual Chrome debug DOM: compact viewports merge step copy into a
+        // parent ARIA label; desktop exposes it as visible text without ARIA.
+        // Both must state exactly five steps after the four required choices.
+        let stepEvidence;
+        if (width < 900) {
+          const progress = page.locator(
+            'flt-semantics[aria-label*="Étape 5 sur 5"]',
+          );
+          await progress.first().waitFor({state:'attached', timeout:15000});
+          stepEvidence = await progress.first().getAttribute('aria-label');
+        } else {
+          await page.getByText('Étape 5 sur 5', {exact:false}).first()
+            .waitFor({state:'visible', timeout:15000});
+          stepEvidence = await page.locator('body').innerText();
+        }
+        if (!stepEvidence || !stepEvidence.includes('Étape 5 sur 5')) {
+          throw new Error('Expected five-step progress on ' + width + 'x' +
+            height + ', got ' + JSON.stringify(stepEvidence));
+        }
+        const beforeUnitAction = page.getByRole('button', {name: 'Commencer', exact: true});
+        if (width < 900 && await beforeUnitAction.count() &&
+            await beforeUnitAction.first().isEnabled()) {
+          throw new Error('D8: first-use CTA enabled without a chosen unit');
+        }
+        await choose(page, 'mg/dL');
+        const action = page.getByRole('button', {name: 'Commencer', exact: true});
+        await action.first().waitFor({state:'visible', timeout: 15000});
+        const count = await action.count();
+        const rect = await action.first().boundingBox();
+        if (count !== 1 || !rect || rect.y < 0 ||
+            rect.y + rect.height > height || rect.x < 0 ||
+            rect.x + rect.width > width || rect.height < (width < 900 ? 44 : 32)) {
+          throw new Error('CTA not singular, tappable and visible: ' +
+            JSON.stringify({count, rect, width, height}));
+        }
+        await page.screenshot({path:out + '/onboarding-ready-after-' +
+          width + 'x' + height + '.png', fullPage:false});
+        results.push({width,height,rect,buttonCount:count,url:page.url()});
+      } finally {
+        await ctx.close();
+      }
+    }
+    fs.writeFileSync(out+'/result.json',JSON.stringify({
+      ok:true,source:'isolated_flutter_web_browser_harness',
+      data:'no_real_patient_data',results,
+    },null,2));
+    console.log(JSON.stringify(results));
+  } finally {
+    await browser.close();
+  }
+})().catch(err => {
+  fs.writeFileSync(out+'/failure.txt',String(err.stack || err));
+  console.error(err);
+  process.exit(1);
+});

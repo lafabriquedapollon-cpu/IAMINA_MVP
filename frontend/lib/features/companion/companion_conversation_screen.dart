@@ -1,0 +1,1367 @@
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:record/record.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/theme/amina_visual_language.dart';
+import '../../core/theme/app_theme.dart';
+import '../../services/api_client.dart';
+import '../../services/companion_service.dart';
+import '../../services/auth_service.dart';
+import '../../data/drift/database.dart';
+import 'local_reading_context.dart';
+
+String _chatText(BuildContext context, String fr, String en, String ar) {
+  final code = Localizations.localeOf(context).languageCode;
+  if (code == 'ar') return ar;
+  if (code == 'en') return en;
+  return fr;
+}
+
+String _failureText(BuildContext context, ProviderApiException failure) {
+  return switch (failure.code) {
+    'provider_timeout' => _chatText(
+      context,
+      'IAMINA met trop de temps à répondre. Réessaie dans un instant.',
+      'IAMINA is taking too long to respond. Try again in a moment.',
+      'تستغرق IAMINA وقتًا أطول من المعتاد للرد. حاول مجددًا بعد لحظة.',
+    ),
+    'provider_unavailable' => _chatText(
+      context,
+      'Le service IAMINA est temporairement indisponible. Réessaie dans un instant.',
+      'IAMINA is temporarily unavailable. Try again in a moment.',
+      'خدمة IAMINA غير متاحة مؤقتًا. حاول مجددًا بعد لحظة.',
+    ),
+    'provider_quota_exceeded' => _chatText(
+      context,
+      'IAMINA a atteint sa limite temporaire. Réessaie plus tard.',
+      'IAMINA has reached its temporary limit. Try again later.',
+      'بلغت IAMINA الحد المؤقت للخدمة. حاول مجددًا لاحقًا.',
+    ),
+    'authentication_required' => _chatText(
+      context,
+      'Votre session n’est plus valide. Reconnectez-vous avant de réessayer.',
+      'Your session is no longer valid. Sign in again before retrying.',
+      'لم تعد جلستك صالحة. سجّل الدخول مجددًا قبل المحاولة.',
+    ),
+    _ => _chatText(
+      context,
+      'La réponse n’a pas pu être chargée. Réessaie sans modifier ton message.',
+      'The reply could not be loaded. Try again without changing your message.',
+      'تعذر تحميل الرد. حاول مجددًا بدون تغيير رسالتك.',
+    ),
+  };
+}
+
+enum _VoiceState { idle, recording, processing }
+
+class CompanionConversationScreen extends StatefulWidget {
+  final CompanionService? service;
+
+  /// Optional deterministic local-data reader for isolated UI certification.
+  /// Production reads Drift from the existing AppDatabase provider.
+  final Future<double?> Function()? latestLocalReading;
+
+  const CompanionConversationScreen({
+    super.key,
+    this.service,
+    this.latestLocalReading,
+  });
+
+  @override
+  State<CompanionConversationScreen> createState() =>
+      _CompanionConversationScreenState();
+}
+
+class _CompanionConversationScreenState
+    extends State<CompanionConversationScreen>
+    with SingleTickerProviderStateMixin {
+  late CompanionService _service;
+  bool _serviceInitialized = false;
+  bool _ownsService = false;
+  bool _kuficMarkPreloaded = false;
+  final TextEditingController _controller = TextEditingController();
+  final FocusNode _inputFocusNode = FocusNode();
+  final ScrollController _scrollController = ScrollController();
+  final List<_ConversationMessage> _messages = [];
+  bool _sending = false;
+  ProviderApiException? _failure;
+
+  final AudioRecorder _recorder = AudioRecorder();
+  final FlutterTts _tts = FlutterTts();
+  final List<Uint8List> _audioChunks = <Uint8List>[];
+  StreamSubscription<Uint8List>? _recordSubscription;
+  late final AnimationController _voicePulseController;
+  _VoiceState _voiceState = _VoiceState.idle;
+
+  @override
+  void initState() {
+    super.initState();
+    _voicePulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    unawaited(_initializeTts());
+  }
+
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Predecode the canonical Kufic mark while the chat is idle. Otherwise
+    // the first waiting frame can show a blank square during PNG decoding.
+    if (!_kuficMarkPreloaded) {
+      _kuficMarkPreloaded = true;
+      unawaited(
+        precacheImage(
+          const AssetImage('assets/images/iamina_logo_mark.png'),
+          context,
+        ),
+      );
+    }
+    if (_serviceInitialized) return;
+    final injected = widget.service;
+    if (injected != null) {
+      _service = injected;
+    } else {
+      _service = CompanionService(
+        authService: context.read<AuthService>(),
+        demoLanguage: Localizations.localeOf(context).languageCode,
+      );
+      _ownsService = true;
+    }
+    _serviceInitialized = true;
+  }
+
+  @override
+  void dispose() {
+    unawaited(_recordSubscription?.cancel() ?? Future<void>.value());
+    unawaited(_recorder.dispose());
+    unawaited(_tts.stop().then<void>((_) {}));
+    _voicePulseController.dispose();
+    _controller.dispose();
+    _inputFocusNode.dispose();
+    _scrollController.dispose();
+    if (_ownsService) _service.dispose();
+    super.dispose();
+  }
+
+  Future<void> _initializeTts() async {
+    try {
+      await _tts.setSpeechRate(0.85);
+      await _tts.setVolume(1.0);
+      await _tts.setPitch(1.0);
+      await _tts.awaitSpeakCompletion(true);
+    } catch (_) {
+      // TTS is an optional local playback enhancement. Voice input stays usable.
+    }
+  }
+
+  Future<void> _speakVoiceReply(
+    String text, {
+    required String replyLanguage,
+  }) async {
+    if (text.trim().isEmpty) return;
+    try {
+      final language = replyLanguage == 'ar-MA' || replyLanguage == 'ar'
+          ? 'ar'
+          : replyLanguage == 'en'
+          ? 'en-US'
+          : 'fr-FR';
+      await _tts.setLanguage(language);
+      await _tts.speak(text);
+    } catch (_) {
+      // A missing local TTS engine must not fail the governed chat response.
+    }
+  }
+
+  Future<void> _toggleVoice() async {
+    if (_sending || _voiceState == _VoiceState.processing) return;
+    if (_voiceState == _VoiceState.recording) {
+      await _stopAndSendVoice();
+      return;
+    }
+    await _startVoiceRecording();
+  }
+
+  Future<void> _startVoiceRecording() async {
+    if (!kIsWeb) {
+      final granted = await _recorder.hasPermission();
+      if (!granted) {
+        if (mounted) {
+          _showVoiceMessage(
+            _chatText(
+              context,
+              'Accès au micro refusé. Vérifie les permissions.',
+              'Microphone access was denied. Check your permissions.',
+              'تم رفض الوصول إلى الميكروفون. تحقّق من الأذونات.',
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    _audioChunks.clear();
+    const config = RecordConfig(
+      encoder: kIsWeb ? AudioEncoder.opus : AudioEncoder.aacLc,
+      sampleRate: 16000,
+      numChannels: 1,
+    );
+
+    try {
+      final stream = await _recorder.startStream(config);
+      await _recordSubscription?.cancel();
+      _recordSubscription = stream.listen(
+        _audioChunks.add,
+        onError: (_) {
+          if (!mounted) return;
+          _voicePulseController
+            ..stop()
+            ..reset();
+          setState(() => _voiceState = _VoiceState.idle);
+          _showVoiceMessage(
+            _chatText(
+              context,
+              'Le micro a rencontré une erreur. Réessaie.',
+              'The microphone encountered an error. Try again.',
+              'حدث خطأ في الميكروفون. حاول مجددًا.',
+            ),
+          );
+        },
+      );
+      if (mounted) {
+        setState(() {
+          _failure = null;
+          _voiceState = _VoiceState.recording;
+        });
+        _voicePulseController.repeat(reverse: true);
+      }
+    } catch (_) {
+      if (!mounted) return;
+      _voicePulseController
+        ..stop()
+        ..reset();
+      setState(() => _voiceState = _VoiceState.idle);
+      _showVoiceMessage(
+        _chatText(
+          context,
+          'Impossible de démarrer le micro. Vérifie les permissions.',
+          'Unable to start the microphone. Check your permissions.',
+          'تعذر تشغيل الميكروفون. تحقّق من الأذونات.',
+        ),
+      );
+    }
+  }
+
+  Future<void> _stopAndSendVoice() async {
+    await _recordSubscription?.cancel();
+    _recordSubscription = null;
+    await _recorder.stop();
+
+    if (!mounted) return;
+    _voicePulseController
+      ..stop()
+      ..reset();
+    setState(() {
+      _voiceState = _VoiceState.processing;
+      _failure = null;
+    });
+
+    final totalLength = _audioChunks.fold<int>(
+      0,
+      (total, chunk) => total + chunk.length,
+    );
+    final audioBytes = Uint8List(totalLength);
+    var offset = 0;
+    for (final chunk in _audioChunks) {
+      audioBytes.setRange(offset, offset + chunk.length, chunk);
+      offset += chunk.length;
+    }
+    _audioChunks.clear();
+
+    if (audioBytes.isEmpty) {
+      if (mounted) {
+        setState(() => _voiceState = _VoiceState.idle);
+        _showVoiceMessage(
+          _chatText(
+            context,
+            'Aucun son détecté. Réessaie.',
+            'No audio was detected. Try again.',
+            'لم يتم اكتشاف صوت. حاول مجددًا.',
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      final result = await _service.sendVoiceMessage(
+        audioBytes,
+        kIsWeb ? 'audio/webm' : 'audio/mp4',
+      );
+      if (!mounted) return;
+
+      setState(() {
+        _voiceState = _VoiceState.idle;
+        if (result == null) {
+          _failure = const ProviderApiException(
+            code: 'provider_unknown_failure',
+            message: 'The AI request could not be completed safely.',
+            retryable: false,
+            statusCode: 500,
+          );
+          return;
+        }
+        if (result.transcript.trim().isNotEmpty) {
+          _messages.add(
+            _ConversationMessage.user('🎤 ${result.transcript.trim()}'),
+          );
+        }
+        _messages.add(
+          _ConversationMessage.assistant(
+            result.reply,
+            isEmergency: result.isEmergency,
+          ),
+        );
+      });
+      _scrollToBottom();
+
+      if (result != null && !result.isEmergency) {
+        unawaited(
+          _speakVoiceReply(
+            result.reply,
+            replyLanguage: result.replyLanguage,
+          ),
+        );
+      }
+    } on ProviderApiException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _voiceState = _VoiceState.idle;
+        _failure = error;
+      });
+    }
+  }
+
+  void _showVoiceMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _send() async {
+    final text = _controller.text.trim();
+    if (text.isEmpty || _sending) return;
+
+    setState(() {
+      _messages.add(_ConversationMessage.user(text));
+      _sending = true;
+      _failure = null;
+      _controller.clear();
+    });
+    _scrollToBottom();
+
+    // Present device-only data separately; never smuggle it into the AI request.
+    if (refersToRecordedGlucose(text)) {
+      try {
+        // The source is local Drift, never the remote AI context.
+        // Even an audit session may only display data already on this device.
+        final double? glucose;
+        final String? localSyncStatus;
+        final bool localSyncFailed;
+        if (widget.latestLocalReading != null) {
+          // Synthetic proof supplies only a reading, not sync provenance.
+          glucose = await widget.latestLocalReading!();
+          localSyncStatus = null;
+          localSyncFailed = false;
+        } else {
+          final recent =
+              await context.read<AppDatabase>().getRecentLogs(limit: 1);
+          glucose = recent.isEmpty ? null : recent.first.bloodSugar;
+          localSyncStatus = recent.isEmpty ? null : recent.first.syncStatus;
+          localSyncFailed = recent.isNotEmpty && recent.first.errorSync;
+        }
+        if (!mounted) return;
+        final language = Localizations.localeOf(context).languageCode;
+        setState(() {
+          _messages.add(_ConversationMessage.localFact(
+            glucose != null && glucose.isFinite && glucose > 0
+                ? '${localReadingFact(glucose, language)}'
+                    '${localReadingSyncDisclosure(
+                      localSyncStatus,
+                      language,
+                      syncFailed: localSyncFailed,
+                    )}'
+                : localReadingUnavailableFact(language),
+          ));
+        });
+        _scrollToBottom();
+      } catch (error) {
+        // No patient value or identifier is included in the diagnostic.
+        debugPrint('IAMINA local reading unavailable: ${error.runtimeType}');
+      }
+    }
+
+    CompanionChatReply? result;
+    ProviderApiException? failure;
+    try {
+      result = await _service.sendChatMessage(text);
+    } on ProviderApiException catch (error) {
+      failure = error;
+    }
+    if (!mounted) return;
+
+    setState(() {
+      _sending = false;
+      if (failure != null) {
+        _failure = failure;
+      } else if (result == null) {
+        _failure = const ProviderApiException(
+          code: 'provider_unknown_failure',
+          message: 'The AI request could not be completed safely.',
+          retryable: false,
+          statusCode: 500,
+        );
+      } else {
+        _messages.add(
+          _ConversationMessage.assistant(
+            result.reply,
+            isEmergency: result.isEmergency,
+            isGovernanceFallback: result.responseMode == 'governance_fallback',
+          ),
+        );
+      }
+    });
+    _scrollToBottom();
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = AminaTheme.isDark(context);
+    return Scaffold(
+      backgroundColor: dark ? AminaTheme.bg(context) : const Color(0xFFF4FBF9),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final desktop = constraints.maxWidth >= 900;
+            final waitingForReply =
+                _sending || _voiceState == _VoiceState.processing;
+            final conversation = Column(
+              children: [
+                _ConversationHeader(
+                  onClose: () {
+                    final router = GoRouter.of(context);
+                    if (router.canPop()) {
+                      router.pop();
+                    } else {
+                      router.go('/dashboard');
+                    }
+                  },
+                ),
+                Expanded(
+                  child: _messages.isEmpty && !waitingForReply
+                      ? _EmptyConversation(
+                          onSuggestionSelected: (suggestion) {
+                            _controller.text = suggestion;
+                            _controller.selection = TextSelection.collapsed(
+                              offset: suggestion.length,
+                            );
+                            _inputFocusNode.requestFocus();
+                          },
+                        )
+                      : ListView.separated(
+                          key: const Key('companion-chat-message-list'),
+                          controller: _scrollController,
+                          padding: const EdgeInsetsDirectional.fromSTEB(
+                            24,
+                            22,
+                            24,
+                            24,
+                          ),
+                          itemCount: _messages.length + (waitingForReply ? 1 : 0),
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 12),
+                          itemBuilder: (context, index) {
+                            if (waitingForReply && index == _messages.length) {
+                              return _TypingBubble(
+                                voiceProcessing: _voiceState == _VoiceState.processing,
+                              );
+                            }
+                            return _MessageBubble(message: _messages[index]);
+                          },
+                        ),
+                ),
+                if (_failure != null)
+                  Padding(
+                    padding: const EdgeInsetsDirectional.fromSTEB(24, 0, 24, 8),
+                    child: Semantics(
+                      liveRegion: true,
+                      label: _failureText(context, _failure!),
+                      child: ExcludeSemantics(
+                        child: Text(
+                          _failureText(context, _failure!),
+                          key: const Key('companion-chat-failure'),
+                          style: const TextStyle(
+                            color: Color(0xFF9B3C35),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                _Composer(
+                  controller: _controller,
+                  focusNode: _inputFocusNode,
+                  sending: _sending,
+                  voiceState: _voiceState,
+                  voicePulse: _voicePulseController,
+                  onVoice: _toggleVoice,
+                  onSend: _send,
+                ),
+              ],
+            );
+
+            final animatedConversation = TweenAnimationBuilder<double>(
+              key: const Key('companion-chat-entry-motion'),
+              tween: Tween<double>(begin: 0, end: 1),
+              duration: const Duration(milliseconds: 380),
+              curve: Curves.easeOutCubic,
+              child: conversation,
+              builder: (context, progress, child) {
+                if (MediaQuery.disableAnimationsOf(context)) return child!;
+                return Opacity(
+                  opacity: progress,
+                  // Preserve actual 48px touch targets during the entrance.
+                  // A scale transform shrank them to 47.28px at t=0.
+                  child: Transform.translate(
+                    offset: Offset(0, 16 * (1 - progress)),
+                    child: child,
+                  ),
+                );
+              },
+            );
+
+            if (!desktop) {
+              return Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 960),
+                  child: animatedConversation,
+                ),
+              );
+            }
+
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 960),
+                  child: SizedBox(
+                    height: constraints.maxHeight > 48
+                        ? constraints.maxHeight - 48
+                        : constraints.maxHeight,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(24),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: AminaVisualLanguage.controlSurface(context),
+                          border: Border.all(
+                            color: AminaVisualLanguage.controlBorder(context),
+                          ),
+                          boxShadow: AminaVisualLanguage.cardShadowLight,
+                        ),
+                        child: animatedConversation,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _ConversationHeader extends StatelessWidget {
+  final VoidCallback onClose;
+
+  const _ConversationHeader({required this.onClose});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsetsDirectional.fromSTEB(18, 12, 12, 12),
+      decoration: BoxDecoration(
+        color: AminaVisualLanguage.controlSurface(
+          context,
+        ).withValues(alpha: .94),
+        border: Border(
+          bottom: BorderSide(color: AminaVisualLanguage.controlBorder(context)),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Hero(
+              tag: 'dashboard-companion-chat-action',
+              child: Material(
+                type: MaterialType.transparency,
+                child: Semantics(
+                  label: 'IAMINA',
+                  image: true,
+                  child: Image.asset(
+                    'assets/images/iamina_logo_horizontal.png',
+                    width: 168,
+                    height: 38,
+                    fit: BoxFit.contain,
+                    alignment: AlignmentDirectional.centerStart,
+                    filterQuality: FilterQuality.high,
+                    color: AminaTheme.isDark(context) ? Colors.white : null,
+                    colorBlendMode: BlendMode.srcIn,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Semantics(
+            label: _chatText(
+              context,
+              'Fermer la conversation',
+              'Close conversation',
+              'إغلاق المحادثة',
+            ),
+            button: true,
+            excludeSemantics: true,
+            child: IconButton(
+              key: const Key('companion-chat-close'),
+              onPressed: onClose,
+              icon: const Icon(Icons.close_rounded),
+              style: IconButton.styleFrom(
+                minimumSize: const Size(44, 44),
+                backgroundColor: AminaVisualLanguage.controlSurface(context),
+                foregroundColor: AminaVisualLanguage.forestDeep,
+                side: BorderSide(
+                  color: AminaVisualLanguage.controlBorder(context),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptyConversation extends StatelessWidget {
+  final ValueChanged<String> onSuggestionSelected;
+
+  const _EmptyConversation({required this.onSuggestionSelected});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(26),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 620),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                _chatText(
+                  context,
+                  'Pose une question avec tes mots. IAMINA peut organiser et reformuler, mais ne remplace pas ton professionnel de santé.',
+                  'Ask in your own words. IAMINA can organize and rephrase, but does not replace your clinician.',
+                  'اكتب سؤالك بطريقتك. يمكن لـ IAMINA التنظيم وإعادة الصياغة، لكنها لا تستبدل طبيبك.',
+                ),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  height: 1.45,
+                  fontSize: 13,
+                  color: AminaVisualLanguage.secondary(context),
+                ),
+              ),
+              const SizedBox(height: 22),
+              Text(
+                _chatText(
+                  context,
+                  'Pour commencer',
+                  'To get started',
+                  'للبدء',
+                ),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: AminaVisualLanguage.secondary(context),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 10,
+                runSpacing: 8,
+                children: [
+                  ActionChip(
+                    key: const Key('companion-chat-suggestion-reading'),
+                    tooltip: _chatText(
+                      context,
+                      'Préremplit le message sans l’envoyer',
+                      'Fills the message without sending it',
+                      'يملأ الرسالة دون إرسالها',
+                    ),
+                    materialTapTargetSize: MaterialTapTargetSize.padded,
+                    backgroundColor: AminaVisualLanguage.controlSurface(context),
+                    side: BorderSide(
+                      color: AminaVisualLanguage.controlBorder(context),
+                    ),
+                    label: Text(
+                      _chatText(
+                        context,
+                        'Ma dernière mesure',
+                        'My latest reading',
+                        'آخر قياس سكر',
+                      ),
+                    ),
+                    onPressed: () => onSuggestionSelected(
+                      _chatText(
+                        context,
+                        'Ma dernière mesure de glycémie ?',
+                        'My latest glucose reading?',
+                        'ما هو آخر قياس سكر مسجل؟',
+                      ),
+                    ),
+                  ),
+                  ActionChip(
+                    key: const Key('companion-chat-suggestion-capabilities'),
+                    tooltip: _chatText(
+                      context,
+                      'Préremplit le message sans l’envoyer',
+                      'Fills the message without sending it',
+                      'يملأ الرسالة دون إرسالها',
+                    ),
+                    materialTapTargetSize: MaterialTapTargetSize.padded,
+                    backgroundColor: AminaVisualLanguage.controlSurface(context),
+                    side: BorderSide(
+                      color: AminaVisualLanguage.controlBorder(context),
+                    ),
+                    label: Text(
+                      _chatText(
+                        context,
+                        'Que peux-tu faire ?',
+                        'What can you do?',
+                        'ماذا يمكنك أن تفعل؟',
+                      ),
+                    ),
+                    onPressed: () => onSuggestionSelected(
+                      _chatText(
+                        context,
+                        'Que peux-tu faire ?',
+                        'What can you do?',
+                        'ماذا يمكنك أن تفعل؟',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Composer extends StatelessWidget {
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final bool sending;
+  final _VoiceState voiceState;
+  final Animation<double> voicePulse;
+  final Future<void> Function() onVoice;
+  final Future<void> Function() onSend;
+
+  const _Composer({
+    required this.controller,
+    required this.focusNode,
+    required this.sending,
+    required this.voiceState,
+    required this.voicePulse,
+    required this.onVoice,
+    required this.onSend,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final voiceBusy = voiceState != _VoiceState.idle;
+    return Container(
+      padding: const EdgeInsetsDirectional.fromSTEB(14, 10, 12, 14),
+      decoration: BoxDecoration(
+        color: AminaVisualLanguage.controlSurface(
+          context,
+        ).withValues(alpha: .96),
+        border: Border(
+          top: BorderSide(color: AminaVisualLanguage.controlBorder(context)),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          _VoiceButton(
+            state: voiceState,
+            pulse: voicePulse,
+            disabled: sending,
+            onPressed: onVoice,
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: TextField(
+              key: const Key('companion-chat-input'),
+              controller: controller,
+              focusNode: focusNode,
+              readOnly: sending || voiceBusy,
+              minLines: 1,
+              maxLines: 4,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => onSend(),
+              decoration: InputDecoration(
+                hintText: _chatText(
+                  context,
+                  'Écrire à IAMINA…',
+                  'Write to IAMINA…',
+                  'اكتب إلى IAMINA…',
+                ),
+                filled: true,
+                fillColor: AminaVisualLanguage.controlSurface(context),
+                contentPadding: const EdgeInsetsDirectional.fromSTEB(
+                  15,
+                  13,
+                  15,
+                  13,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                  borderSide: BorderSide(
+                    color: AminaVisualLanguage.controlBorder(context),
+                  ),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                  borderSide: BorderSide(
+                    color: AminaVisualLanguage.controlBorder(context),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 9),
+          Semantics(
+            label: _chatText(
+              context,
+              'Envoyer le message',
+              'Send message',
+              'إرسال الرسالة',
+            ),
+            button: true,
+            excludeSemantics: true,
+            child: IconButton.filled(
+              key: const Key('companion-chat-send'),
+              onPressed: sending || voiceBusy ? null : onSend,
+              icon: sending
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.arrow_upward_rounded),
+              style: IconButton.styleFrom(
+                minimumSize: const Size(48, 48),
+                backgroundColor: AminaVisualLanguage.actionGreen,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VoiceButton extends StatelessWidget {
+  final _VoiceState state;
+  final Animation<double> pulse;
+  final bool disabled;
+  final Future<void> Function() onPressed;
+
+  const _VoiceButton({
+    required this.state,
+    required this.pulse,
+    required this.disabled,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final label = switch (state) {
+      _VoiceState.idle => _chatText(
+        context,
+        'Envoyer un message vocal',
+        'Send a voice message',
+        'إرسال رسالة صوتية',
+      ),
+      _VoiceState.recording => _chatText(
+        context,
+        'Arrêter l’enregistrement',
+        'Stop recording',
+        'إيقاف التسجيل',
+      ),
+      _VoiceState.processing => _chatText(
+        context,
+        'Traitement du message vocal',
+        'Processing voice message',
+        'جارٍ معالجة الرسالة الصوتية',
+      ),
+    };
+
+    Widget child;
+    switch (state) {
+      case _VoiceState.processing:
+        child = SizedBox(
+          width: 48,
+          height: 48,
+          child: Center(
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: AminaVisualLanguage.actionGreen,
+              ),
+            ),
+          ),
+        );
+        break;
+      case _VoiceState.recording:
+        child = AnimatedBuilder(
+          animation: pulse,
+          builder: (context, _) => Transform.scale(
+            scale: 1 + (0.08 * pulse.value),
+            child: IconButton.filled(
+              key: const Key('companion-chat-voice-stop'),
+              onPressed: disabled ? null : onPressed,
+              icon: const Icon(Icons.stop_rounded),
+              style: IconButton.styleFrom(
+                minimumSize: const Size(48, 48),
+                backgroundColor: const Color(0xFFC94B45),
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ),
+        );
+        break;
+      case _VoiceState.idle:
+        child = IconButton(
+          key: const Key('companion-chat-voice'),
+          onPressed: disabled ? null : onPressed,
+          icon: const Icon(Icons.mic_rounded),
+          style: IconButton.styleFrom(
+            minimumSize: const Size(48, 48),
+            backgroundColor: AminaVisualLanguage.controlSurface(context),
+            foregroundColor: AminaVisualLanguage.actionGreen,
+            side: BorderSide(
+              color: AminaVisualLanguage.controlBorder(context),
+            ),
+          ),
+        );
+        break;
+    }
+
+    return Semantics(
+      label: label,
+      button: true,
+      enabled: state != _VoiceState.processing && !disabled,
+      excludeSemantics: true,
+      child: child,
+    );
+  }
+}
+
+class _MessageBubble extends StatelessWidget {
+  final _ConversationMessage message;
+
+  const _MessageBubble({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final isUser = message.role == _ConversationRole.user;
+    final isLocal = message.role == _ConversationRole.localFact;
+    final emergency = message.isEmergency;
+    final desktop = MediaQuery.sizeOf(context).width >= 900;
+
+    final bubble = Container(
+      key: Key(
+        emergency
+            ? 'companion-emergency-bubble'
+            : isUser
+            ? 'companion-user-bubble'
+            : 'companion-assistant-bubble',
+      ),
+      padding: const EdgeInsetsDirectional.fromSTEB(15, 12, 15, 12),
+      decoration: BoxDecoration(
+        color: emergency
+            ? const Color(0xFFFFF0ED)
+            : isUser
+            ? AminaVisualLanguage.forestDeep
+            : AminaVisualLanguage.controlSurface(context),
+        borderRadius: BorderRadiusDirectional.only(
+          topStart: const Radius.circular(19),
+          topEnd: const Radius.circular(19),
+          bottomStart: Radius.circular(isUser ? 19 : 6),
+          bottomEnd: Radius.circular(isUser ? 6 : 19),
+        ),
+        border: emergency
+            ? Border.all(color: const Color(0xFFC94B45), width: 1.5)
+            : isUser
+            ? null
+            : Border.all(color: AminaVisualLanguage.controlBorder(context)),
+        boxShadow: isUser ? null : AminaVisualLanguage.cardShadowLight,
+      ),
+      // User-initiated native selection/copy only; never copy automatically.
+      child: SelectableText(
+        message.text,
+        style: TextStyle(
+          height: 1.42,
+          fontSize: 14,
+          fontWeight: emergency ? FontWeight.w700 : FontWeight.w400,
+          color: emergency
+              ? const Color(0xFF8B2E28)
+              : isUser
+              ? Colors.white
+              : AminaVisualLanguage.primaryText(context),
+        ),
+      ),
+    );
+
+    final roleLabel = isUser
+        ? _chatText(context, 'Vous', 'You', 'أنت')
+        : isLocal
+        ? _chatText(context, 'Sur cet appareil', 'On this device', 'على هذا الجهاز')
+        : 'IAMINA';
+
+    final renderedBubble = emergency
+        ? Semantics(
+            liveRegion: true,
+            label: _chatText(
+              context,
+              'Alerte urgente IAMINA. ${message.text}',
+              'Urgent IAMINA alert. ${message.text}',
+              'تنبيه عاجل من IAMINA. ${message.text}',
+            ),
+            child: ExcludeSemantics(child: bubble),
+          )
+        : bubble;
+
+    return Align(
+      alignment: isUser
+          ? AlignmentDirectional.centerEnd
+          : AlignmentDirectional.centerStart,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: desktop ? 520 : 318),
+        child: Column(
+          crossAxisAlignment: isUser
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(4, 0, 4, 5),
+              child: ExcludeSemantics(
+                child: Text(
+                  roleLabel,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: AminaVisualLanguage.secondary(context),
+                  ),
+                ),
+              ),
+            ),
+            if (message.isGovernanceFallback)
+              Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(4, 0, 4, 8),
+                child: Text(
+                  _chatText(
+                    context,
+                    'Réponse locale limitée — IA externe non utilisée',
+                    'Limited local response — external AI not used',
+                    'رد محلي محدود — لم يُستخدم الذكاء الاصطناعي الخارجي',
+                  ),
+                  key: const Key('companion-governance-fallback-label'),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AminaVisualLanguage.secondary(context),
+                  ),
+                ),
+              ),
+            renderedBubble,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TypingBubble extends StatefulWidget {
+  final bool voiceProcessing;
+
+  const _TypingBubble({this.voiceProcessing = false});
+
+  @override
+  State<_TypingBubble> createState() => _TypingBubbleState();
+}
+
+class _TypingBubbleState extends State<_TypingBubble>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _motion;
+
+  @override
+  void initState() {
+    super.initState();
+    _motion = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    );
+  }
+
+  void _syncMotion() {
+    // Only thinking animates. Voice processing and reduced-motion stay static.
+    if (widget.voiceProcessing || MediaQuery.disableAnimationsOf(context)) {
+      _motion.stop();
+      _motion.value = 0;
+    } else if (!_motion.isAnimating) {
+      _motion.repeat();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncMotion();
+  }
+
+  @override
+  void didUpdateWidget(covariant _TypingBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.voiceProcessing != oldWidget.voiceProcessing) {
+      _syncMotion();
+    }
+  }
+
+  @override
+  void dispose() {
+    _motion.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.voiceProcessing
+        ? _chatText(
+            context,
+            'IAMINA traite le message vocal…',
+            'IAMINA is processing your voice message…',
+            'تعالج IAMINA الرسالة الصوتية…',
+          )
+        : _chatText(
+            context,
+            'IAMINA prépare sa réponse…',
+            'IAMINA is preparing a reply…',
+            'تُحضّر IAMINA ردّها…',
+          );
+    final staticMark =
+        widget.voiceProcessing || MediaQuery.disableAnimationsOf(context);
+
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: Semantics(
+        liveRegion: true,
+        label: status,
+        child: ExcludeSemantics(
+          child: Container(
+            key: const Key('companion-typing-bubble'),
+            padding: const EdgeInsetsDirectional.fromSTEB(12, 11, 18, 11),
+            decoration: BoxDecoration(
+              color: AminaVisualLanguage.controlSurface(context),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: AminaVisualLanguage.controlBorder(context),
+              ),
+              boxShadow: AminaVisualLanguage.cardShadowLight,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                KuficThinkingMark(animation: _motion, staticMark: staticMark),
+                const SizedBox(width: 10),
+                Flexible(
+                  child: Text(
+                    status,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: AminaVisualLanguage.primaryText(context),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Exact canonical Arabic/Kufic IAMINA mark. Its pixels are never redrawn.
+/// Only the four clipped quadrants gently separate and rejoin while thinking.
+class KuficThinkingMark extends StatelessWidget {
+  final Animation<double> animation;
+  final bool staticMark;
+
+  const KuficThinkingMark({
+    super.key,
+    required this.animation,
+    required this.staticMark,
+  });
+
+  static const _asset = 'assets/images/iamina_logo_mark.png';
+
+  @override
+  Widget build(BuildContext context) {
+    if (staticMark) {
+      return SizedBox.square(
+        key: const Key('companion-kufic-static'),
+        dimension: 34,
+        child: Padding(
+          padding: const EdgeInsets.all(3),
+          child: Image.asset(
+            _asset,
+            fit: BoxFit.contain,
+            filterQuality: FilterQuality.high,
+            excludeFromSemantics: true,
+          ),
+        ),
+      );
+    }
+
+    return SizedBox.square(
+      key: const Key('companion-kufic-thinking'),
+      dimension: 34,
+      child: AnimatedBuilder(
+        animation: animation,
+        builder: (context, _) {
+          // sin² has zero velocity at both ends of the loop: no jump or flash.
+          final separation =
+              math.pow(math.sin(math.pi * animation.value), 2).toDouble() *
+              2.0;
+          return Stack(
+            clipBehavior: Clip.none,
+            children: List.generate(4, (index) {
+              final x = index.isEven ? -separation : separation;
+              final y = index < 2 ? -separation : separation;
+              return Positioned.fill(
+                child: Padding(
+                  padding: const EdgeInsets.all(3),
+                  child: Transform.translate(
+                    key: Key('companion-kufic-segment-$index'),
+                    offset: Offset(x, y),
+                    child: ClipRect(
+                      clipper: _KuficQuarterClipper(index),
+                      child: Image.asset(
+                        _asset,
+                        fit: BoxFit.contain,
+                        filterQuality: FilterQuality.high,
+                        excludeFromSemantics: true,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _KuficQuarterClipper extends CustomClipper<Rect> {
+  final int quarter;
+
+  const _KuficQuarterClipper(this.quarter);
+
+  @override
+  Rect getClip(Size size) => Rect.fromLTWH(
+    quarter.isOdd ? size.width / 2 : 0,
+    quarter >= 2 ? size.height / 2 : 0,
+    size.width / 2,
+    size.height / 2,
+  );
+
+  @override
+  bool shouldReclip(covariant _KuficQuarterClipper oldClipper) =>
+      oldClipper.quarter != quarter;
+}
+
+enum _ConversationRole { user, assistant, localFact }
+
+class _ConversationMessage {
+  final _ConversationRole role;
+  final String text;
+  final bool isEmergency;
+  final bool isGovernanceFallback;
+
+  const _ConversationMessage._(
+    this.role,
+    this.text, {
+    this.isEmergency = false,
+    this.isGovernanceFallback = false,
+  });
+
+  factory _ConversationMessage.user(String text) =>
+      _ConversationMessage._(_ConversationRole.user, text);
+
+  factory _ConversationMessage.assistant(
+    String text, {
+    bool isEmergency = false,
+    bool isGovernanceFallback = false,
+  }) => _ConversationMessage._(
+    _ConversationRole.assistant,
+    text,
+    isEmergency: isEmergency,
+    isGovernanceFallback: isGovernanceFallback,
+  );
+
+  factory _ConversationMessage.localFact(String text) =>
+      _ConversationMessage._(_ConversationRole.localFact, text);
+}

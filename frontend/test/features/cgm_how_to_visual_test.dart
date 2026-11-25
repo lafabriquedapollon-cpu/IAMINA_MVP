@@ -1,0 +1,88 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:amina/core/theme/amina_visual_language.dart';
+import 'package:amina/core/theme/app_theme.dart';
+import 'package:amina/features/import/cgm_connections_section.dart';
+import 'package:amina/l10n/app_localizations.dart';
+import 'package:amina/services/cgm_service.dart';
+
+const _visualAuditEnabled = bool.fromEnvironment('IAMINA_VISUAL_AUDIT');
+
+class _HowToVisualCgmService extends CgmService {
+  @override
+  Future<CgmConnectionState> getConnection() async =>
+      const CgmConnectionState(connected: false);
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets('premium CGM how-to dialog is visually certified at 390x844', (
+    tester,
+  ) async {
+    if (!_visualAuditEnabled) return;
+
+    // This golden is the release gate for first-view mobile CTA visibility.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final service = _HowToVisualCgmService();
+    addTearDown(service.dispose);
+    const captureKey = ValueKey<String>('cgm-how-to-dialog-390x844');
+
+    await tester.pumpWidget(
+      RepaintBoundary(
+        key: captureKey,
+        child: MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: AminaVisualLanguage.harmonize(AminaTheme.light),
+          locale: const Locale('fr'),
+          localizationsDelegates: const [
+            AppLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            backgroundColor: const Color(0xFFF4FBF9),
+            body: SafeArea(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: CgmConnectionsSection(service: service),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byIcon(Icons.help_outline_rounded), findsNWidgets(3));
+
+    await tester.tap(find.byIcon(Icons.help_outline_rounded).first);
+    await tester.pumpAndSettle();
+    final dialog = find.byType(Dialog);
+    expect(dialog, findsOneWidget);
+    expect(find.text('Connecter Dexcom G6/G7'), findsOneWidget);
+    expect(find.textContaining('Dexcom Share'), findsWidgets);
+    expect(find.textContaining('Nightscout'), findsWidgets);
+    expect(find.textContaining('IAMINA'), findsWidgets);
+    expect(
+      find.descendant(of: dialog, matching: find.text('Configurer')),
+      findsOneWidget,
+    );
+
+    await expectLater(
+      find.byKey(captureKey),
+      matchesGoldenFile('../ui_audit_output/cgm-how-to-dialog-390x844.png'),
+    );
+  });
+}

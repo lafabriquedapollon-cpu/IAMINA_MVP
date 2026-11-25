@@ -1,0 +1,179 @@
+# IAmina — Agent Execution Brief
+
+This file is a **stable execution contract for coding agents**, not a session diary, branch tracker, or historical status log.
+
+## Active product delivery directive — WEB-ONLY V2 (2026-10-15)
+
+**Single forward plan:** `docs/ROADMAP.md` — IAMINA ROADMAP UNIQUE WEB V2, W00–W14. All D1–D29 are product decisions to re-examine individually (keep/adapt/drop/defer); decision number never dictates execution order. D30/D31 are architecture scoping additions. Old V1/P5 sequences are history, not the current backlog; retained P5 real-patient gates remain mandatory.
+
+- **Only frontend product surface:** Flutter Web/PWA in actual mobile/tablet/desktop browsers, with keyboard, accessibility, RTL, browser persistence/offline and real browser capabilities. No new native iOS/Android-only feature work in this roadmap; preserve legacy work as deferred evidence.
+- **Target topology to design/prove in W01/W02 (not automatically deployed):** separate Vercel frontend and Django/django-ninja backend projects; PostgreSQL on a separately managed Neon database connected to backend. Verify serverless support, consent, auth, migrations, secrets, isolation, encrypted Web storage, backup/restore and browser/offline truth before operational use. Do not claim the two-project production architecture is implemented today.
+- UI evidence: BEFORE → Goal → mockup → implementation → AFTER identical browser viewports → comparison, functional/accessibility/RTL checks and serious score. **Every D requires a case-adaptive FUE covering every feature in its actual decision scope; do not reuse an unrelated fixed test itinerary.**
+- CGM D1/D25 and OCR/Vision D14/D15 require brainstorming and user onboarding designs before any integration; manufacturer/provider/legal and privacy gates still apply.
+- No generated clinical authority, no implicit patient consent or real-patient use. **Never deploy to Vercel without separate explicit owner authorization**. 
+## Read first
+
+1. `docs/ROADMAP.md` — single forward backlog and gates.
+2. `docs/COMPANION_INTELLIGENCE_CONTRACT.md` — patient-companion identity, authority ceiling and allowed suggestion classes.
+3. `docs/architecture/ARCHITECTURE.md` — current architecture + target boundaries.
+4. `docs/CONTRIBUTING.md` — workflow and non-negotiable guardrails.
+5. `docs/QUALITY_SCORING_POLICY.md` — mandatory Execution/Adversarial scoring, caps, VERIFIED threshold and Perfection Pass.
+6. `docs/MISTAKES.md` — durable lessons.
+7. Relevant ADR/spec for the assigned unit.
+8. `.skills/lot-execution/SKILL.md` — mandatory LOT procedure.
+9. `.agents/README.md` — FUE and risk-review routing matrix.
+10. Every additional `.skills/*/SKILL.md` required by the touched surface.
+
+Do not choose work from old phase numbers, archived plans, assessments, or stale commit notes.
+
+## Product doctrine
+
+- IAmina is a **MENA diabetes patient companion**, never a physician replacement.
+- Diabetes is the only live condition.
+- IAmina may observe, compare, explain and propose bounded non-prescriptive next steps; qualified clinicians remain the medical decision authority.
+- Country/dialect rollout is gated by native safety parity, validated emergency resources, and privacy/compliance readiness.
+- User choice determines language/dialect; location may suggest only.
+- Deterministic clinical/safety logic decides.
+- Generative models may verbalize approved minimized structured output or perform explicitly permitted media tasks.
+- No diagnosis, differential diagnosis, prescription, dose calculation, treatment optimization/change or autonomous medical instruction.
+- Personalized suggestions are limited to the classes defined in `docs/COMPANION_INTELLIGENCE_CONTRACT.md`.
+- D90 retention + a credible payer/distribution signal gate expansion to another condition.
+
+## Current critical path
+
+1. **W00** audit exact `main`/PR/CI, Web capability inventory and D1–D29 mapping; synchronize V2 canonical roadmap.
+2. **W01 → W02** design separated Web/API/Neon topology and resolve patient auth/vault/consent/secure Web persistence without any deployment.
+3. **W04 → W05/W06 → W07 → W09**, with **W08 before any third-party AI**; independent W03 browser UI improvements where safe.
+4. **W11 CGM** and **W12 OCR/Vision** brainstorming/onboarding may run in parallel after W00, but integration follows the explicit architecture, safety and privacy prerequisites.
+5. **W13 → W14** Web quality and release gates. Retain P5-6A/#318 and P5-6B/#320 before real patients, and human authorization before any Vercel deployment.
+
+Never elevate historical V1/P5 order or legacy native PRs above `docs/ROADMAP.md`.
+
+## Architecture facts
+
+- Flutter is the only frontend.
+- Django + django-ninja is the backend.
+- PostgreSQL is the authoritative non-lightweight path; SQLite may remain a manual-dev fallback.
+- Firebase is **legacy current-state**, not target architecture.
+- Provider-specific AI integrations are **legacy current-state**, not target architecture.
+- ADR-0008 chassis/module seams exist, but diabetes remains the only live condition.
+- Shared core owns cross-cutting contracts/safety/auth/account/observability concerns.
+- Diabetes owns diabetes-specific clinical data and logic.
+
+## Hard guardrails
+
+Never:
+
+- present IAmina as a physician, medical consultation or substitute for qualified professional care;
+- turn a personalized suggestion into diagnosis, prescription, dose advice, treatment optimization/change or autonomous medical instruction;
+- judge or override a clinician's treatment decision from companion inference;
+- bypass/reorder deterministic emergency or unit-normalization gates without explicit decision;
+- route emergency authority to a generative model;
+- create a direct provider call that bypasses the sanctioned outbound boundary;
+- send unapproved identifiers, unrelated raw health history, or unapproved media externally;
+- add autonomous diagnosis/prescription/treatment-change logic;
+- enable a patient locale/dialect without its required safety gate;
+- repurpose/remove `client_uuid` offline-sync idempotency;
+- move SQL-first KPI authority into free-form Python/LLM logic where ADR-0007 applies;
+- edit historical ADRs to rewrite a superseded decision;
+- commit secrets, service-account files, provider keys, or local agent config containing credentials.
+
+## Work discipline
+
+- Repository canonical branch is currently `main`.
+- One roadmap unit = one short-lived branch = one focused PR.
+- Keep transient status in git/PRs, not in this file.
+- Do not add session-state sections.
+- Update a canonical doc only when a durable truth changes.
+- Historical docs are evidence, not instructions.
+
+## Mandatory Decision FUE — First User Experience (all product decisions D)
+
+**FUE (FIRST USER EXPERIENCE) replaces the routine independent-Reviewer gate for every product decision D.** Before declaring D `VERIFIED` or `CLOSED`, test the **entire set of features and behaviors covered by that D**, not only the latest diff. A Builder may carry out the FUE; do not represent that as an independent review.
+
+1. **Scope inventory and case selection:** enumerate 100% of D features, entry points, actions, settings, permissions, disabled/hidden or retained behavior, user states, error/empty states and integration effects. Explicitly mark keep/adapt/drop/defer and dependencies. **Derive the smallest complete FUE matrix from this D's behavior, affected surfaces and demonstrated risks.** Do not inherit scenarios solely from a prior D, another LOT, a generic checklist or historical QA harness. No implicit omission.
+2. **Case-adaptive first-user scenarios:** trace each in-scope feature to an observable journey from the **relevant entry state** (new or returning patient as appropriate) through interaction, result, navigation away/back and recovery. Select positive, negative, empty/error, permissions/consent, persistence/offline, account isolation and accessibility **according to the tested decision's actual features and risks**. In particular **the cross-account isolation check is an owner-isolation/auth-session regression scenario (e.g. W02), not a universal FUE step**; run it only where account switching or cross-owner exposure is affected, or where such evidence is still required for the risk being assessed. It may be proven by a separate appropriate security test; never substitute that test for the functional FUE. Record excluded/deferred cases and why, without counting them as PASS.
+3. **Web reality:** execute on actual Flutter Web/PWA browser surfaces at 390×844 mobile, 768×1024 tablet, 1280×900 desktop, FR and AR/RTL, plus locales touched. Check click/touch, scrolling, keyboard Tab/Shift+Tab, visible focus and direction. UI changes need BEFORE → Goal → mockup/reference → AFTER at the **same** viewport and state, then comparison; inspect runtime/console/network where applicable. Widget or static source tests and green CI do not substitute for FUE.
+4. **Evidence matrix:** `D feature → first-user journey → locale/viewport → expected → observed → screenshot/log/test → PASS/FAIL/NOT_RUN`. **100% of required in-scope FUE cases must PASS**. Any missing, FAIL or NOT_RUN required case yields `FUE_NO_GO`, blocks `VERIFIED` and requires fix + retest on exact HEAD.
+5. **Documented verdict:** record `FUE_PASS`/`FUE_NO_GO`, coverage, all feature results, limits and known risks, exact SHA, GitHub runs/artifacts, BEFORE/AFTER comparison, functionality, RTL/keyboard, score, Perfection Pass and next action in D's canonical file + PR. Do not call a D closed based on a reviewer signoff or CI alone.
+
+**D chain:** Builder → focused tests and critical/adversarial pass → **full FUE** → separate fresh-evidence certification/Perfection Pass → authorized merge → post-merge verification. **No independently staffed code Reviewer is obligatory just because this is a D.** The FUE and certification pass may run in the same executor/session, clearly separated and subject to the `9.4` same-executor score cap. Never invent an independent audit.
+
+**Safety exception, not a shortcut:** risk-specific clinical, security, privacy, database and linguistic checks, and human approvals required by legal/clinical/security/release policies, remain mandatory when applicable. A FUE cannot approve unsafe clinical behavior, authorize patient activation, bypass auth or deploy Vercel. For non-D remediation/hotfix/governance LOTs, retain a critical evidence review and release certification pass, using separate people when available but never inventing an unavailable reviewer.
+
+## Mandatory quality scoring
+
+`docs/QUALITY_SCORING_POLICY.md` is mandatory for every material step and every LOT.
+
+- Every material step receives both `EXECUTION_SCORE /10` and `ADVERSARIAL_SCORE /10`.
+- Retained score is the lower admissible value after all caps; never average the two scores.
+- The LOT score is the lowest retained material-step score.
+- A score gap `>0.5` requires investigation, affected remediation/evidence rerun, and rescore.
+- `10/10` is exceptional; `9.5+` requires a genuinely independent review **to claim that high score**, not as a default D closeout gate. The same-executor cap still applies.
+- Same executor + adversarial reviewer is capped at `9.4/10`.
+- Required red test or missing/stale proof caps at `7.9/10`.
+- Demonstrated regression caps at `6.9/10` until remediated and rerun.
+- Blocking security/privacy/data/clinical-claim finding caps at `5.9/10` and forces `BLOCKED`.
+- UI visual fidelity without real Target ↔ Render comparison is capped at `7.5/10`.
+- No weak critical dimension may be hidden by an average.
+- A LOT may be `VERIFIED` only at retained score `>=9.0/10` with all required binary gates green (**including complete FUE for D**), no blocker, resolved score discrepancies, and the mandatory final Perfection Pass completed.
+- Even at `9.0+`, the Perfection Pass must identify remaining weaknesses, fix every materially improvable in-scope weakness, rerun affected evidence, and rescore before closure.
+
+For UX/UI LOTs, `.skills/ux-ui-certification/SKILL.md` is mandatory and must apply this scoring policy.
+
+Specialized skills are mandatory when their surface is touched:
+- clinical/medical/safety → `.skills/clinical-safety/SKILL.md`;
+- diabetes clinical reasoning / interpretation / clinician or patient semantic meaning → `.skills/diabetes-clinical-reasoning/SKILL.md` + `.skills/diabetes-evidence-intelligence/SKILL.md` + `.skills/clinical-safety/SKILL.md`;
+- diabetes proactive prioritization / insight lifecycle / follow-up / notification semantics → additionally `.skills/diabetes-proactive-intelligence/SKILL.md`;
+- any P2-COMPANION observation, explanation, suggestion, consultation or after-visit behavior → additionally obey `docs/COMPANION_INTELLIGENCE_CONTRACT.md`;
+- any new/changed diabetes threshold, guideline statement, device claim or research-horizon claim → `.skills/diabetes-evidence-intelligence/SKILL.md` with current-source verification;
+- models/migrations/persistence/PostgreSQL → `.skills/migrations-database/SKILL.md`;
+- auth/authorization/privacy/secrets/external egress → `.skills/security-review/SKILL.md`.
+
+A diabetes-specific skill is an execution procedure, never a clinical authority source by itself. Canonical product/safety contracts and deterministic runtime authority take precedence. Emerging or investigational evidence cannot silently change patient behavior.
+
+`.skills/release-certification/SKILL.md` is mandatory for every LOT.
+
+## Validation
+
+Run the narrowest focused tests first, then the relevant regression suite.
+
+Baseline for mixed changes:
+
+```bash
+python backend/manage.py check
+python -m pytest
+cd frontend && flutter analyze && flutter test
+```
+
+Additional expectations:
+
+- safety change → focused positive + negative guardrail tests;
+- clinical-intelligence change → verify evidence provenance/finality, population applicability, insufficient-data behavior, deterministic authority and no autonomous treatment optimization;
+- companion-intelligence change → additionally verify no doctor-replacement framing, only approved suggestion classes, explicit uncertainty/missing data and preserved clinician decision authority;
+- locale change → native-reviewed fixtures, mixed-script/transliteration and fallback tests where relevant;
+- provider/egress change → tests proving bypass is impossible/detected and payload is minimized;
+- auth migration → identity reconciliation + rollback/recovery tests;
+- schema migration → forward migration + recovery plan validation.
+
+## Documentation ownership
+
+- `ROADMAP.md` — forward work only.
+- `COMPANION_INTELLIGENCE_CONTRACT.md` — patient-companion product identity, authority ceiling and P2-COMPANION behavioral contract.
+- `ARCHITECTURE.md` — current/target boundaries.
+- `SPECS.md` — current capability contract.
+- `TECHDEBT.md` — unresolved compromises only.
+- `MISTAKES.md` — reusable lessons only.
+- `QUALITY_SCORING_POLICY.md` — canonical material-step/LOT scoring and verification thresholds.
+- ADRs/timeline/assessments — historical record.
+
+## Commit format
+
+```text
+feat(scope): description
+fix(scope): description
+refactor(scope): description
+test(scope): description
+chore(scope): description
+docs(scope): description
+```

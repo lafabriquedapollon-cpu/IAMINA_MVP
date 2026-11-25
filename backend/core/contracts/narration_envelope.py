@@ -1,0 +1,267 @@
+"""Structured narration contract between deterministic authority and language models.
+
+The envelope is local product state. It does not grant clinical authority and
+must never be interpreted as permission for a model to derive new clinical
+meaning.
+"""
+from __future__ import annotations
+
+import re
+import secrets
+import unicodedata
+from dataclasses import dataclass, field
+from enum import StrEnum
+from types import MappingProxyType
+from typing import Mapping
+
+from core.contracts.advice_decision import AdviceDecision
+
+NARRATION_ENVELOPE_CONTRACT_ID = "narration-envelope.v1"
+_FACT_KEY_RE = re.compile(r"^FACT_[A-Z0-9_]+$")
+_DIGIT_TRANSLATION = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+_CLINICAL_MEASUREMENT_RE = re.compile(
+    r"(?<!\w)\d{1,4}(?:[.,]\d+)?\s*(?:"
+    r"mg\s*/\s*d[lL]|mmol\s*/\s*[lL]|g\s*/\s*[lL]|mm\s*Hg|"
+    r"bpm|kg|cm|%|(?:IU|UI|U)\b|unit(?:s|és?)?\b|"
+    r"ملغ\s*/\s*دل|مليمول\s*/\s*ل|وحد(?:ة|ات)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _normalize_sensitive_surface(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).translate(_DIGIT_TRANSLATION)
+    return " ".join(normalized.casefold().split())
+
+
+def _numeric_fragments(value: str) -> frozenset[str]:
+    normalized = _normalize_sensitive_surface(value)
+    return frozenset(re.findall(r"\d+(?:[.,]\d+)?", normalized))
+
+
+class NarrationEnvelopeError(ValueError):
+    """Raised when a narration envelope is ambiguous or unsafe."""
+
+
+class NarrationSpeechAct(StrEnum):
+    ACKNOWLEDGE_EMOTION = "acknowledge_emotion"
+    EXPLAIN_APPROVED_DATA = "explain_approved_data"
+    SUMMARIZE_APPROVED_DATA = "summarize_approved_data"
+    PREPARE_CLINICIAN_QUESTIONS = "prepare_clinician_questions"
+    RESTATE_GOVERNED_ADVICE = "restate_governed_advice"
+    CONVERSATION = "conversation"
+
+
+class FactEgressPolicy(StrEnum):
+    LOCAL_ONLY = "local_only"
+    COARSENED_ONLY = "coarsened_only"
+
+
+@dataclass(frozen=True, slots=True)
+class NarrationFact:
+    key: str
+    semantic_type: str
+    rendered_value: str
+    egress_policy: FactEgressPolicy = FactEgressPolicy.LOCAL_ONLY
+    provider_hint: str | None = None
+    required: bool = True
+    provenance_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        if not _FACT_KEY_RE.fullmatch(self.key):
+            raise NarrationEnvelopeError("fact key must match FACT_[A-Z0-9_]+")
+        if not self.semantic_type.strip():
+            raise NarrationEnvelopeError("semantic_type is required")
+        if not self.rendered_value.strip():
+            raise NarrationEnvelopeError("rendered_value is required")
+        if not isinstance(self.egress_policy, FactEgressPolicy):
+            raise NarrationEnvelopeError("egress_policy must be explicit")
+        if self.provider_hint is not None and not self.provider_hint.strip():
+            raise NarrationEnvelopeError("provider_hint cannot be blank")
+        if (
+            self.egress_policy is FactEgressPolicy.LOCAL_ONLY
+            and self.provider_hint is not None
+        ):
+            raise NarrationEnvelopeError(
+                "local-only fact cannot expose a provider_hint"
+            )
+        if (
+            self.egress_policy is FactEgressPolicy.COARSENED_ONLY
+            and self.provider_hint is None
+        ):
+            raise NarrationEnvelopeError(
+                "coarsened-only fact requires a provider_hint"
+            )
+        if self.egress_policy is FactEgressPolicy.COARSENED_ONLY:
+            exact = _normalize_sensitive_surface(self.rendered_value)
+            hint = _normalize_sensitive_surface(self.provider_hint or "")
+            if (
+                exact == hint
+                or (len(exact) >= 3 and exact in hint)
+                or (len(hint) >= 3 and hint in exact)
+                or bool(_numeric_fragments(self.rendered_value) & _numeric_fragments(hint))
+                or _CLINICAL_MEASUREMENT_RE.search(hint)
+            ):
+                raise NarrationEnvelopeError(
+                    "provider_hint must be genuinely coarsened and cannot expose "
+                    "exact or replacement clinical measurements"
+                )
+        if self.provenance_ref is not None and not self.provenance_ref.strip():
+            raise NarrationEnvelopeError("provenance_ref cannot be blank")
+
+
+@dataclass(frozen=True, slots=True)
+class LocaleContract:
+    locale: str
+    script: str
+    register: str = "natural"
+    code_switching: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.locale.strip():
+            raise NarrationEnvelopeError("locale is required")
+        if self.script not in {"latin", "arabic", "mixed", "default"}:
+            raise NarrationEnvelopeError("unsupported locale script")
+        if not self.register.strip():
+            raise NarrationEnvelopeError("register is required")
+
+
+@dataclass(frozen=True, slots=True)
+class NarrationEnvelope:
+    decision: AdviceDecision
+    speech_act: NarrationSpeechAct
+    locale: LocaleContract
+    facts: tuple[NarrationFact, ...] = ()
+    allowed_claims: tuple[str, ...] = ()
+    required_claims: tuple[str, ...] = ()
+    forbidden_claims: tuple[str, ...] = ()
+    relationship_context: Mapping[str, str] = MappingProxyType({})
+    style_contract: Mapping[str, str] = MappingProxyType({})
+    fallback_reply: str = ""
+    verifier_id: str = "structural-shadow.v1"
+    contract_id: str = NARRATION_ENVELOPE_CONTRACT_ID
+    fact_tokens: Mapping[str, str] = field(init=False, repr=False, compare=False)
+    protected_body_token: str = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.contract_id != NARRATION_ENVELOPE_CONTRACT_ID:
+            raise NarrationEnvelopeError("unsupported narration envelope contract")
+        if not isinstance(self.decision, AdviceDecision):
+            raise NarrationEnvelopeError("decision must be an AdviceDecision")
+        if not isinstance(self.speech_act, NarrationSpeechAct):
+            raise NarrationEnvelopeError("speech_act must be explicit")
+        if not isinstance(self.locale, LocaleContract):
+            raise NarrationEnvelopeError("locale must be a LocaleContract")
+        if not self.verifier_id.strip():
+            raise NarrationEnvelopeError("verifier_id is required")
+
+        keys = tuple(fact.key for fact in self.facts)
+        if len(keys) != len(set(keys)):
+            raise NarrationEnvelopeError("fact keys must be unique")
+
+        used_tokens: set[str] = set()
+        fact_tokens: dict[str, str] = {}
+        for key in keys:
+            while True:
+                token = "{{NVF_" + secrets.token_hex(16).upper() + "}}"
+                if token not in used_tokens:
+                    break
+            used_tokens.add(token)
+            fact_tokens[key] = token
+        object.__setattr__(
+            self,
+            "fact_tokens",
+            MappingProxyType(fact_tokens),
+        )
+        object.__setattr__(
+            self,
+            "protected_body_token",
+            "{{NVB_" + secrets.token_hex(16).upper() + "}}",
+        )
+
+        for field_name in (
+            "allowed_claims",
+            "required_claims",
+            "forbidden_claims",
+        ):
+            values = getattr(self, field_name)
+            if any(not isinstance(value, str) or not value.strip() for value in values):
+                raise NarrationEnvelopeError(
+                    f"{field_name} must contain non-empty strings"
+                )
+            if len(values) != len(set(values)):
+                raise NarrationEnvelopeError(f"{field_name} must be unique")
+
+        overlap = set(self.required_claims) & set(self.forbidden_claims)
+        if overlap:
+            raise NarrationEnvelopeError(
+                "required_claims cannot also be forbidden_claims"
+            )
+
+        object.__setattr__(
+            self,
+            "relationship_context",
+            MappingProxyType(dict(self.relationship_context)),
+        )
+        object.__setattr__(
+            self,
+            "style_contract",
+            MappingProxyType(dict(self.style_contract)),
+        )
+
+    def fact_token(self, key: str) -> str:
+        try:
+            return self.fact_tokens[key]
+        except KeyError as exc:
+            raise NarrationEnvelopeError("unknown narration fact key") from exc
+
+    def provider_view(self) -> dict[str, object]:
+        """Return the bounded linguistic task surface.
+
+        Local fact values and provenance references are intentionally omitted.
+        """
+        return {
+            "contract_id": self.contract_id,
+            "speech_act": self.speech_act.value,
+            "authority_level": self.decision.authority_level.value,
+            "decision": self.decision.decision.value,
+            "allowed_actions": self.decision.allowed_actions,
+            "forbidden_actions": self.decision.forbidden_actions,
+            "limitations": self.decision.limitations,
+            "locale": {
+                "code": self.locale.locale,
+                "script": self.locale.script,
+                "register": self.locale.register,
+                "code_switching": self.locale.code_switching,
+            },
+            "protected_body_token": self.protected_body_token,
+            "facts": tuple(
+                {
+                    "token": self.fact_token(fact.key),
+                    "semantic_type": fact.semantic_type,
+                    "required": fact.required,
+                    "provider_hint": fact.provider_hint,
+                }
+                for fact in self.facts
+            ),
+            "allowed_claims": self.allowed_claims,
+            "required_claims": self.required_claims,
+            "forbidden_claims": self.forbidden_claims,
+            "relationship_context": dict(self.relationship_context),
+            "style_contract": dict(self.style_contract),
+            "verifier_id": self.verifier_id,
+        }
+
+
+__all__ = [
+    "FactEgressPolicy",
+    "LocaleContract",
+    "NarrationEnvelope",
+    "NarrationEnvelopeError",
+    "NarrationFact",
+    "NarrationSpeechAct",
+    "NARRATION_ENVELOPE_CONTRACT_ID",
+]

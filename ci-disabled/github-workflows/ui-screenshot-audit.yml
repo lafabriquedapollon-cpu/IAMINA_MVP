@@ -1,0 +1,146 @@
+name: UI geometry golden audit (Ahem text)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'frontend/lib/main.dart'
+      - 'frontend/lib/core/theme/**'
+      - 'frontend/lib/core/widgets/**'
+      - 'frontend/lib/features/dashboard/**'
+      - 'frontend/lib/features/journal/**'
+      - 'frontend/lib/features/profile/**'
+      - 'frontend/lib/features/import/**'
+      - 'frontend/lib/features/documents/**'
+      - 'frontend/lib/features/navigation/**'
+      - 'frontend/lib/features/companion/**'
+      - 'frontend/lib/features/medications/**'
+      - 'frontend/lib/features/reminders/**'
+      - 'frontend/test/ui_visual_screenshot_test.dart'
+      - 'frontend/test/dashboard_next_action_visual_test.dart'
+      - 'frontend/test/features/cgm_how_to_visual_test.dart'
+      - '.github/workflows/ui-screenshot-audit.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/lib/main.dart'
+      - 'frontend/lib/core/theme/**'
+      - 'frontend/lib/core/widgets/**'
+      - 'frontend/lib/features/dashboard/**'
+      - 'frontend/lib/features/journal/**'
+      - 'frontend/lib/features/profile/**'
+      - 'frontend/lib/features/import/**'
+      - 'frontend/lib/features/documents/**'
+      - 'frontend/lib/features/navigation/**'
+      - 'frontend/lib/features/companion/**'
+      - 'frontend/lib/features/medications/**'
+      - 'frontend/lib/features/reminders/**'
+      - 'frontend/test/ui_visual_screenshot_test.dart'
+      - 'frontend/test/dashboard_next_action_visual_test.dart'
+      - 'frontend/test/features/cgm_how_to_visual_test.dart'
+      - '.github/workflows/ui-screenshot-audit.yml'
+
+permissions:
+  contents: read
+
+# CI capacity: replace obsolete runs of this workflow for the same PR only.
+# Keep dispatch and main branch certifications non-cancelable.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  screenshot:
+    name: Representative patient geometry (Ahem test font)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.0'
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Render native Flutter geometry goldens (Ahem text placeholders)
+        run: |
+          flutter test --dart-define=IAMINA_VISUAL_AUDIT=true --update-goldens --reporter expanded test/ui_visual_screenshot_test.dart test/features/cgm_how_to_visual_test.dart
+          flutter test --dart-define=IAMINA_VISUAL_AUDIT=true --update-goldens --reporter expanded test/dashboard_next_action_visual_test.dart
+
+      - name: Validate geometry artifact set
+        run: |
+          set -euo pipefail
+          DIR="test/ui_audit_output"
+          EXPECTED=(
+            dashboard-360x560.png
+            dashboard-ar-360x560.png
+            dashboard-390x844.png
+            dashboard-trend-390x844.png
+            dashboard-trend-ar-360x560.png
+            dashboard-kpi-390x844.png
+            dashboard-kpi-ar-360x560.png
+            dashboard-insight-390x844.png
+            dashboard-insight-ar-360x560.png
+            dashboard-next-action-390x844.png
+            dashboard-next-action-ar-360x560.png
+            journal-390x844.png
+            summary-390x844.png
+            profile-390x844.png
+            importer-390x844.png
+            cgm-how-to-dialog-390x844.png
+            document-import-390x844.png
+            companion-390x844.png
+            add-log-390x844.png
+            medications-390x844.png
+            reminders-390x844.png
+            dashboard-1440x1000.png
+            journal-1440x1000.png
+            importer-1440x1000.png
+            profile-1440x1000.png
+          )
+
+          for NAME in "${EXPECTED[@]}"; do
+            FILE="$DIR/$NAME"
+            test -s "$FILE"
+            BYTES="$(stat -c%s "$FILE")"
+            if [ "$BYTES" -lt 4000 ]; then
+              echo "Capture $NAME is suspiciously small: $BYTES bytes" >&2
+              exit 1
+            fi
+          done
+
+          COUNT="$(find "$DIR" -maxdepth 1 -name '*.png' -type f | wc -l)"
+          test "$COUNT" -eq 25
+
+          MOBILE_UNIQUE="$(sha256sum "$DIR"/*-390x844.png | awk '{print $1}' | sort -u | wc -l)"
+          if [ "$MOBILE_UNIQUE" -lt 12 ]; then
+            echo "Geometry audit produced too few distinct mobile renders: $MOBILE_UNIQUE" >&2
+            exit 1
+          fi
+
+          cat > "$DIR/README-AHEM.txt" <<'EOF'
+          These PNGs are Flutter widget-test geometry goldens.
+          Flutter's Ahem test font intentionally renders text as rectangular blocks.
+          They validate layout/geometry only and MUST NOT be used as readable typography or visual-fidelity evidence.
+          Use the 'UI browser screenshot certification' artifact for human-readable visual proof.
+          EOF
+
+      - name: Upload geometry-only goldens
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iamina-ui-geometry-goldens-ahem
+          path: |
+            frontend/test/ui_audit_output/*.png
+            frontend/test/ui_audit_output/README-AHEM.txt
+          if-no-files-found: warn
+          retention-days: 7

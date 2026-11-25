@@ -1,0 +1,6473 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "IAmina API",
+    "version": "1.0.0",
+    "description": "Diabetes companion API \u2014 Flutter web/iOS/Android + 3rd party integrations"
+  },
+  "paths": {
+    "/api/v1/auth/register": {
+      "post": {
+        "operationId": "core_api_v1_auth_register_native",
+        "summary": "Register Native",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Create a sovereign Django identity without fabricating patient facts.",
+        "tags": [
+          "auth"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "core_api_v1_auth_login_native",
+        "summary": "Login Native",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Authenticate one Django account using a normalized email identifier.",
+        "tags": [
+          "auth"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeLoginRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "operationId": "core_api_v1_auth_current_identity",
+        "summary": "Current Identity",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "operationId": "core_api_v1_auth_logout_native",
+        "summary": "Logout Native",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/password": {
+      "post": {
+        "operationId": "core_api_v1_auth_set_native_password",
+        "summary": "Set Native Password",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Establish or rotate the native credential without weakening ownership.",
+        "tags": [
+          "auth"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/auth/password/reset/request": {
+      "post": {
+        "operationId": "core_api_v1_auth_request_password_reset",
+        "summary": "Request Password Reset",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Send a native recovery link without disclosing account existence.",
+        "tags": [
+          "auth"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordResetRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/auth/password/reset/confirm": {
+      "post": {
+        "operationId": "core_api_v1_auth_confirm_password_reset",
+        "summary": "Confirm Password Reset",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Consume a one-time Django recovery token and revoke prior IAMINA tokens.",
+        "tags": [
+          "auth"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordResetConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/auth/firebase": {
+      "post": {
+        "operationId": "core_api_v1_auth_firebase_auth",
+        "summary": "Firebase Auth",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Migrate or resolve one verified Firebase identity, then issue IAMINA auth.",
+        "tags": [
+          "auth"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FirebaseAuthRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/auth/firebase/link": {
+      "post": {
+        "operationId": "core_api_v1_auth_link_firebase_identity",
+        "summary": "Link Firebase Identity",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Explicitly attach a verified Firebase UID to the current Django account.",
+        "tags": [
+          "auth"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FirebaseAuthRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      },
+      "delete": {
+        "operationId": "core_api_v1_auth_unlink_firebase_identity",
+        "summary": "Unlink Firebase Identity",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Remove the migration credential only when native recovery is available.",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/demo/scenarios": {
+      "get": {
+        "operationId": "diabetes_api_v1_demo_list_demo_scenarios",
+        "summary": "List Demo Scenarios",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DemoScenarioResponse"
+                  },
+                  "title": "Response",
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "demo"
+        ]
+      }
+    },
+    "/api/v1/demo/chat": {
+      "post": {
+        "operationId": "diabetes_api_v1_demo_demo_chat",
+        "summary": "Demo Chat",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoChatResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Public demo using the application runtime with synthetic logs.",
+        "tags": [
+          "demo"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DemoChatRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/demo/seed": {
+      "post": {
+        "operationId": "diabetes_api_v1_demo_seed_demo_data",
+        "summary": "Seed Demo Data",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeedResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "D11: a real patient token must NEVER authorize synthetic clinical writes.\n\nThis API used to inject 30 days of fabricated readings under request.user.\nAuthentication is not consent to create medical history, and neither a\n\"dev only\" comment nor a Django DEBUG flag protects a patient record.\n\nDemo datasets remain available through the dedicated setup_demo management\ncommand and the isolated /demo/chat synthetic runtime. HTTP seeding stays\ndisabled for *all* patient identities, including the demo fixture user.\nPreserve this route as an explicit 403 (rather than an accidental 404)\nso clients fail closed without mutating historical patient records.",
+        "tags": [
+          "demo"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "operationId": "core_api_v1_health_health_check",
+        "summary": "Health Check",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthSchema"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthSchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Liveness + readiness probe.\n\n- DB unreachable \u2192 503 (blocks gunicorn from receiving traffic)\n- Cache unavailable \u2192 200 degraded (non-fatal: falls back to DB)",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/v1/app-compatibility": {
+      "get": {
+        "operationId": "core_api_v1_compatibility_app_compatibility",
+        "summary": "App Compatibility",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "client_version",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Client Version"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "client_build",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Client Build"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppCompatibilitySchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return the current pilot compatibility window and client decision.",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/v1/country/suggestion": {
+      "get": {
+        "operationId": "core_api_v1_country_suggestion_country_suggestion",
+        "summary": "Country Suggestion",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CountrySuggestion"
+                }
+              }
+            }
+          }
+        },
+        "description": "Network-level IP is automatically visible to own API; no third party.",
+        "tags": [
+          "preferences"
+        ]
+      }
+    },
+    "/api/v1/logs": {
+      "get": {
+        "operationId": "diabetes_api_v1_logs_list_logs",
+        "summary": "List Logs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "default": 1,
+              "title": "Page",
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "default": 50,
+              "title": "Page Size",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedLogsResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Paginated log list.  Query params: ?page=1&page_size=50.\npage_size is clamped to [1, 200] to prevent runaway queries.",
+        "tags": [
+          "logs"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "diabetes_api_v1_logs_create_log",
+        "summary": "Create Log",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogEntrySchema"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "logs"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogEntryCreateSchema"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/logs/batch": {
+      "post": {
+        "operationId": "diabetes_api_v1_logs_batch_create_logs",
+        "summary": "Batch Create Logs",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchSyncResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "logs"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/LogEntryCreateSchema"
+                },
+                "title": "Data",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/logs/{log_id}": {
+      "get": {
+        "operationId": "diabetes_api_v1_logs_get_log",
+        "summary": "Get Log",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "log_id",
+            "schema": {
+              "title": "Log Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogEntrySchema"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "logs"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "diabetes_api_v1_logs_update_log",
+        "summary": "Update Log",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "log_id",
+            "schema": {
+              "title": "Log Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogEntrySchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Partial update \u2014 only supplied fields are written.  404 on cross-patient access.",
+        "tags": [
+          "logs"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogEntryUpdateSchema"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "diabetes_api_v1_logs_delete_log",
+        "summary": "Delete Log",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "log_id",
+            "schema": {
+              "title": "Log Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "logs"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/profile": {
+      "get": {
+        "operationId": "diabetes_api_v1_profile_get_profile",
+        "summary": "Get Profile",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PatientProfileSchema"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "profile"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "diabetes_api_v1_profile_patch_profile",
+        "summary": "Patch Profile",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PatientProfileSchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Persist only explicitly supplied patient-declared profile fields.",
+        "tags": [
+          "profile"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfilePatchSchema"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/profile/ai-media-consents": {
+      "get": {
+        "operationId": "diabetes_api_v1_profile_list_ai_media_consents",
+        "summary": "List Ai Media Consents",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MediaConsentStateSchema"
+                  },
+                  "title": "Response",
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return every supported raw-media consent option for the authenticated patient.",
+        "tags": [
+          "profile"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/profile/ai-media-consents/{purpose}/{modality}": {
+      "put": {
+        "operationId": "diabetes_api_v1_profile_grant_ai_media_consent",
+        "summary": "Grant Ai Media Consent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "purpose",
+            "schema": {
+              "title": "Purpose",
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "modality",
+            "schema": {
+              "title": "Modality",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaConsentStateSchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Grant or reactivate one exact raw-media purpose/modality permission.",
+        "tags": [
+          "profile"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "diabetes_api_v1_profile_revoke_ai_media_consent",
+        "summary": "Revoke Ai Media Consent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "purpose",
+            "schema": {
+              "title": "Purpose",
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "modality",
+            "schema": {
+              "title": "Modality",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaConsentStateSchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Revoke one exact raw-media permission; repeated revocation is idempotent.",
+        "tags": [
+          "profile"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/profile/locale": {
+      "get": {
+        "operationId": "core_api_v1_locale_get_locale_preferences",
+        "summary": "Get Locale Preferences",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocaleStateSchema"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "locale"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "core_api_v1_locale_confirm_locale_preferences",
+        "summary": "Confirm Locale Preferences",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocaleStateSchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Confirm only explicitly supplied dimensions for the authenticated patient.",
+        "tags": [
+          "locale"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalePatchSchema"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/profile/locale/{dimension}": {
+      "delete": {
+        "operationId": "core_api_v1_locale_revoke_locale_preference",
+        "summary": "Revoke Locale Preference",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dimension",
+            "schema": {
+              "title": "Dimension",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocaleStateSchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Revoke one dimension without changing any other patient preference.",
+        "tags": [
+          "locale"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/kpis/": {
+      "get": {
+        "operationId": "diabetes_api_v1_kpis_get_kpis",
+        "summary": "Get Kpis",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "schema": {
+              "default": 21,
+              "title": "Days",
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "target_low",
+            "schema": {
+              "default": 70.0,
+              "title": "Target Low",
+              "type": "number"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "target_high",
+            "schema": {
+              "default": 180.0,
+              "title": "Target High",
+              "type": "number"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KPIsOut"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return evidence-gated KPIs for the authenticated patient.\n\nRaw SQL remains descriptive source data. Normative CGM labels such as TIR,\nCV stability, GMI and GRI are returned only when the governed CGM sufficiency\ncontract verifies actual coverage. The current LogEntry schema cannot prove\nwear-time/cadence, so those fields fail closed to null rather than being\ninferred from the fraction of rows labelled ``source='cgm'``.",
+        "tags": [
+          "kpis"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/personal-response/": {
+      "get": {
+        "operationId": "diabetes_api_v1_personal_response_get_personal_response",
+        "summary": "Get Personal Response",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "schema": {
+              "default": 90,
+              "title": "Days",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalResponseOut"
+                }
+              }
+            }
+          }
+        },
+        "description": "Summarize repeated observations without causal or prescriptive inference.",
+        "tags": [
+          "personal-response"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/personal-response/paired-meals/": {
+      "get": {
+        "operationId": "diabetes_api_v1_personal_response_get_paired_meal_response",
+        "summary": "Get Paired Meal Response",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "schema": {
+              "default": 90,
+              "title": "Days",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairedMealResponseOut"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return exact linked pre\u2192post meal episodes and repeated patterns.",
+        "tags": [
+          "personal-response"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/proactive-insights/preview/": {
+      "get": {
+        "operationId": "diabetes_api_v1_proactive_preview_proactive_insight",
+        "summary": "Preview Proactive Insight",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProactivePreviewOut"
+                }
+              }
+            }
+          }
+        },
+        "description": "Read the top governed candidate without mutating clinical or delivery state.",
+        "tags": [
+          "proactive-insights"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/proactive-insights/evaluate/": {
+      "post": {
+        "operationId": "diabetes_api_v1_proactive_evaluate_proactive_insight",
+        "summary": "Evaluate Proactive Insight",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProactiveFeedOut"
+                }
+              }
+            }
+          }
+        },
+        "description": "Explicitly evaluate and consume at most one non-urgent insight candidate.\n\nThis is intentionally a POST because a surfaced item updates deterministic\ndelivery bookkeeping (`last_surfaced_at` and delivery signature). Safe GET\nrequests must not consume the patient's attention budget.",
+        "tags": [
+          "proactive-insights"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/companion/overview": {
+      "get": {
+        "operationId": "diabetes_api_v1_companion_companion_overview",
+        "summary": "Companion Overview",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanionOverviewOut"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return governed companion state without consuming proactive attention budget.",
+        "tags": [
+          "companion"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/companion/next-action/evaluate/": {
+      "post": {
+        "operationId": "diabetes_api_v1_companion_companion_next_action",
+        "summary": "Companion Next Action",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanionNextActionOut"
+                }
+              }
+            }
+          }
+        },
+        "description": "Consume at most one bounded non-urgent suggestion after explicit user action.",
+        "tags": [
+          "companion"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cgm/connection": {
+      "get": {
+        "operationId": "diabetes_api_v1_cgm_get_cgm_connection",
+        "summary": "Get Cgm Connection",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CGMConnectionResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "cgm"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "diabetes_api_v1_cgm_put_cgm_connection",
+        "summary": "Put Cgm Connection",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CGMConnectionResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "cgm"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CGMConnectionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "diabetes_api_v1_cgm_delete_cgm_connection",
+        "summary": "Delete Cgm Connection",
+        "parameters": [],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        },
+        "tags": [
+          "cgm"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cgm/sync": {
+      "post": {
+        "operationId": "diabetes_api_v1_cgm_sync_cgm",
+        "summary": "Sync Cgm",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CGMSyncResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "cgm"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cgm/readings": {
+      "get": {
+        "operationId": "diabetes_api_v1_cgm_list_cgm_readings",
+        "summary": "List Cgm Readings",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "hours",
+            "schema": {
+              "default": 24,
+              "title": "Hours",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CGMReadingResponse"
+                  },
+                  "title": "Response",
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "cgm"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/consent": {
+      "get": {
+        "operationId": "core_api_v1_account_get_consent_status",
+        "summary": "Get Consent Status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentStatusSchema"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "account"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "core_api_v1_account_give_consent",
+        "summary": "Give Consent",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentStatusSchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Bind explicit AI consent to the exact rendered notice the patient accepted.",
+        "tags": [
+          "account"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentGrantSchema"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "core_api_v1_account_withdraw_consent",
+        "summary": "Withdraw Consent",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentStatusSchema"
+                }
+              }
+            }
+          }
+        },
+        "description": "Withdraw AI processing consent and every grant derived from that epoch.",
+        "tags": [
+          "account"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account": {
+      "delete": {
+        "operationId": "core_api_v1_account_delete_account",
+        "summary": "Delete Account",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Delete the authenticated patient's account and associated patient data.",
+        "tags": [
+          "account"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteConfirmSchema"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/notifications": {
+      "get": {
+        "operationId": "core_api_v1_d2_notifications_inbox",
+        "summary": "Inbox",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "locale",
+            "schema": {
+              "default": "fr",
+              "title": "Locale",
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Read-only: no clinical queries, synthesized messages or side effects.",
+        "tags": [
+          "d2-notifications"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/notifications/proactivity": {
+      "put": {
+        "operationId": "core_api_v1_d2_notifications_enable_proactivity",
+        "summary": "Enable Proactivity",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "d2-notifications"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProactivityGrant"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "core_api_v1_d2_notifications_disable_proactivity",
+        "summary": "Disable Proactivity",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "d2-notifications"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/notifications/{notice_id}/read": {
+      "put": {
+        "operationId": "core_api_v1_d2_notifications_mark_read",
+        "summary": "Mark Read",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notice_id",
+            "schema": {
+              "title": "Notice Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "d2-notifications"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/notifications/read-all": {
+      "post": {
+        "operationId": "core_api_v1_d2_notifications_mark_all_read",
+        "summary": "Mark All Read",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "d2-notifications"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/notifications/{notice_id}": {
+      "delete": {
+        "operationId": "core_api_v1_d2_notifications_delete_item",
+        "summary": "Delete Item",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notice_id",
+            "schema": {
+              "title": "Notice Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "d2-notifications"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/modules/{module_name}/activate": {
+      "post": {
+        "operationId": "core_api_v1_modules_activate_module",
+        "summary": "Activate Module",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "module_name",
+            "schema": {
+              "title": "Module Name",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Enrol the authenticated patient into *module_name*.\n\nReturns 404 if the module is not registered with the chassis ModuleRegistry.\nIdempotent \u2014 calling twice does not create a duplicate row.",
+        "tags": [
+          "modules"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/modules": {
+      "get": {
+        "operationId": "core_api_v1_modules_list_modules",
+        "summary": "List Modules",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Return all modules currently active for the authenticated patient.",
+        "tags": [
+          "modules"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/import/librelink": {
+      "post": {
+        "operationId": "diabetes_api_v1_imports_import_librelink_csv",
+        "summary": "Import Librelink Csv",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResultResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Import a LibreLink / LibreView CSV file for the authenticated patient.\n\nAccepts multipart/form-data with a single field ``csv_file``.\nIdempotent: re-uploading the same file produces zero new rows.\n\nReturns:\n    imported        \u2014 number of new LogEntry rows created\n    duplicates      \u2014 rows skipped because client_uuid already existed\n    rejected_values \u2014 rows dropped for out-of-physiological-range glucose\n    skipped_rows    \u2014 rows dropped for unparseable timestamp or missing value\n    detected_format \u2014 \"librelink_detailed\" | \"simple\" | \"unknown\"\n    sample          \u2014 first 3 parsed readings (for UI preview)",
+        "tags": [
+          "import"
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "csv_file": {
+                    "format": "binary",
+                    "title": "Csv File",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "csv_file"
+                ],
+                "title": "FileParams",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/ingest": {
+      "post": {
+        "operationId": "diabetes_api_v1_documents_ingest_document",
+        "summary": "Ingest Document",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "confirm",
+            "schema": {
+              "default": false,
+              "title": "Confirm",
+              "type": "boolean"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PulperPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response",
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "description": "Stage 1 (confirm=False): Extract and validate.  Returns preview.\nStage 2 (confirm=True):  Persist from a previously staged batch_id\n                         passed as query param ?batch_id=<uuid>.",
+        "tags": [
+          "documents"
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "format": "binary",
+                    "title": "File",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "title": "FileParams",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/confirm/{batch_id}": {
+      "post": {
+        "operationId": "diabetes_api_v1_documents_confirm_import",
+        "summary": "Confirm Import",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PulperConfirmResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Persist a previously staged extraction (batch_id from /ingest response).\nCalled when the user taps \"Confirmer\" in the Flutter UI.",
+        "tags": [
+          "documents"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/": {
+      "get": {
+        "operationId": "diabetes_api_v1_documents_list_lab_reports",
+        "summary": "List Lab Reports",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 20,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LabReportOut"
+                  },
+                  "title": "Response",
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return the most recent LabReport rows for the authenticated patient.",
+        "tags": [
+          "documents"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ai/summary": {
+      "post": {
+        "operationId": "ai_api_v1_ai_get_summary",
+        "summary": "Get Summary",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Full Phase 6 analytical pipeline.\n\nStep 1: SQL computes all KPIs (never Python arithmetic).\nStep 2: Pattern detection engine runs against ORM queryset.\nStep 3: SemanticCompressor \u2192 English pivot text.\nStep 4: Groq GPT-OSS-120B formats the governed patient response.",
+        "tags": [
+          "ai"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SummaryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ai/doctor-brief": {
+      "get": {
+        "operationId": "ai_api_v1_ai_get_doctor_brief",
+        "summary": "Get Doctor Brief",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "schema": {
+              "default": 14,
+              "title": "Days",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoctorBriefResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "GET /api/v1/ai/doctor-brief?days=14\n\nGenerates a compact medical summary (narrative + doctor_brief + key_insight)\nusing IAmina's narrator module. Intended for pre-consultation export.\n\nReturns all three fields from the SUMMARY_USER prompt:\n  - narrative: warm patient-facing summary\n  - key_insight: the single most important observation\n  - doctor_brief: one-sentence clinical digest for the physician",
+        "tags": [
+          "ai"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ai/chat": {
+      "post": {
+        "operationId": "ai_api_v1_ai_chat_with_amina",
+        "summary": "Chat With Amina",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Phase 6 chat with English Pivot Layer.\n\nNote: TriageVitalMiddleware has already screened 'data.message' upstream.\nIf this view is reached, the message is NOT a medical emergency.\n\nSteps:\n  1. Fetch minimal KPIs for context (SQL, lightweight).\n  2. Compress into English pivot chat context.\n  3. Build English system prompt + FR/Darija user message.\n  4. Call LLM \u2192 respond in patient language.",
+        "tags": [
+          "ai"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ai/analyze-glucometer-image": {
+      "post": {
+        "operationId": "ai_api_v1_ai_analyze_glucometer_image_web",
+        "summary": "Analyze Glucometer Image Web",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GlucometerOcrResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Phase 11-D \u2014 Gemini Vision glucometer OCR for web clients.\n\nPOST /api/v1/ai/analyze-glucometer-image\nBody: { \"image_base64\": \"<base64>\", \"mime_type\": \"image/jpeg\" }\n\nMobile uses on-device ML Kit (offline, faster).\nWeb uses this endpoint as fallback.",
+        "tags": [
+          "ai"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MealImageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ai/analyze-meal-image": {
+      "post": {
+        "operationId": "ai_api_v1_ai_analyze_meal_image",
+        "summary": "Analyze Meal Image",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MealImageResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Phase 11-C \u2014 Gemini Vision meal recognition.\n\nPOST /api/v1/ai/analyze-meal-image\nBody: { \"image_base64\": \"<base64>\", \"mime_type\": \"image/jpeg\" }\n\nPipeline:\n  1. MealVisionShield validates input (mime type, size, base64 sanity).\n  2. Gemini Vision identifies visible foods (English Pivot prompt).\n  3. MealVisionShield sanitises output (max 8 French food names).\n  4. Flutter maps returned names to CulinaryItem chips (fuzzy match).\n\nNo patient clinical data is sent to the LLM \u2014 only the food image.\nfallback=True in the response means Flutter must ask the user to pick manually.",
+        "tags": [
+          "ai"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MealImageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ai/chat/stream": {
+      "get": {
+        "operationId": "ai_api_v1_ai_chat_stream",
+        "summary": "Chat Stream",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "message",
+            "schema": {
+              "title": "Message",
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "in": "query",
+            "name": "context_days",
+            "schema": {
+              "default": 14,
+              "title": "Context Days",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "GET /api/v1/ai/chat/stream?message=...\nReturns Server-Sent Events \u2014 one `data:` line per token chunk.\nTerminal event: `data: [DONE]`",
+        "tags": [
+          "ai"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ai/voice": {
+      "post": {
+        "operationId": "ai_api_v1_voice_voice_chat",
+        "summary": "Voice Chat",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "context_days",
+            "schema": {
+              "default": 14,
+              "title": "Context Days",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoiceChatResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "POST /api/v1/ai/voice\nContent-Type: multipart/form-data\n\nFields:\n  audio        \u2014 audio file (mp4 / m4a / webm / wav / ogg / mpeg / flac)\n  context_days \u2014 look-back window for clinical context (default 14)\n\nReturns:\n  transcript   \u2014 what IAmina heard (display as subtitle in Flutter)\n  reply        \u2014 IAmina's text reply (pass to flutter_tts for playback)\n  is_emergency \u2014 if True, Flutter should display the emergency UI immediately",
+        "tags": [
+          "voice"
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "audio": {
+                    "format": "binary",
+                    "title": "Audio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "audio"
+                ],
+                "title": "FileParams",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ai/transcribe": {
+      "post": {
+        "operationId": "ai_api_v1_voice_transcribe_audio",
+        "summary": "Transcribe Audio",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscribeResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "POST /api/v1/ai/transcribe\nContent-Type: multipart/form-data\n\nSTT-only \u2014 no IAmina pipeline.\nUsed for inline dictation on the add-log page (meal note field).\n\nReturns:\n  transcript \u2014 verbatim transcription of the audio clip\n  confidence \u2014 \"high\" | \"medium\" | \"low\" (length heuristic)",
+        "tags": [
+          "voice"
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "audio": {
+                    "format": "binary",
+                    "title": "Audio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "audio"
+                ],
+                "title": "FileParams",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/analytics/overview": {
+      "get": {
+        "operationId": "diabetes_api_v1_analytics_get_overview",
+        "summary": "Get Overview",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "module",
+            "schema": {
+              "default": "diabetes",
+              "title": "Module",
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Return retention + engagement KPIs for the staff dashboard.\n\nRequires: request.user.is_staff == True.\n\nArgs:\n    module: module_id whose manifest.acquisition_event is used as the\n            cohort acquisition anchor. Defaults to \"diabetes\".\n\nReturns: JSON object matching the shape defined in the API spec.",
+        "tags": [
+          "analytics"
+        ],
+        "security": [
+          {
+            "HybridBearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AuthResponse": {
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/UserResponse"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
+          "token_type": {
+            "default": "Bearer",
+            "title": "Token Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user",
+          "message",
+          "access_token"
+        ],
+        "title": "AuthResponse",
+        "type": "object"
+      },
+      "UserResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "first_name": {
+            "title": "First Name",
+            "type": "string"
+          },
+          "last_name": {
+            "title": "Last Name",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "first_name",
+          "last_name",
+          "created_at"
+        ],
+        "title": "UserResponse",
+        "type": "object"
+      },
+      "NativeRegisterRequest": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "first_name": {
+            "default": "",
+            "title": "First Name",
+            "type": "string"
+          },
+          "last_name": {
+            "default": "",
+            "title": "Last Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "NativeRegisterRequest",
+        "type": "object"
+      },
+      "NativeLoginRequest": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "NativeLoginRequest",
+        "type": "object"
+      },
+      "SetPasswordRequest": {
+        "properties": {
+          "new_password": {
+            "title": "New Password",
+            "type": "string"
+          },
+          "current_password": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Password"
+          }
+        },
+        "required": [
+          "new_password"
+        ],
+        "title": "SetPasswordRequest",
+        "type": "object"
+      },
+      "PasswordResetRequest": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "PasswordResetRequest",
+        "type": "object"
+      },
+      "PasswordResetConfirmRequest": {
+        "properties": {
+          "uid": {
+            "title": "Uid",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "new_password": {
+            "title": "New Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uid",
+          "token",
+          "new_password"
+        ],
+        "title": "PasswordResetConfirmRequest",
+        "type": "object"
+      },
+      "FirebaseAuthRequest": {
+        "properties": {
+          "id_token": {
+            "title": "Id Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id_token"
+        ],
+        "title": "FirebaseAuthRequest",
+        "type": "object"
+      },
+      "DemoScenarioResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description"
+        ],
+        "title": "DemoScenarioResponse",
+        "type": "object"
+      },
+      "DemoChatResponse": {
+        "properties": {
+          "reply": {
+            "title": "Reply",
+            "type": "string"
+          },
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "is_emergency": {
+            "default": false,
+            "title": "Is Emergency",
+            "type": "boolean"
+          },
+          "reply_language": {
+            "default": "fr",
+            "title": "Reply Language",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reply",
+          "conversation_id",
+          "timestamp"
+        ],
+        "title": "DemoChatResponse",
+        "type": "object"
+      },
+      "DemoChatHistoryTurn": {
+        "properties": {
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "title": "DemoChatHistoryTurn",
+        "type": "object"
+      },
+      "DemoChatRequest": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "language": {
+            "default": "fr",
+            "title": "Language",
+            "type": "string"
+          },
+          "session_id": {
+            "default": "",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/DemoChatHistoryTurn"
+            },
+            "title": "History",
+            "type": "array"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "DemoChatRequest",
+        "type": "object"
+      },
+      "SeedResponse": {
+        "properties": {
+          "created": {
+            "title": "Created",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "created",
+          "message"
+        ],
+        "title": "SeedResponse",
+        "type": "object"
+      },
+      "HealthSchema": {
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "db": {
+            "title": "Db",
+            "type": "string"
+          },
+          "cache": {
+            "title": "Cache",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "db",
+          "cache"
+        ],
+        "title": "HealthSchema",
+        "type": "object"
+      },
+      "AppCompatibilitySchema": {
+        "properties": {
+          "api_contract_version": {
+            "title": "Api Contract Version",
+            "type": "string"
+          },
+          "minimum_supported_app_version": {
+            "title": "Minimum Supported App Version",
+            "type": "string"
+          },
+          "minimum_supported_build": {
+            "title": "Minimum Supported Build",
+            "type": "integer"
+          },
+          "latest_app_version": {
+            "title": "Latest App Version",
+            "type": "string"
+          },
+          "latest_build": {
+            "title": "Latest Build",
+            "type": "integer"
+          },
+          "client_app_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client App Version"
+          },
+          "client_build": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Build"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "compatible": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compatible"
+          },
+          "update_required": {
+            "title": "Update Required",
+            "type": "boolean"
+          },
+          "update_available": {
+            "title": "Update Available",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "api_contract_version",
+          "minimum_supported_app_version",
+          "minimum_supported_build",
+          "latest_app_version",
+          "latest_build",
+          "client_app_version",
+          "client_build",
+          "status",
+          "compatible",
+          "update_required",
+          "update_available"
+        ],
+        "title": "AppCompatibilitySchema",
+        "type": "object"
+      },
+      "CountrySuggestion": {
+        "properties": {
+          "country_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country Code"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "country_code",
+          "source"
+        ],
+        "title": "CountrySuggestion",
+        "type": "object"
+      },
+      "LogEntrySchema": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "logged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logged At"
+          },
+          "glycemic_context": {
+            "default": "",
+            "title": "Glycemic Context",
+            "type": "string"
+          },
+          "meal_type": {
+            "title": "Meal Type",
+            "type": "string"
+          },
+          "meal_episode_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meal Episode Id"
+          },
+          "blood_sugar": {
+            "title": "Blood Sugar",
+            "type": "number"
+          },
+          "meal_description": {
+            "default": "",
+            "title": "Meal Description",
+            "type": "string"
+          },
+          "meal_items": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Meal Items",
+            "type": "array"
+          },
+          "meal_portions": {
+            "items": {
+              "$ref": "#/components/schemas/MealPortionSchema"
+            },
+            "title": "Meal Portions",
+            "type": "array"
+          },
+          "insulin_units": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Insulin Units"
+          },
+          "exercised": {
+            "default": "",
+            "title": "Exercised",
+            "type": "string"
+          },
+          "sleep_quality": {
+            "default": "",
+            "title": "Sleep Quality",
+            "type": "string"
+          },
+          "stressed": {
+            "default": "",
+            "title": "Stressed",
+            "type": "string"
+          },
+          "fatigue_level": {
+            "default": "",
+            "title": "Fatigue Level",
+            "type": "string"
+          },
+          "is_sick": {
+            "default": "",
+            "title": "Is Sick",
+            "type": "string"
+          },
+          "source": {
+            "default": "manual",
+            "title": "Source",
+            "type": "string"
+          },
+          "client_uuid": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Uuid"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "logged_at",
+          "meal_type",
+          "blood_sugar",
+          "created_at"
+        ],
+        "title": "LogEntrySchema",
+        "type": "object"
+      },
+      "MealPortionSchema": {
+        "description": "Patient-confirmed portion input; never a server-authored nutrition claim.",
+        "properties": {
+          "food_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Food Id",
+            "type": "string"
+          },
+          "portion_id": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portion Id"
+          },
+          "grams": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 3000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grams"
+          }
+        },
+        "required": [
+          "food_id"
+        ],
+        "title": "MealPortionSchema",
+        "type": "object"
+      },
+      "PaginatedLogsResponse": {
+        "description": "Paginated wrapper for GET /logs. Use ?page=N&page_size=M (defaults: 1, 50).",
+        "properties": {
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LogEntrySchema"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "total",
+          "page",
+          "page_size",
+          "items"
+        ],
+        "title": "PaginatedLogsResponse",
+        "type": "object"
+      },
+      "LogEntryCreateSchema": {
+        "properties": {
+          "logged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logged At"
+          },
+          "glycemic_context": {
+            "default": "",
+            "title": "Glycemic Context",
+            "type": "string"
+          },
+          "meal_type": {
+            "default": "",
+            "title": "Meal Type",
+            "type": "string"
+          },
+          "meal_episode_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meal Episode Id"
+          },
+          "blood_sugar": {
+            "maximum": 600.0,
+            "minimum": 30.0,
+            "title": "Blood Sugar",
+            "type": "number"
+          },
+          "meal_description": {
+            "default": "",
+            "title": "Meal Description",
+            "type": "string"
+          },
+          "meal_items": {
+            "items": {
+              "maxLength": 80,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Meal Items",
+            "type": "array"
+          },
+          "meal_portions": {
+            "items": {
+              "$ref": "#/components/schemas/MealPortionSchema"
+            },
+            "maxItems": 20,
+            "title": "Meal Portions",
+            "type": "array"
+          },
+          "insulin_units": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Insulin Units"
+          },
+          "exercised": {
+            "default": "",
+            "title": "Exercised",
+            "type": "string"
+          },
+          "sleep_quality": {
+            "default": "",
+            "title": "Sleep Quality",
+            "type": "string"
+          },
+          "stressed": {
+            "default": "",
+            "title": "Stressed",
+            "type": "string"
+          },
+          "fatigue_level": {
+            "default": "",
+            "title": "Fatigue Level",
+            "type": "string"
+          },
+          "is_sick": {
+            "default": "",
+            "title": "Is Sick",
+            "type": "string"
+          },
+          "source": {
+            "default": "manual",
+            "title": "Source",
+            "type": "string"
+          },
+          "client_uuid": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Uuid"
+          }
+        },
+        "required": [
+          "blood_sugar"
+        ],
+        "title": "LogEntryCreateSchema",
+        "type": "object"
+      },
+      "BatchSyncResponse": {
+        "properties": {
+          "synced_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Synced Ids",
+            "type": "array"
+          },
+          "errors": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          }
+        },
+        "required": [
+          "synced_ids"
+        ],
+        "title": "BatchSyncResponse",
+        "type": "object"
+      },
+      "LogEntryUpdateSchema": {
+        "description": "Partial update \u2014 all fields optional. Only supplied fields are written.",
+        "properties": {
+          "logged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logged At"
+          },
+          "glycemic_context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Glycemic Context"
+          },
+          "meal_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meal Type"
+          },
+          "meal_episode_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meal Episode Id"
+          },
+          "blood_sugar": {
+            "anyOf": [
+              {
+                "maximum": 600.0,
+                "minimum": 30.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blood Sugar"
+          },
+          "meal_description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meal Description"
+          },
+          "meal_items": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 80,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meal Items"
+          },
+          "meal_portions": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MealPortionSchema"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meal Portions"
+          },
+          "insulin_units": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Insulin Units"
+          },
+          "exercised": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exercised"
+          },
+          "sleep_quality": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sleep Quality"
+          },
+          "stressed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stressed"
+          },
+          "fatigue_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fatigue Level"
+          },
+          "is_sick": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Sick"
+          }
+        },
+        "title": "LogEntryUpdateSchema",
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "Error",
+        "type": "object"
+      },
+      "PatientProfileSchema": {
+        "properties": {
+          "diabetes_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diabetes Type"
+          },
+          "treatment_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Treatment Type"
+          },
+          "treatment_declaration_state": {
+            "default": "not_answered",
+            "title": "Treatment Declaration State",
+            "type": "string"
+          },
+          "treatment_declarations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Treatment Declarations",
+            "type": "array"
+          },
+          "treatment_declaration_version": {
+            "default": 1,
+            "title": "Treatment Declaration Version",
+            "type": "integer"
+          },
+          "treatment_declaration_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Treatment Declaration Source"
+          },
+          "treatment_declaration_updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Treatment Declaration Updated At"
+          },
+          "clinical_profile_complete": {
+            "default": false,
+            "title": "Clinical Profile Complete",
+            "type": "boolean"
+          },
+          "target_range_low": {
+            "title": "Target Range Low",
+            "type": "number"
+          },
+          "target_range_high": {
+            "title": "Target Range High",
+            "type": "number"
+          },
+          "unit_preference": {
+            "title": "Unit Preference",
+            "type": "string"
+          },
+          "preferred_language": {
+            "default": "ar-MA",
+            "title": "Preferred Language",
+            "type": "string"
+          },
+          "gender": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gender"
+          },
+          "date_of_birth": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Of Birth"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "ramadan_start_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ramadan Start Date"
+          },
+          "ramadan_end_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ramadan End Date"
+          }
+        },
+        "required": [
+          "target_range_low",
+          "target_range_high",
+          "unit_preference"
+        ],
+        "title": "PatientProfileSchema",
+        "type": "object"
+      },
+      "PatientTreatmentDeclarationPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "const": 1,
+            "title": "Version",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "not_answered",
+              "unsure",
+              "declared",
+              "none_declared"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "codes": {
+            "items": {
+              "enum": [
+                "insulin",
+                "oral_meds",
+                "lifestyle",
+                "other"
+              ],
+              "type": "string"
+            },
+            "maxItems": 4,
+            "title": "Codes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "version",
+          "state",
+          "codes"
+        ],
+        "title": "PatientTreatmentDeclarationPatch",
+        "type": "object"
+      },
+      "ProfilePatchSchema": {
+        "description": "All fields optional; supplied values are treated as patient declarations.",
+        "properties": {
+          "preferred_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferred Language"
+          },
+          "diabetes_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diabetes Type"
+          },
+          "treatment_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Treatment Type"
+          },
+          "treatment_declaration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PatientTreatmentDeclarationPatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unit_preference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Preference"
+          },
+          "target_range_low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Range Low"
+          },
+          "target_range_high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Range High"
+          },
+          "gender": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gender"
+          },
+          "date_of_birth": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Of Birth"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "ramadan_start_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ramadan Start Date"
+          },
+          "ramadan_end_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ramadan End Date"
+          }
+        },
+        "title": "ProfilePatchSchema",
+        "type": "object"
+      },
+      "MediaConsentStateSchema": {
+        "properties": {
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "modality": {
+            "title": "Modality",
+            "type": "string"
+          },
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "granted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Granted At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "required": [
+          "purpose",
+          "modality",
+          "active"
+        ],
+        "title": "MediaConsentStateSchema",
+        "type": "object"
+      },
+      "LocaleStateSchema": {
+        "properties": {
+          "stored": {
+            "additionalProperties": true,
+            "title": "Stored",
+            "type": "object"
+          },
+          "resolved": {
+            "additionalProperties": true,
+            "title": "Resolved",
+            "type": "object"
+          }
+        },
+        "required": [
+          "stored",
+          "resolved"
+        ],
+        "title": "LocaleStateSchema",
+        "type": "object"
+      },
+      "LocalePatchSchema": {
+        "description": "Supplied values are explicit authenticated-patient confirmations.",
+        "properties": {
+          "country_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country Code"
+          },
+          "ui_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ui Language"
+          },
+          "response_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Language"
+          },
+          "script_preference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Script Preference"
+          },
+          "transliteration_preference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transliteration Preference"
+          },
+          "dialect": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dialect"
+          },
+          "glucose_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Glucose Unit"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          }
+        },
+        "title": "LocalePatchSchema",
+        "type": "object"
+      },
+      "KPIsOut": {
+        "properties": {
+          "avg_glucose": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Glucose"
+          },
+          "std_dev": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Std Dev"
+          },
+          "cv_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cv Pct"
+          },
+          "tir_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tir Pct"
+          },
+          "tar_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tar Pct"
+          },
+          "tbr_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tbr Pct"
+          },
+          "gmi": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gmi"
+          },
+          "log_count": {
+            "title": "Log Count",
+            "type": "integer"
+          },
+          "days_with_data": {
+            "title": "Days With Data",
+            "type": "integer"
+          },
+          "has_sufficient_data": {
+            "title": "Has Sufficient Data",
+            "type": "boolean"
+          },
+          "gmi_confidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gmi Confidence"
+          },
+          "gmi_basis": {
+            "title": "Gmi Basis",
+            "type": "string"
+          },
+          "gri": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gri"
+          },
+          "gri_zone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gri Zone"
+          },
+          "gri_label_fr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gri Label Fr"
+          }
+        },
+        "required": [
+          "avg_glucose",
+          "std_dev",
+          "cv_pct",
+          "tir_pct",
+          "tar_pct",
+          "tbr_pct",
+          "gmi",
+          "log_count",
+          "days_with_data",
+          "has_sufficient_data",
+          "gmi_confidence",
+          "gmi_basis",
+          "gri",
+          "gri_zone",
+          "gri_label_fr"
+        ],
+        "title": "KPIsOut",
+        "type": "object"
+      },
+      "PersonalResponseOut": {
+        "properties": {
+          "status": {
+            "enum": [
+              "ready",
+              "insufficient_data"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "data_scope": {
+            "const": "server_synced_logs",
+            "title": "Data Scope",
+            "type": "string"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          },
+          "total_readings": {
+            "title": "Total Readings",
+            "type": "integer"
+          },
+          "distinct_days": {
+            "title": "Distinct Days",
+            "type": "integer"
+          },
+          "window_median_glucose_mg_dl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Median Glucose Mg Dl"
+          },
+          "minimum_observations": {
+            "title": "Minimum Observations",
+            "type": "integer"
+          },
+          "minimum_distinct_days": {
+            "title": "Minimum Distinct Days",
+            "type": "integer"
+          },
+          "confidence_definition": {
+            "title": "Confidence Definition",
+            "type": "string"
+          },
+          "causality_notice": {
+            "title": "Causality Notice",
+            "type": "string"
+          },
+          "patterns": {
+            "items": {
+              "$ref": "#/components/schemas/PersonalResponsePatternOut"
+            },
+            "title": "Patterns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "status",
+          "data_scope",
+          "window_days",
+          "total_readings",
+          "distinct_days",
+          "window_median_glucose_mg_dl",
+          "minimum_observations",
+          "minimum_distinct_days",
+          "confidence_definition",
+          "causality_notice",
+          "patterns"
+        ],
+        "title": "PersonalResponseOut",
+        "type": "object"
+      },
+      "PersonalResponsePatternOut": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "context",
+              "meal"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "distinct_days": {
+            "title": "Distinct Days",
+            "type": "integer"
+          },
+          "median_glucose_mg_dl": {
+            "title": "Median Glucose Mg Dl",
+            "type": "number"
+          },
+          "window_median_glucose_mg_dl": {
+            "title": "Window Median Glucose Mg Dl",
+            "type": "number"
+          },
+          "confidence": {
+            "enum": [
+              "limited",
+              "moderate",
+              "strong"
+            ],
+            "title": "Confidence",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "kind",
+          "observations",
+          "distinct_days",
+          "median_glucose_mg_dl",
+          "window_median_glucose_mg_dl",
+          "confidence"
+        ],
+        "title": "PersonalResponsePatternOut",
+        "type": "object"
+      },
+      "PairedMealEpisodeOut": {
+        "properties": {
+          "episode_id": {
+            "format": "uuid",
+            "title": "Episode Id",
+            "type": "string"
+          },
+          "meal_type": {
+            "title": "Meal Type",
+            "type": "string"
+          },
+          "pre_at": {
+            "format": "date-time",
+            "title": "Pre At",
+            "type": "string"
+          },
+          "post_at": {
+            "format": "date-time",
+            "title": "Post At",
+            "type": "string"
+          },
+          "pre_glucose_mg_dl": {
+            "title": "Pre Glucose Mg Dl",
+            "type": "number"
+          },
+          "post_glucose_mg_dl": {
+            "title": "Post Glucose Mg Dl",
+            "type": "number"
+          },
+          "delta_mg_dl": {
+            "title": "Delta Mg Dl",
+            "type": "number"
+          },
+          "elapsed_minutes": {
+            "title": "Elapsed Minutes",
+            "type": "number"
+          }
+        },
+        "required": [
+          "episode_id",
+          "meal_type",
+          "pre_at",
+          "post_at",
+          "pre_glucose_mg_dl",
+          "post_glucose_mg_dl",
+          "delta_mg_dl",
+          "elapsed_minutes"
+        ],
+        "title": "PairedMealEpisodeOut",
+        "type": "object"
+      },
+      "PairedMealPatternOut": {
+        "properties": {
+          "meal_type": {
+            "title": "Meal Type",
+            "type": "string"
+          },
+          "pairs": {
+            "title": "Pairs",
+            "type": "integer"
+          },
+          "distinct_days": {
+            "title": "Distinct Days",
+            "type": "integer"
+          },
+          "median_pre_glucose_mg_dl": {
+            "title": "Median Pre Glucose Mg Dl",
+            "type": "number"
+          },
+          "median_post_glucose_mg_dl": {
+            "title": "Median Post Glucose Mg Dl",
+            "type": "number"
+          },
+          "median_delta_mg_dl": {
+            "title": "Median Delta Mg Dl",
+            "type": "number"
+          },
+          "evidence_density": {
+            "enum": [
+              "limited",
+              "moderate",
+              "strong"
+            ],
+            "title": "Evidence Density",
+            "type": "string"
+          },
+          "evidence_id": {
+            "title": "Evidence Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "meal_type",
+          "pairs",
+          "distinct_days",
+          "median_pre_glucose_mg_dl",
+          "median_post_glucose_mg_dl",
+          "median_delta_mg_dl",
+          "evidence_density",
+          "evidence_id"
+        ],
+        "title": "PairedMealPatternOut",
+        "type": "object"
+      },
+      "PairedMealResponseOut": {
+        "properties": {
+          "status": {
+            "enum": [
+              "ready",
+              "insufficient_data"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "data_scope": {
+            "const": "server_synced_logs_explicit_meal_episodes",
+            "title": "Data Scope",
+            "type": "string"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          },
+          "explicit_episode_count": {
+            "title": "Explicit Episode Count",
+            "type": "integer"
+          },
+          "complete_pair_count": {
+            "title": "Complete Pair Count",
+            "type": "integer"
+          },
+          "incomplete_or_invalid_episode_count": {
+            "title": "Incomplete Or Invalid Episode Count",
+            "type": "integer"
+          },
+          "pairing_definition": {
+            "title": "Pairing Definition",
+            "type": "string"
+          },
+          "interpretation_notice": {
+            "title": "Interpretation Notice",
+            "type": "string"
+          },
+          "evidence_id": {
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
+          "pairs": {
+            "items": {
+              "$ref": "#/components/schemas/PairedMealEpisodeOut"
+            },
+            "title": "Pairs",
+            "type": "array"
+          },
+          "patterns": {
+            "items": {
+              "$ref": "#/components/schemas/PairedMealPatternOut"
+            },
+            "title": "Patterns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "status",
+          "data_scope",
+          "window_days",
+          "explicit_episode_count",
+          "complete_pair_count",
+          "incomplete_or_invalid_episode_count",
+          "pairing_definition",
+          "interpretation_notice",
+          "evidence_id",
+          "limitations",
+          "pairs",
+          "patterns"
+        ],
+        "title": "PairedMealResponseOut",
+        "type": "object"
+      },
+      "PriorityVectorOut": {
+        "properties": {
+          "safety_time_sensitivity": {
+            "const": "non_urgent_observation",
+            "title": "Safety Time Sensitivity",
+            "type": "string"
+          },
+          "clinical_relevance": {
+            "enum": [
+              "observational",
+              "review_worthy"
+            ],
+            "title": "Clinical Relevance",
+            "type": "string"
+          },
+          "persistence": {
+            "title": "Persistence",
+            "type": "string"
+          },
+          "change_from_personal_baseline_mg_dl": {
+            "title": "Change From Personal Baseline Mg Dl",
+            "type": "number"
+          },
+          "evidence_density": {
+            "enum": [
+              "limited",
+              "moderate",
+              "strong"
+            ],
+            "title": "Evidence Density",
+            "type": "string"
+          },
+          "actionability": {
+            "enum": [
+              "MONITOR",
+              "PREPARE_CLINICIAN_DISCUSSION"
+            ],
+            "title": "Actionability",
+            "type": "string"
+          },
+          "evidence_maturity": {
+            "title": "Evidence Maturity",
+            "type": "string"
+          },
+          "interruption_cost": {
+            "enum": [
+              "eligible",
+              "cooldown"
+            ],
+            "title": "Interruption Cost",
+            "type": "string"
+          }
+        },
+        "required": [
+          "safety_time_sensitivity",
+          "clinical_relevance",
+          "persistence",
+          "change_from_personal_baseline_mg_dl",
+          "evidence_density",
+          "actionability",
+          "evidence_maturity",
+          "interruption_cost"
+        ],
+        "title": "PriorityVectorOut",
+        "type": "object"
+      },
+      "ProactiveInsightOut": {
+        "properties": {
+          "observation_key": {
+            "title": "Observation Key",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "context",
+              "meal"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "new",
+              "monitoring",
+              "persisting",
+              "improving",
+              "resolved"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "surface_now": {
+            "title": "Surface Now",
+            "type": "boolean"
+          },
+          "what_changed": {
+            "title": "What Changed",
+            "type": "string"
+          },
+          "why_it_is_surfacing_now": {
+            "title": "Why It Is Surfacing Now",
+            "type": "string"
+          },
+          "evidence_window_days": {
+            "title": "Evidence Window Days",
+            "type": "integer"
+          },
+          "personal_baseline_comparison_mg_dl": {
+            "title": "Personal Baseline Comparison Mg Dl",
+            "type": "number"
+          },
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "distinct_days": {
+            "title": "Distinct Days",
+            "type": "integer"
+          },
+          "evidence_density": {
+            "enum": [
+              "limited",
+              "moderate",
+              "strong"
+            ],
+            "title": "Evidence Density",
+            "type": "string"
+          },
+          "limitations_or_missing_data": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations Or Missing Data",
+            "type": "array"
+          },
+          "allowed_next_step": {
+            "enum": [
+              "MONITOR",
+              "PREPARE_CLINICIAN_DISCUSSION"
+            ],
+            "title": "Allowed Next Step",
+            "type": "string"
+          },
+          "escalation_class": {
+            "const": "none",
+            "title": "Escalation Class",
+            "type": "string"
+          },
+          "evidence_id": {
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "source_version": {
+            "title": "Source Version",
+            "type": "string"
+          },
+          "priority": {
+            "$ref": "#/components/schemas/PriorityVectorOut"
+          }
+        },
+        "required": [
+          "observation_key",
+          "kind",
+          "state",
+          "surface_now",
+          "what_changed",
+          "why_it_is_surfacing_now",
+          "evidence_window_days",
+          "personal_baseline_comparison_mg_dl",
+          "observations",
+          "distinct_days",
+          "evidence_density",
+          "limitations_or_missing_data",
+          "allowed_next_step",
+          "escalation_class",
+          "evidence_id",
+          "source_version",
+          "priority"
+        ],
+        "title": "ProactiveInsightOut",
+        "type": "object"
+      },
+      "ProactivePreviewOut": {
+        "properties": {
+          "status": {
+            "enum": [
+              "available",
+              "cooldown",
+              "no_change",
+              "insufficient_data"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "attention_budget": {
+            "const": "one_non_urgent_item_per_24h",
+            "title": "Attention Budget",
+            "type": "string"
+          },
+          "cooldown_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cooldown Until"
+          },
+          "pending_count": {
+            "title": "Pending Count",
+            "type": "integer"
+          },
+          "safety_notice": {
+            "title": "Safety Notice",
+            "type": "string"
+          },
+          "item": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProactiveInsightOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "attention_budget",
+          "cooldown_until",
+          "pending_count",
+          "safety_notice",
+          "item"
+        ],
+        "title": "ProactivePreviewOut",
+        "type": "object"
+      },
+      "ProactiveFeedOut": {
+        "properties": {
+          "status": {
+            "enum": [
+              "surfaced",
+              "cooldown",
+              "no_change",
+              "insufficient_data"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "attention_budget": {
+            "const": "one_non_urgent_item_per_24h",
+            "title": "Attention Budget",
+            "type": "string"
+          },
+          "cooldown_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cooldown Until"
+          },
+          "pending_count": {
+            "title": "Pending Count",
+            "type": "integer"
+          },
+          "safety_notice": {
+            "title": "Safety Notice",
+            "type": "string"
+          },
+          "item": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProactiveInsightOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "attention_budget",
+          "cooldown_until",
+          "pending_count",
+          "safety_notice",
+          "item"
+        ],
+        "title": "ProactiveFeedOut",
+        "type": "object"
+      },
+      "CompanionAfterVisitOut": {
+        "properties": {
+          "status": {
+            "enum": [
+              "recorded",
+              "no_recorded_visit"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "anchor_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor Id"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "fact_count": {
+            "title": "Fact Count",
+            "type": "integer"
+          },
+          "latest_fact_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Fact At"
+          }
+        },
+        "required": [
+          "status",
+          "anchor_id",
+          "occurred_at",
+          "source",
+          "fact_count",
+          "latest_fact_at"
+        ],
+        "title": "CompanionAfterVisitOut",
+        "type": "object"
+      },
+      "CompanionChangeOut": {
+        "properties": {
+          "observation_key": {
+            "title": "Observation Key",
+            "type": "string"
+          },
+          "change_kind": {
+            "title": "Change Kind",
+            "type": "string"
+          },
+          "evidence_strength": {
+            "title": "Evidence Strength",
+            "type": "string"
+          },
+          "missing_data": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Data",
+            "type": "array"
+          },
+          "source_version": {
+            "title": "Source Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observation_key",
+          "change_kind",
+          "evidence_strength",
+          "missing_data",
+          "source_version"
+        ],
+        "title": "CompanionChangeOut",
+        "type": "object"
+      },
+      "CompanionOverviewOut": {
+        "properties": {
+          "pattern_status": {
+            "title": "Pattern Status",
+            "type": "string"
+          },
+          "review_status": {
+            "title": "Review Status",
+            "type": "string"
+          },
+          "review_anchor_captured_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Anchor Captured At"
+          },
+          "patterns": {
+            "items": {
+              "$ref": "#/components/schemas/CompanionPatternOut"
+            },
+            "title": "Patterns",
+            "type": "array"
+          },
+          "changes_since_review": {
+            "items": {
+              "$ref": "#/components/schemas/CompanionChangeOut"
+            },
+            "title": "Changes Since Review",
+            "type": "array"
+          },
+          "after_visit": {
+            "$ref": "#/components/schemas/CompanionAfterVisitOut"
+          },
+          "safety_notice": {
+            "title": "Safety Notice",
+            "type": "string"
+          },
+          "source_version": {
+            "const": "companion-overview.v1",
+            "title": "Source Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern_status",
+          "review_status",
+          "review_anchor_captured_at",
+          "patterns",
+          "changes_since_review",
+          "after_visit",
+          "safety_notice",
+          "source_version"
+        ],
+        "title": "CompanionOverviewOut",
+        "type": "object"
+      },
+      "CompanionPatternOut": {
+        "properties": {
+          "observation_key": {
+            "title": "Observation Key",
+            "type": "string"
+          },
+          "current_state": {
+            "title": "Current State",
+            "type": "string"
+          },
+          "markers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Markers",
+            "type": "array"
+          },
+          "evidence_density": {
+            "title": "Evidence Density",
+            "type": "string"
+          },
+          "recurrence_count": {
+            "title": "Recurrence Count",
+            "type": "integer"
+          },
+          "baseline_direction": {
+            "title": "Baseline Direction",
+            "type": "string"
+          },
+          "baseline_movement": {
+            "title": "Baseline Movement",
+            "type": "string"
+          },
+          "first_observed_at": {
+            "format": "date-time",
+            "title": "First Observed At",
+            "type": "string"
+          },
+          "last_observed_at": {
+            "format": "date-time",
+            "title": "Last Observed At",
+            "type": "string"
+          },
+          "evidence_id": {
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "source_version": {
+            "title": "Source Version",
+            "type": "string"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "observation_key",
+          "current_state",
+          "markers",
+          "evidence_density",
+          "recurrence_count",
+          "baseline_direction",
+          "baseline_movement",
+          "first_observed_at",
+          "last_observed_at",
+          "evidence_id",
+          "source_version",
+          "limitations"
+        ],
+        "title": "CompanionPatternOut",
+        "type": "object"
+      },
+      "CompanionNextActionOut": {
+        "properties": {
+          "status": {
+            "enum": [
+              "suggested",
+              "cooldown",
+              "no_change",
+              "insufficient_data"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "attention_budget": {
+            "const": "one_non_urgent_item_per_24h",
+            "title": "Attention Budget",
+            "type": "string"
+          },
+          "pending_count": {
+            "title": "Pending Count",
+            "type": "integer"
+          },
+          "safety_notice": {
+            "title": "Safety Notice",
+            "type": "string"
+          },
+          "suggestion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompanionNextActionSuggestionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "attention_budget",
+          "pending_count",
+          "safety_notice",
+          "suggestion"
+        ],
+        "title": "CompanionNextActionOut",
+        "type": "object"
+      },
+      "CompanionNextActionPatientFactsOut": {
+        "properties": {
+          "observation_key": {
+            "title": "Observation Key",
+            "type": "string"
+          },
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "distinct_days": {
+            "title": "Distinct Days",
+            "type": "integer"
+          },
+          "recurrence_count": {
+            "title": "Recurrence Count",
+            "type": "integer"
+          },
+          "first_observed_at": {
+            "format": "date-time",
+            "title": "First Observed At",
+            "type": "string"
+          },
+          "last_observed_at": {
+            "format": "date-time",
+            "title": "Last Observed At",
+            "type": "string"
+          },
+          "evidence_density": {
+            "title": "Evidence Density",
+            "type": "string"
+          },
+          "evidence_window_days": {
+            "title": "Evidence Window Days",
+            "type": "integer"
+          },
+          "personal_baseline_comparison_mg_dl": {
+            "title": "Personal Baseline Comparison Mg Dl",
+            "type": "number"
+          }
+        },
+        "required": [
+          "observation_key",
+          "observations",
+          "distinct_days",
+          "recurrence_count",
+          "first_observed_at",
+          "last_observed_at",
+          "evidence_density",
+          "evidence_window_days",
+          "personal_baseline_comparison_mg_dl"
+        ],
+        "title": "CompanionNextActionPatientFactsOut",
+        "type": "object"
+      },
+      "CompanionNextActionSuggestionOut": {
+        "properties": {
+          "suggestion_class": {
+            "enum": [
+              "UNDERSTAND_DATA",
+              "MONITOR",
+              "PREPARE_CLINICIAN_DISCUSSION"
+            ],
+            "title": "Suggestion Class",
+            "type": "string"
+          },
+          "observation_key": {
+            "title": "Observation Key",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "proactive_state": {
+            "title": "Proactive State",
+            "type": "string"
+          },
+          "change_since_review": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Since Review"
+          },
+          "patient_facts": {
+            "$ref": "#/components/schemas/CompanionNextActionPatientFactsOut"
+          },
+          "missing_data": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Data",
+            "type": "array"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
+          "proactive_source_version": {
+            "title": "Proactive Source Version",
+            "type": "string"
+          },
+          "pattern_source_version": {
+            "title": "Pattern Source Version",
+            "type": "string"
+          },
+          "source_version": {
+            "title": "Source Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "suggestion_class",
+          "observation_key",
+          "reason",
+          "proactive_state",
+          "change_since_review",
+          "patient_facts",
+          "missing_data",
+          "limitations",
+          "proactive_source_version",
+          "pattern_source_version",
+          "source_version"
+        ],
+        "title": "CompanionNextActionSuggestionOut",
+        "type": "object"
+      },
+      "CGMConnectionResponse": {
+        "properties": {
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "auth_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Type"
+          },
+          "credential_set": {
+            "default": false,
+            "title": "Credential Set",
+            "type": "boolean"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "last_sync_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sync At"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "last_error_code": {
+            "default": "",
+            "title": "Last Error Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connected"
+        ],
+        "title": "CGMConnectionResponse",
+        "type": "object"
+      },
+      "CGMConnectionInput": {
+        "properties": {
+          "source": {
+            "enum": [
+              "dexcom",
+              "libre",
+              "linx"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "auth_type": {
+            "enum": [
+              "bearer",
+              "api_secret"
+            ],
+            "title": "Auth Type",
+            "type": "string"
+          },
+          "credential": {
+            "title": "Credential",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "base_url",
+          "auth_type",
+          "credential"
+        ],
+        "title": "CGMConnectionInput",
+        "type": "object"
+      },
+      "CGMSyncResponse": {
+        "properties": {
+          "received": {
+            "title": "Received",
+            "type": "integer"
+          },
+          "inserted": {
+            "title": "Inserted",
+            "type": "integer"
+          },
+          "last_recorded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Recorded At"
+          }
+        },
+        "required": [
+          "received",
+          "inserted"
+        ],
+        "title": "CGMSyncResponse",
+        "type": "object"
+      },
+      "CGMReadingResponse": {
+        "properties": {
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "glucose_mg_dl": {
+            "title": "Glucose Mg Dl",
+            "type": "integer"
+          },
+          "trend": {
+            "title": "Trend",
+            "type": "string"
+          },
+          "device": {
+            "title": "Device",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recorded_at",
+          "glucose_mg_dl",
+          "trend",
+          "device",
+          "source"
+        ],
+        "title": "CGMReadingResponse",
+        "type": "object"
+      },
+      "ConsentStatusSchema": {
+        "properties": {
+          "ai_consent_given": {
+            "title": "Ai Consent Given",
+            "type": "boolean"
+          },
+          "ai_consent_given_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ai Consent Given At"
+          },
+          "notice_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notice Version"
+          },
+          "notice_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notice Hash"
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
+          }
+        },
+        "required": [
+          "ai_consent_given",
+          "ai_consent_given_at"
+        ],
+        "title": "ConsentStatusSchema",
+        "type": "object"
+      },
+      "ConsentGrantSchema": {
+        "properties": {
+          "notice_version": {
+            "title": "Notice Version",
+            "type": "string"
+          },
+          "notice_hash": {
+            "title": "Notice Hash",
+            "type": "string"
+          },
+          "locale": {
+            "title": "Locale",
+            "type": "string"
+          }
+        },
+        "required": [
+          "notice_version",
+          "notice_hash",
+          "locale"
+        ],
+        "title": "ConsentGrantSchema",
+        "type": "object"
+      },
+      "DeleteConfirmSchema": {
+        "properties": {
+          "confirm": {
+            "title": "Confirm",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "DeleteConfirmSchema",
+        "type": "object"
+      },
+      "ProactivityGrant": {
+        "additionalProperties": false,
+        "properties": {
+          "locale": {
+            "enum": [
+              "fr",
+              "en",
+              "ar"
+            ],
+            "title": "Locale",
+            "type": "string"
+          },
+          "notice_version": {
+            "title": "Notice Version",
+            "type": "string"
+          },
+          "notice_digest": {
+            "title": "Notice Digest",
+            "type": "string"
+          },
+          "acknowledgment": {
+            "const": "ENABLE_D2_IN_APP_PROACTIVITY",
+            "title": "Acknowledgment",
+            "type": "string"
+          }
+        },
+        "required": [
+          "locale",
+          "notice_version",
+          "notice_digest",
+          "acknowledgment"
+        ],
+        "title": "ProactivityGrant",
+        "type": "object"
+      },
+      "ImportResultResponse": {
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "imported": {
+            "title": "Imported",
+            "type": "integer"
+          },
+          "duplicates": {
+            "title": "Duplicates",
+            "type": "integer"
+          },
+          "rejected_values": {
+            "title": "Rejected Values",
+            "type": "integer"
+          },
+          "skipped_rows": {
+            "title": "Skipped Rows",
+            "type": "integer"
+          },
+          "detected_format": {
+            "title": "Detected Format",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "sample": {
+            "items": {
+              "$ref": "#/components/schemas/ImportSample"
+            },
+            "title": "Sample",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "imported",
+          "duplicates",
+          "rejected_values",
+          "skipped_rows",
+          "detected_format",
+          "sample"
+        ],
+        "title": "ImportResultResponse",
+        "type": "object"
+      },
+      "ImportSample": {
+        "properties": {
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "glucose": {
+            "title": "Glucose",
+            "type": "number"
+          },
+          "record_type": {
+            "title": "Record Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "glucose",
+          "record_type"
+        ],
+        "title": "ImportSample",
+        "type": "object"
+      },
+      "GlucoseReadingOut": {
+        "properties": {
+          "value_mgdl": {
+            "title": "Value Mgdl",
+            "type": "number"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "original_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Value"
+          },
+          "original_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Unit"
+          }
+        },
+        "required": [
+          "value_mgdl"
+        ],
+        "title": "GlucoseReadingOut",
+        "type": "object"
+      },
+      "LabValuesOut": {
+        "properties": {
+          "hba1c_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hba1C Pct"
+          },
+          "fasting_glucose_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fasting Glucose Mgdl"
+          },
+          "total_cholesterol_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Cholesterol Mgdl"
+          },
+          "hdl_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hdl Mgdl"
+          },
+          "ldl_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldl Mgdl"
+          },
+          "triglycerides_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Triglycerides Mgdl"
+          },
+          "creatinine_umol": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Creatinine Umol"
+          },
+          "report_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report Date"
+          }
+        },
+        "title": "LabValuesOut",
+        "type": "object"
+      },
+      "MedicationOut": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "dose": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dose"
+          },
+          "frequency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency"
+          },
+          "drug_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drug Type"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "MedicationOut",
+        "type": "object"
+      },
+      "PulperPreviewResponse": {
+        "description": "Returned on confirm=False \u2014 nothing persisted yet.",
+        "properties": {
+          "batch_id": {
+            "title": "Batch Id",
+            "type": "string"
+          },
+          "document_type": {
+            "title": "Document Type",
+            "type": "string"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "needs_review": {
+            "title": "Needs Review",
+            "type": "boolean"
+          },
+          "glucose_readings": {
+            "items": {
+              "$ref": "#/components/schemas/GlucoseReadingOut"
+            },
+            "title": "Glucose Readings",
+            "type": "array"
+          },
+          "lab_values": {
+            "$ref": "#/components/schemas/LabValuesOut"
+          },
+          "medications": {
+            "items": {
+              "$ref": "#/components/schemas/MedicationOut"
+            },
+            "title": "Medications",
+            "type": "array"
+          },
+          "clinical_notes": {
+            "title": "Clinical Notes",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          }
+        },
+        "required": [
+          "batch_id",
+          "document_type",
+          "source_format",
+          "confidence",
+          "needs_review",
+          "glucose_readings",
+          "lab_values",
+          "medications",
+          "clinical_notes",
+          "warnings",
+          "errors"
+        ],
+        "title": "PulperPreviewResponse",
+        "type": "object"
+      },
+      "PulperConfirmResponse": {
+        "description": "Returned on confirm=True \u2014 data has been persisted.",
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "lab_report_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lab Report Id"
+          },
+          "glucose_readings_saved": {
+            "title": "Glucose Readings Saved",
+            "type": "integer"
+          },
+          "glucose_duplicates": {
+            "title": "Glucose Duplicates",
+            "type": "integer"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "lab_report_id",
+          "glucose_readings_saved",
+          "glucose_duplicates",
+          "errors"
+        ],
+        "title": "PulperConfirmResponse",
+        "type": "object"
+      },
+      "LabReportOut": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "document_type": {
+            "title": "Document Type",
+            "type": "string"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "report_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report Date"
+          },
+          "hba1c_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hba1C Pct"
+          },
+          "fasting_glucose_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fasting Glucose Mgdl"
+          },
+          "total_cholesterol_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Cholesterol Mgdl"
+          },
+          "hdl_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hdl Mgdl"
+          },
+          "ldl_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldl Mgdl"
+          },
+          "triglycerides_mgdl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Triglycerides Mgdl"
+          },
+          "creatinine_umol": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Creatinine Umol"
+          },
+          "glucose_readings_imported": {
+            "title": "Glucose Readings Imported",
+            "type": "integer"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "clinical_notes": {
+            "title": "Clinical Notes",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "document_type",
+          "source_format",
+          "report_date",
+          "hba1c_pct",
+          "fasting_glucose_mgdl",
+          "total_cholesterol_mgdl",
+          "hdl_mgdl",
+          "ldl_mgdl",
+          "triglycerides_mgdl",
+          "creatinine_umol",
+          "glucose_readings_imported",
+          "confidence",
+          "clinical_notes",
+          "created_at"
+        ],
+        "title": "LabReportOut",
+        "type": "object"
+      },
+      "InsightSchema": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "priority": {
+            "title": "Priority",
+            "type": "integer"
+          },
+          "icon": {
+            "title": "Icon",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "action": {
+            "title": "Action",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "priority",
+          "icon",
+          "title",
+          "content",
+          "action"
+        ],
+        "title": "InsightSchema",
+        "type": "object"
+      },
+      "KPISchema": {
+        "properties": {
+          "avg_glucose": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Glucose"
+          },
+          "std_dev": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Std Dev"
+          },
+          "cv_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cv Pct"
+          },
+          "tir_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tir Pct"
+          },
+          "tar_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tar Pct"
+          },
+          "tbr_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tbr Pct"
+          },
+          "gmi": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gmi"
+          },
+          "log_count": {
+            "title": "Log Count",
+            "type": "integer"
+          },
+          "days_with_data": {
+            "title": "Days With Data",
+            "type": "integer"
+          },
+          "gmi_confidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gmi Confidence"
+          },
+          "gmi_basis": {
+            "default": "",
+            "title": "Gmi Basis",
+            "type": "string"
+          }
+        },
+        "required": [
+          "avg_glucose",
+          "std_dev",
+          "cv_pct",
+          "tir_pct",
+          "tar_pct",
+          "tbr_pct",
+          "gmi",
+          "log_count",
+          "days_with_data"
+        ],
+        "title": "KPISchema",
+        "type": "object"
+      },
+      "SummaryResponse": {
+        "properties": {
+          "kpis": {
+            "$ref": "#/components/schemas/KPISchema"
+          },
+          "insights": {
+            "items": {
+              "$ref": "#/components/schemas/InsightSchema"
+            },
+            "title": "Insights",
+            "type": "array"
+          },
+          "daily_averages": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Daily Averages",
+            "type": "array"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "has_sufficient_data": {
+            "title": "Has Sufficient Data",
+            "type": "boolean"
+          },
+          "ai_provider": {
+            "default": "groq",
+            "title": "Ai Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kpis",
+          "insights",
+          "daily_averages",
+          "generated_at",
+          "has_sufficient_data"
+        ],
+        "title": "SummaryResponse",
+        "type": "object"
+      },
+      "SummaryRequest": {
+        "properties": {
+          "days": {
+            "default": 21,
+            "title": "Days",
+            "type": "integer"
+          },
+          "target_low": {
+            "default": 70.0,
+            "title": "Target Low",
+            "type": "number"
+          },
+          "target_high": {
+            "default": 180.0,
+            "title": "Target High",
+            "type": "number"
+          }
+        },
+        "title": "SummaryRequest",
+        "type": "object"
+      },
+      "DoctorBriefResponse": {
+        "properties": {
+          "doctor_brief": {
+            "title": "Doctor Brief",
+            "type": "string"
+          },
+          "narrative": {
+            "title": "Narrative",
+            "type": "string"
+          },
+          "key_insight": {
+            "title": "Key Insight",
+            "type": "string"
+          },
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "has_sufficient_data": {
+            "title": "Has Sufficient Data",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "doctor_brief",
+          "narrative",
+          "key_insight",
+          "days",
+          "generated_at",
+          "has_sufficient_data"
+        ],
+        "title": "DoctorBriefResponse",
+        "type": "object"
+      },
+      "ChatResponse": {
+        "properties": {
+          "reply": {
+            "title": "Reply",
+            "type": "string"
+          },
+          "response_mode": {
+            "default": "standard",
+            "title": "Response Mode",
+            "type": "string"
+          },
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "is_emergency": {
+            "default": false,
+            "title": "Is Emergency",
+            "type": "boolean"
+          },
+          "reply_language": {
+            "default": "fr",
+            "title": "Reply Language",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reply",
+          "conversation_id",
+          "timestamp"
+        ],
+        "title": "ChatResponse",
+        "type": "object"
+      },
+      "ChatRequest": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "context_days": {
+            "default": 14,
+            "title": "Context Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "ChatRequest",
+        "type": "object"
+      },
+      "GlucometerOcrResponse": {
+        "description": "Phase 11-D: glucose value extracted from a glucometer photo (web OCR fallback).",
+        "properties": {
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "fallback": {
+            "title": "Fallback",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "value",
+          "unit",
+          "confidence",
+          "fallback"
+        ],
+        "title": "GlucometerOcrResponse",
+        "type": "object"
+      },
+      "MealImageRequest": {
+        "description": "Phase 11-C: meal photo sent as base64-encoded image.",
+        "properties": {
+          "image_base64": {
+            "title": "Image Base64",
+            "type": "string"
+          },
+          "mime_type": {
+            "default": "image/jpeg",
+            "title": "Mime Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "image_base64"
+        ],
+        "title": "MealImageRequest",
+        "type": "object"
+      },
+      "MealImageResponse": {
+        "description": "Phase 11-C: list of identified French food names + confidence level.\nfallback=True means the LLM could not identify foods \u2014 UI shows a manual fallback.",
+        "properties": {
+          "foods": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Foods",
+            "type": "array"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "fallback": {
+            "title": "Fallback",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "foods",
+          "confidence",
+          "fallback"
+        ],
+        "title": "MealImageResponse",
+        "type": "object"
+      },
+      "VoiceChatResponse": {
+        "properties": {
+          "transcript": {
+            "title": "Transcript",
+            "type": "string"
+          },
+          "reply": {
+            "title": "Reply",
+            "type": "string"
+          },
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "is_emergency": {
+            "default": false,
+            "title": "Is Emergency",
+            "type": "boolean"
+          },
+          "reply_language": {
+            "default": "fr",
+            "title": "Reply Language",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transcript",
+          "reply",
+          "conversation_id",
+          "timestamp"
+        ],
+        "title": "VoiceChatResponse",
+        "type": "object"
+      },
+      "TranscribeResponse": {
+        "properties": {
+          "transcript": {
+            "title": "Transcript",
+            "type": "string"
+          },
+          "confidence": {
+            "default": "medium",
+            "title": "Confidence",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transcript"
+        ],
+        "title": "TranscribeResponse",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "HybridBearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "SessionAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "sessionid"
+      }
+    }
+  },
+  "servers": []
+}

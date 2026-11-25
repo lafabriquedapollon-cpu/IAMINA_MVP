@@ -1,0 +1,35 @@
+# Architectural boundary enforcement (import-linter).
+# Run: cd backend && lint-imports
+#
+# Ratchet model: the boundaries we built (P4.5 companion seam, chassis/module
+# split) are enforced strictly. Remaining pre-existing leaks are allow-listed
+# below as documented debt — no NEW leak can be added.
+
+[importlinter]
+root_packages =
+    core
+    companion
+    diabetes
+    llm
+
+[importlinter:contract:companion-independent-of-modules]
+name = Companion runtime must not import any condition module (P4.5 seam)
+type = forbidden
+source_modules =
+    companion
+forbidden_modules =
+    diabetes
+
+[importlinter:contract:core-independent-of-modules]
+name = Chassis (core) must not import any condition module
+type = forbidden
+source_modules =
+    core
+forbidden_modules =
+    diabetes
+ignore_imports =
+    # Tests may use module fixtures/models.
+    core.tests.** -> diabetes.**
+    # DEBT: migration-only identity bootstrap still creates the diabetes module
+    # shell. Remove once module activation owns extension creation.
+    core.auth_migration -> diabetes.models

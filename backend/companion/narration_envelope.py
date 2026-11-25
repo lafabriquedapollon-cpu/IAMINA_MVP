@@ -1,0 +1,262 @@
+"""Shadow-mode narration envelope helpers.
+
+Shadow mode is deliberately non-authoritative: it builds and validates the
+future narrator contract without changing the patient-visible reply or calling
+an LLM.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from core.contracts.advice_decision import AdviceDecision
+from core.contracts.advice_resolution import AdviceResolution
+from core.contracts.capabilities import Capability
+from core.contracts.narration_envelope import (
+    LocaleContract,
+    NarrationEnvelope,
+    NarrationEnvelopeError,
+    NarrationFact,
+    NarrationSpeechAct,
+)
+
+_FACT_TOKEN_RE = re.compile(r"\{\{NVF_[A-F0-9]{32}\}\}")
+_BODY_TOKEN_RE = re.compile(r"\{\{NVB_[A-F0-9]{32}\}\}")
+_CLINICAL_NUMBER_RE = re.compile(
+    r"(?<!\w)\d{1,4}(?:[.,]\d+)?\s*(?:"
+    r"mg\s*/\s*d[lL]|mmol\s*/\s*[lL]|mm\s*Hg|bpm|%|"
+    r"(?:IU|UI|U)\b|ملغ\s*/\s*دل|مليمول\s*/\s*ل|وحد(?:ة|ات))",
+    re.IGNORECASE,
+)
+
+
+class NarrationVerificationError(PermissionError):
+    """Raised when model-formulated text violates its narration envelope."""
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowNarrationResult:
+    envelope: NarrationEnvelope
+    source_reply: str
+    structurally_valid: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedShadowNarrationResult:
+    envelope: NarrationEnvelope
+    provider_candidate: str
+    reinjected_reply: str
+    structurally_valid: bool
+
+
+def _speech_act(decision: AdviceDecision) -> NarrationSpeechAct:
+    actions = set(decision.allowed_actions)
+    if Capability.PREPARE_CLINICIAN_QUESTIONS.value in actions:
+        return NarrationSpeechAct.PREPARE_CLINICIAN_QUESTIONS
+    if Capability.SUMMARIZE_APPROVED_DATA.value in actions:
+        return NarrationSpeechAct.SUMMARIZE_APPROVED_DATA
+    if Capability.EXPLAIN_APPROVED_DATA.value in actions:
+        return NarrationSpeechAct.EXPLAIN_APPROVED_DATA
+    return NarrationSpeechAct.RESTATE_GOVERNED_ADVICE
+
+
+def locale_contract(
+    language: str,
+    *,
+    prefer_latin_script: bool = False,
+) -> LocaleContract:
+    if language == "ar-MA":
+        return LocaleContract(
+            locale=language,
+            script="latin" if prefer_latin_script else "arabic",
+            register="casual-native",
+            code_switching=prefer_latin_script,
+        )
+    if language.startswith("ar-"):
+        return LocaleContract(
+            locale=language,
+            script="arabic",
+            register="daily-natural",
+            code_switching=False,
+        )
+    return LocaleContract(
+        locale=language,
+        script="default",
+        register="natural",
+        code_switching=False,
+    )
+
+
+def build_shadow_envelope(
+    resolution: AdviceResolution,
+    *,
+    language: str,
+    prefer_latin_script: bool = False,
+    facts: tuple[NarrationFact, ...] = (),
+) -> NarrationEnvelope:
+    """Build a local envelope without exposing the deterministic reply to a model."""
+    if not isinstance(resolution, AdviceResolution):
+        raise NarrationEnvelopeError("resolution must be an AdviceResolution")
+
+    decision = resolution.decision
+    return NarrationEnvelope(
+        decision=decision,
+        speech_act=_speech_act(decision),
+        locale=locale_contract(
+            language,
+            prefer_latin_script=prefer_latin_script,
+        ),
+        facts=facts,
+        allowed_claims=tuple(decision.required_facts),
+        required_claims=tuple(decision.required_facts),
+        forbidden_claims=tuple(decision.forbidden_actions),
+        relationship_context={},
+        style_contract={
+            "goal": "formulation_only",
+            "clinical_reasoning": "forbidden",
+            "authority_change": "forbidden",
+        },
+        fallback_reply=resolution.reply,
+        verifier_id="structural-shadow.v1",
+    )
+
+
+def verify_and_reinject_narration(
+    candidate: str,
+    envelope: NarrationEnvelope,
+) -> str:
+    """Validate token integrity then locally restore protected fact values.
+
+    This structural verifier intentionally does not claim semantic equivalence.
+    Family-specific semantic verifiers remain authoritative for clinical meaning.
+    """
+    if not isinstance(candidate, str) or not candidate.strip():
+        raise NarrationVerificationError("candidate must be non-empty")
+
+    known = {
+        envelope.fact_token(fact.key): fact
+        for fact in envelope.facts
+    }
+    observed = set(_FACT_TOKEN_RE.findall(candidate))
+    unknown = observed - set(known)
+    if unknown:
+        raise NarrationVerificationError("candidate contains unknown fact tokens")
+
+    for fact in envelope.facts:
+        token = envelope.fact_token(fact.key)
+        if fact.required and token not in observed:
+            raise NarrationVerificationError(
+                f"candidate omitted required fact token {fact.key}"
+            )
+        if fact.rendered_value in candidate:
+            raise NarrationVerificationError(
+                f"candidate exposed exact local fact value {fact.key}"
+            )
+
+    scrubbed = _FACT_TOKEN_RE.sub("", candidate)
+    if _CLINICAL_NUMBER_RE.search(scrubbed):
+        raise NarrationVerificationError(
+            "candidate introduced an untokenized clinical number"
+        )
+
+    result = candidate
+    for fact in envelope.facts:
+        result = result.replace(
+            envelope.fact_token(fact.key),
+            fact.rendered_value,
+        )
+
+    if _FACT_TOKEN_RE.search(result):
+        raise NarrationVerificationError("unresolved fact token remains")
+    return result.strip()
+
+
+def verify_and_reinject_protected_narration(
+    candidate: str,
+    envelope: NarrationEnvelope,
+) -> str:
+    """Verify one opaque protected-body token, then reinsert the local clinical body.
+
+    The existing fact-token verifier remains unchanged. This additive path is reserved
+    for a future controlled live narrator where the provider may only generate a
+    non-clinical wrapper around the deterministic governed body.
+    """
+    if not isinstance(candidate, str) or not candidate.strip():
+        raise NarrationVerificationError("candidate must be non-empty")
+
+    body_tokens = _BODY_TOKEN_RE.findall(candidate)
+    if not body_tokens:
+        raise NarrationVerificationError("candidate omitted protected body token")
+    if len(body_tokens) != 1:
+        raise NarrationVerificationError(
+            "candidate must contain exactly one protected body token"
+        )
+    if body_tokens[0] != envelope.protected_body_token:
+        raise NarrationVerificationError(
+            "candidate contains a replayed or unknown body token"
+        )
+    if envelope.fallback_reply and envelope.fallback_reply in candidate:
+        raise NarrationVerificationError("candidate exposed protected local body")
+
+    fact_restored = verify_and_reinject_narration(candidate, envelope)
+    result = fact_restored.replace(
+        envelope.protected_body_token,
+        envelope.fallback_reply,
+    )
+    if _BODY_TOKEN_RE.search(result):
+        raise NarrationVerificationError("unresolved protected body token remains")
+    return result.strip()
+
+
+def shadow_validate_resolution(
+    resolution: AdviceResolution,
+    *,
+    language: str,
+    prefer_latin_script: bool = False,
+) -> ShadowNarrationResult:
+    """Exercise the envelope contract without changing runtime output."""
+    envelope = build_shadow_envelope(
+        resolution,
+        language=language,
+        prefer_latin_script=prefer_latin_script,
+    )
+    return ShadowNarrationResult(
+        envelope=envelope,
+        source_reply=resolution.reply,
+        structurally_valid=True,
+    )
+
+
+def shadow_validate_protected_resolution(
+    resolution: AdviceResolution,
+    *,
+    language: str,
+    prefer_latin_script: bool = False,
+) -> ProtectedShadowNarrationResult:
+    """Exercise protected-body reinjection locally without any network call."""
+    envelope = build_shadow_envelope(
+        resolution,
+        language=language,
+        prefer_latin_script=prefer_latin_script,
+    )
+    candidate = envelope.protected_body_token
+    reinjected = verify_and_reinject_protected_narration(candidate, envelope)
+    return ProtectedShadowNarrationResult(
+        envelope=envelope,
+        provider_candidate=candidate,
+        reinjected_reply=reinjected,
+        structurally_valid=(reinjected == resolution.reply),
+    )
+
+
+__all__ = [
+    "NarrationVerificationError",
+    "ProtectedShadowNarrationResult",
+    "ShadowNarrationResult",
+    "build_shadow_envelope",
+    "locale_contract",
+    "shadow_validate_protected_resolution",
+    "shadow_validate_resolution",
+    "verify_and_reinject_narration",
+    "verify_and_reinject_protected_narration",
+]
