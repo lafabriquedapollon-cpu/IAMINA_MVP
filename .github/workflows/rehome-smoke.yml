@@ -1359,6 +1359,16 @@ jobs:
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium
           D2_BROWSER_TARGET=chromium "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+      - name: D1 actual Drift encrypted checkpoint — chromium
+        if: ${{ github.head_ref == 'phase1/integration-web' }}
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          cd frontend
+          flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
+          cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs "$RUNNER_TEMP/d1-runtime-web/"
+          cd ..
+          D1_RUNTIME_ENGINE=chromium D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain D2 candidate screenshots and exact SHA matrix
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -1529,6 +1539,16 @@ jobs:
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install webkit
           "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+      - name: D1 actual Drift encrypted checkpoint — webkit
+        if: ${{ github.head_ref == 'phase1/integration-web' }}
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          cd frontend
+          flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
+          cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs "$RUNNER_TEMP/d1-runtime-web/"
+          cd ..
+          D1_RUNTIME_ENGINE=webkit D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain macOS D2 evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
