@@ -124,7 +124,7 @@ void main() {
 
   test('local enrollment is exposed only after secure marker persistence', () {
     final source = File('lib/services/auth_service.dart').readAsStringSync();
-    final methodStart = source.indexOf('Future<void> _ensureLocalEnrollment()');
+    final methodStart = source.indexOf('Future<void> enrollLocalDevice()');
     final writeIndex = source.indexOf(
       'await _storage.write(key: _localSessionKey, value: _localSessionValue);',
       methodStart,

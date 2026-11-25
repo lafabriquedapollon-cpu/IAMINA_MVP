@@ -76,6 +76,11 @@ class AuthCredentialsRejected implements Exception {
   const AuthCredentialsRejected();
 }
 
+/// A newer identity action retired this response. No account was admitted.
+class AuthTransitionRetired implements Exception {
+  const AuthTransitionRetired();
+}
+
 class AuthSignInServiceUnavailable implements Exception {
   final int statusCode;
   const AuthSignInServiceUnavailable(this.statusCode);
@@ -160,6 +165,40 @@ class AuthService extends ChangeNotifier {
   bool _initialized = false;
   bool _auditSession = false;
   bool _remoteCredentialVerified = false;
+  int _identityGeneration = 0;
+  bool _disposed = false;
+  Future<void> _identityStorageTail = Future<void>.value();
+
+  int _beginIdentityTransition() {
+    if (_disposed) throw const AuthTransitionRetired();
+    return ++_identityGeneration;
+  }
+
+  void _requireIdentityTransition(int generation) {
+    if (_disposed || generation != _identityGeneration) {
+      throw const AuthTransitionRetired();
+    }
+  }
+
+  // Native credential commits and removals must never interleave within this
+  // service. Network requests are deliberately outside the storage lane.
+  // This is not a cross-document lock or a crash-atomic storage transaction.
+  Future<void> _serializeIdentityStorage(Future<void> Function() operation) {
+    final pending = _identityStorageTail.then((_) => operation());
+    _identityStorageTail = pending.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return pending;
+  }
+
+  Future<void> _deleteNativeCredentialStorage({
+    required bool clearEnrollment,
+  }) async {
+    await _storage.delete(key: _tokenKey);
+    await _storage.delete(key: _nativeIdentityKey);
+    if (clearEnrollment) await _storage.delete(key: _localSessionKey);
+  }
 
   AuthService({
     FirebaseAuth? auth,
@@ -267,51 +306,58 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<void> initialize() async {
-    try {
-      _localSessionEnrolled =
-          await _storage.read(key: _localSessionKey) == _localSessionValue;
-      final storedToken = await _storage.read(key: _tokenKey);
-      if (_isExpectedNativeBearerShape(storedToken)) {
-        _nativeToken = storedToken;
-        _nativeAccountId = null;
-        // Local-first startup: no network required to validate a cached binding.
-        final binding = await _storage.read(key: _nativeIdentityKey);
-        if (binding != null) {
-          try {
-            final parsed = jsonDecode(binding);
-            if (parsed is Map<String, dynamic> &&
-                parsed['token'] == storedToken &&
-                parsed['user_id'] is int &&
-                (parsed['user_id'] as int) > 0) {
-              _nativeAccountId = parsed['user_id'] as int;
+    final generation = _beginIdentityTransition();
+    await _serializeIdentityStorage(() async {
+      _requireIdentityTransition(generation);
+      var enrolled = false;
+      String? token;
+      int? accountId;
+      try {
+        enrolled = await _storage.read(key: _localSessionKey) == _localSessionValue;
+        _requireIdentityTransition(generation);
+        final storedToken = await _storage.read(key: _tokenKey);
+        _requireIdentityTransition(generation);
+        if (_isExpectedNativeBearerShape(storedToken)) {
+          token = storedToken;
+          // A cached binding restores the namespace, not verified authority.
+          final binding = await _storage.read(key: _nativeIdentityKey);
+          _requireIdentityTransition(generation);
+          if (binding != null) {
+            try {
+              final parsed = jsonDecode(binding);
+              if (parsed is Map<String, dynamic> &&
+                  parsed['token'] == storedToken &&
+                  parsed['user_id'] is int &&
+                  (parsed['user_id'] as int) > 0) {
+                accountId = parsed['user_id'] as int;
+              }
+            } on FormatException {
+              // Invalid cached binding must never become a patient ID.
             }
-          } on FormatException {
-            // Invalid cached binding must never become a patient ID.
           }
+          if (!enrolled) {
+            await _storage.write(key: _localSessionKey, value: _localSessionValue);
+            _requireIdentityTransition(generation);
+            enrolled = true;
+          }
+        } else if (storedToken != null) {
+          await _deleteNativeCredentialStorage(clearEnrollment: false);
         }
-        _remoteCredentialVerified = false;
-        await _ensureLocalEnrollment();
-      } else if (storedToken != null) {
-        await _storage.delete(key: _tokenKey);
-        await _storage.delete(key: _nativeIdentityKey);
-        _nativeToken = null;
-        _nativeAccountId = null;
-        _remoteCredentialVerified = false;
+      } catch (error, stackTrace) {
+        _requireIdentityTransition(generation);
+        _failureLogger('initialize', error.runtimeType.toString(), stackTrace);
+        token = null;
+        accountId = null;
+        enrolled = false;
       }
-    } catch (error, stackTrace) {
-      _failureLogger(
-        'initialize',
-        error.runtimeType.toString(),
-        stackTrace,
-      );
-      _nativeToken = null;
-      _nativeAccountId = null;
-      _localSessionEnrolled = false;
+      _requireIdentityTransition(generation);
+      _nativeToken = token;
+      _nativeAccountId = accountId;
+      _localSessionEnrolled = enrolled;
       _remoteCredentialVerified = false;
-    } finally {
       _initialized = true;
       _notifyAuthChanged();
-    }
+    });
   }
 
   /// Enrol this installation for local-first use without contacting a server.
@@ -320,19 +366,30 @@ class AuthService extends ChangeNotifier {
     if (!_initialized) {
       throw StateError('Local enrollment requires initialized authentication');
     }
-    final existingId = await _storage.read(key: _localDeviceIdKey);
-    if (existingId == null || existingId.isEmpty) {
-      await _storage.write(key: _localDeviceIdKey, value: const Uuid().v4());
-    }
-    await _ensureLocalEnrollment();
-    _remoteCredentialVerified = false;
-    _notifyAuthChanged();
+    final generation = _beginIdentityTransition();
+    await _serializeIdentityStorage(() async {
+      _requireIdentityTransition(generation);
+      final existingId = await _storage.read(key: _localDeviceIdKey);
+      _requireIdentityTransition(generation);
+      if (existingId == null || existingId.isEmpty) {
+        await _storage.write(key: _localDeviceIdKey, value: const Uuid().v4());
+        _requireIdentityTransition(generation);
+      }
+      if (!_localSessionEnrolled) {
+        await _storage.write(key: _localSessionKey, value: _localSessionValue);
+        _requireIdentityTransition(generation);
+      }
+      _localSessionEnrolled = true;
+      _remoteCredentialVerified = false;
+      _notifyAuthChanged();
+    });
   }
 
   void enterAuditSession() {
     if (!_initialized) {
       throw StateError('Audit session requires initialized authentication');
     }
+    _beginIdentityTransition();
     _auditSession = true;
     _notifyAuthChanged();
   }
@@ -347,27 +404,31 @@ class AuthService extends ChangeNotifier {
   Future<String?> refreshToken() async {
     if (_auditSession) return null;
     if (_nativeToken != null) {
+      _beginIdentityTransition();
       _nativeToken = null;
       _nativeAccountId = null;
       _remoteCredentialVerified = false;
-      // Retire the session before a storage/plugin await can resume its
-      // pending clinical synchronizer under an unbound credential.
+      final clearing = _serializeIdentityStorage(
+        () => _deleteNativeCredentialStorage(clearEnrollment: false),
+      );
+      // Retire the session synchronously, before waiting for storage.
       _notifyAuthChanged();
-      await _storage.delete(key: _tokenKey);
-      await _storage.delete(key: _nativeIdentityKey);
+      await clearing;
       return null;
     }
     return _firebaseAuth?.currentUser?.getIdToken(true);
   }
 
   Future<void> signInWithEmail(String email, String password) async {
+    final generation = _beginIdentityTransition();
     final normalized = email.trim().toLowerCase();
     final nativeResponse = await _postJson(
       '/api/v1/auth/login',
       {'email': normalized, 'password': password},
     );
+    _requireIdentityTransition(generation);
     if (nativeResponse.statusCode >= 200 && nativeResponse.statusCode < 300) {
-      await _acceptAuthResponse(nativeResponse);
+      await _acceptAuthResponse(nativeResponse, generation);
       return;
     }
     final nativeInvalidCredentials = _isNativeCredentialRejection(nativeResponse);
@@ -376,7 +437,9 @@ class AuthService extends ChangeNotifier {
         email: normalized,
         password: password,
       );
+      _requireIdentityTransition(generation);
       final firebaseToken = await credential.user?.getIdToken(true);
+      _requireIdentityTransition(generation);
       if (firebaseToken == null || firebaseToken.isEmpty) {
         throw StateError('Firebase migration credential unavailable');
       }
@@ -384,8 +447,9 @@ class AuthService extends ChangeNotifier {
         '/api/v1/auth/firebase',
         {'id_token': firebaseToken},
       );
+      _requireIdentityTransition(generation);
       if (exchange.statusCode >= 200 && exchange.statusCode < 300) {
-        await _acceptAuthResponse(exchange);
+        await _acceptAuthResponse(exchange, generation);
         return;
       }
     }
@@ -399,17 +463,20 @@ class AuthService extends ChangeNotifier {
     if (!kRemoteAccountEnrollmentEnabled) {
       throw StateError('Remote account enrollment is disabled');
     }
+    final generation = _beginIdentityTransition();
     final response = await _postJson(
       '/api/v1/auth/register',
       {'email': email.trim().toLowerCase(), 'password': password},
     );
+    _requireIdentityTransition(generation);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw registrationFailureForStatus(response.statusCode);
     }
-    await _acceptAuthResponse(response);
+    await _acceptAuthResponse(response, generation);
   }
 
   Future<void> signOut() async {
+    _beginIdentityTransition();
     _auditSession = false;
     final token = _nativeToken;
 
@@ -419,12 +486,13 @@ class AuthService extends ChangeNotifier {
     _nativeAccountId = null;
     _localSessionEnrolled = false;
     _remoteCredentialVerified = false;
-    // Cancel stale session egress SYNCHRONOUSLY. Awaiting secure storage first
-    // left an A→logout window where old SyncService still had A's epoch.
+    // Queue deletion before notifying listeners, but retire access immediately.
+    // An already-started write must finish or fail before this removal runs.
+    final clearing = _serializeIdentityStorage(
+      () => _deleteNativeCredentialStorage(clearEnrollment: true),
+    );
     _notifyAuthChanged();
-    await _storage.delete(key: _tokenKey);
-    await _storage.delete(key: _nativeIdentityKey);
-    await _storage.delete(key: _localSessionKey);
+    await clearing;
     // Preserve the stable local-only vault locator: deleting it orphaned
     // offline clinical records without removing their SQLite database.
     // The revoked session cannot resolve it until explicit re-enrollment;
@@ -458,7 +526,9 @@ class AuthService extends ChangeNotifier {
     if (_firebaseAuth == null) {
       throw StateError('Firebase migration is disabled');
     }
+    final generation = _beginIdentityTransition();
     await _firebaseAuth.signInAnonymously();
+    _requireIdentityTransition(generation);
     _notifyAuthChanged();
   }
 
@@ -486,12 +556,6 @@ class AuthService extends ChangeNotifier {
     }
   }
 
-  Future<void> _ensureLocalEnrollment() async {
-    if (_localSessionEnrolled) return;
-    await _storage.write(key: _localSessionKey, value: _localSessionValue);
-    _localSessionEnrolled = true;
-  }
-
   String get _effectiveAuthBaseUrl => resolveAuthApiOrigin(
         isWeb: kIsWeb,
         remoteAccountLogin: kRemoteAccountSignInEnabled,
@@ -508,7 +572,8 @@ class AuthService extends ChangeNotifier {
     );
   }
 
-  Future<void> _acceptAuthResponse(http.Response response) async {
+  Future<void> _acceptAuthResponse(http.Response response, int generation) async {
+    _requireIdentityTransition(generation);
     final payload = jsonDecode(response.body);
     if (payload is! Map<String, dynamic>) {
       throw StateError('Malformed authentication response');
@@ -522,27 +587,38 @@ class AuthService extends ChangeNotifier {
     if (id is! int || id <= 0) {
       throw StateError('Missing authenticated IAMINA user ID');
     }
-    // A completed native response retires any previous local/remote account
-    // before the first persistence await. Failures leave no old patient open.
-    _nativeToken = null;
-    _nativeAccountId = null;
-    _remoteCredentialVerified = false;
-    _localSessionEnrolled = false;
-    _auditSession = false;
-    _notifyAuthChanged();
-    // Write binding first. Interrupted writes cannot pair a new token
-    // with a previous account's cached patient ID.
-    await _storage.write(
-      key: _nativeIdentityKey,
-      value: jsonEncode({'token': token, 'user_id': id}),
-    );
-    await _storage.write(key: _tokenKey, value: token);
-    await _storage.write(key: _localSessionKey, value: _localSessionValue);
-    _nativeToken = token;
-    _nativeAccountId = id;
-    _localSessionEnrolled = true;
-    _remoteCredentialVerified = true;
-    _notifyAuthChanged();
+    await _serializeIdentityStorage(() async {
+      _requireIdentityTransition(generation);
+      // Retire the previous account before the first persistence await.
+      _nativeToken = null;
+      _nativeAccountId = null;
+      _remoteCredentialVerified = false;
+      _localSessionEnrolled = false;
+      _auditSession = false;
+      _notifyAuthChanged();
+      try {
+        _requireIdentityTransition(generation);
+        await _storage.write(
+          key: _nativeIdentityKey,
+          value: jsonEncode({'token': token, 'user_id': id}),
+        );
+        _requireIdentityTransition(generation);
+        await _storage.write(key: _tokenKey, value: token);
+        _requireIdentityTransition(generation);
+        await _storage.write(key: _localSessionKey, value: _localSessionValue);
+        _requireIdentityTransition(generation);
+      } catch (_) {
+        // A failed/retired commit never publishes an identity. Cleanup stays
+        // in the same lane, before any newer native commit can write.
+        await _deleteNativeCredentialStorage(clearEnrollment: true);
+        rethrow;
+      }
+      _nativeToken = token;
+      _nativeAccountId = id;
+      _localSessionEnrolled = true;
+      _remoteCredentialVerified = true;
+      _notifyAuthChanged();
+    });
   }
 
   void _notifyAuthChanged() {
@@ -552,6 +628,13 @@ class AuthService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    _identityGeneration++;
+    _nativeToken = null;
+    _nativeAccountId = null;
+    _remoteCredentialVerified = false;
+    _localSessionEnrolled = false;
+    _auditSession = false;
     _httpClient.close();
     super.dispose();
   }
