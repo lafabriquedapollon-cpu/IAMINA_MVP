@@ -1280,6 +1280,23 @@ jobs:
           flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.lock
           flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart
+
+      - name: D3 pinned Flutter SDK
+        if: ${{ github.head_ref == 'phase1/d3-intents' }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter-d3"
+          test "$(git -C "$RUNNER_TEMP/flutter-d3" rev-parse HEAD)" = "cc0734ac716fbb8b90f3f9db8020958b1553afa7"
+          echo "$RUNNER_TEMP/flutter-d3/bin" >> "$GITHUB_PATH"
+      - name: D3 isolated preference UI tests
+        if: ${{ github.head_ref == 'phase1/d3-intents' }}
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+          flutter test --no-pub --reporter expanded test/features/profile/d3_feature_intents_screen_test.dart
+          flutter analyze --no-fatal-infos --no-pub
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         if: ${{ github.head_ref == 'phase1/d3-intents' }}
         with:

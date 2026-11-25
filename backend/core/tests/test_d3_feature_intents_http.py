@@ -108,3 +108,14 @@ def test_missing_receipt_and_invalid_locale_are_denied(settings):
     assert client.get(PATH, {"locale": "unknown"}, **ha).status_code == 422
     assert put(client, ha, "photo", {"enabled": True, "expected_revision": 0, "notice": payload["notices"]["photo"]}).status_code == 422
     assert D3FeatureIntent.objects.count() == 0
+
+
+def test_openapi_runtime_exposes_protected_intent_contract():
+    from diabetes.api.main import api
+    schema = api.get_openapi_schema()
+    paths = schema["paths"]
+    get = paths[PATH]["get"]
+    put = paths[PATH + "/{feature}"]["put"]
+    assert get["security"] and put["security"]
+    assert "requestBody" in put
+    assert "200" in get["responses"] and "200" in put["responses"]
