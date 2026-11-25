@@ -329,6 +329,8 @@ jobs:
 
           fixture = os.environ.get("R2_SCREEN_FIXTURE") == "1"
           semantics_mode = os.environ.get("R2_FIXTURE_SEMANTICS", "on")
+          fixture_direction = os.environ.get("R2_FIXTURE_DIRECTION", "")
+          assert (fixture_direction in ("rtl", "ltr")) if fixture else not fixture_direction
           assert semantics_mode in ("on", "off")
           assert fixture or semantics_mode == "on"
           web = pathlib.Path(os.environ["R2_SCREEN_FIXTURE_WEB"] if fixture else "frontend/build/web").resolve()
@@ -343,9 +345,9 @@ jobs:
           if fixture:
               from importlib.metadata import version
               playwright_version = version("playwright")
-              assert playwright_version in ("1.55.0", "1.59.0"), "Unpinned Playwright version"
-              assert semantics_mode == "on", "Version experiment requires accessibility"
-              proof = proof / ("playwright-" + playwright_version)
+              assert playwright_version == "1.55.0", "Unpinned Playwright version"
+              assert semantics_mode == "on", "Direction experiment requires accessibility"
+              proof = proof / ("direction-" + fixture_direction)
           proof.mkdir(parents=True, exist_ok=experiment or fixture)
           if fixture:
               receipt = json.loads((proof.parent / "fixture-build.json").read_text())
@@ -608,6 +610,7 @@ jobs:
                                                     headed=headed,
                                                     fixture_semantics=semantics_mode if fixture else None,
                                                     fixture_playwright=playwright_version if fixture else None,
+                                                    fixture_direction=fixture_direction if fixture else None,
                                                     locale=locale, viewport=[width, height],
                                                     source_sha=os.environ["EXPECTED_SHA"],
                                                     result="FAIL")
@@ -617,11 +620,16 @@ jobs:
                                           device_scale_factor=1, service_workers="block")
                                       page, verdict = attach_guard(context, origin)
                                       asset_responses = []
+                                      direction_messages = []
+                                      if fixture:
+                                          page.on("console", lambda msg: direction_messages.append(msg.text)
+                                                  if msg.text.startswith("R2_DIRECTION_ACTUAL=") else None)
                                       page.on("response", lambda res: asset_responses.append(res.status)
                                               if res.url.split("?")[0].endswith("/iamina_logo_vertical.png") else None)
                                       try:
                                           result["stage"] = "navigate"
-                                          response = page.goto(origin, wait_until="domcontentloaded", timeout=60000)
+                                          target = origin + "/?r2_direction=" + fixture_direction if fixture else origin
+                                          response = page.goto(target, wait_until="domcontentloaded", timeout=60000)
                                           assert response and response.status == 200
                                           result["stage"] = "flutter-view"
                                           page.wait_for_selector("flutter-view, flt-glass-pane", timeout=60000)
@@ -639,6 +647,10 @@ jobs:
                                               button = require_cta(page, cta)
                                           page.wait_for_timeout(500)
                                           if fixture:
+                                              expected_direction = "R2_DIRECTION_ACTUAL=" + fixture_direction + ";locale=ar"
+                                              result["direction_messages"] = list(direction_messages)
+                                              assert expected_direction in direction_messages, "Effective direction/locale not observed"
+                                              assert all(m == expected_direction for m in direction_messages), "Mixed direction/locale"
                                               result["semantics_before"] = observe_semantics(page)
                                               assert_fixture_semantics(result["semantics_before"])
                                           if experiment:
@@ -721,6 +733,8 @@ jobs:
                                                       if n == 1:
                                                           page.wait_for_timeout(500)
                                                   if fixture:
+                                                      result["direction_messages_after_resize"] = list(direction_messages)
+                                                      assert expected_direction in direction_messages and all(m == expected_direction for m in direction_messages), "Direction/locale changed"
                                                       result["semantics_after_resize"] = observe_semantics(page)
                                                       assert_fixture_semantics(result["semantics_after_resize"])
                                                       assert all(frame["metrics"]["old_pixel_gate"] and
@@ -854,9 +868,9 @@ jobs:
               assert all(r.get("resize_gate") == "PASS" and r["result"] == "PASS" for r in cold), "B canvas-only experiment failed"
               print("R2_AB_CANVAS_ONLY_PASS 5/5 (diagnostic only)")
           elif fixture:
-              assert len(results) == 5, "Semantics arm matrix incomplete"
-              assert all(r.get("resize_gate") == "PASS" for r in cold), "Semantics arm resize matrix failed"
-              assert all(r["result"] == "PASS" for r in results), "Semantics arm initial or guard failed"
+              assert len(results) == 5, "Direction arm matrix incomplete"
+              assert all(r.get("resize_gate") == "PASS" for r in cold), "Direction arm resize matrix failed"
+              assert all(r["result"] == "PASS" for r in results), "Direction arm initial or guard failed"
               print("R2_ENGINE_DIAGNOSTIC_PASS", playwright_version, "5/5; not product certification")
           elif headed:
               assert len(results) == 8 and len(baseline) == 4, "Headed WebKit matrix incomplete"
@@ -927,7 +941,7 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      - name: Compare pinned WebKit versions on identical enrollment fixture
+      - name: Compare RTL and LTR on identical Arabic enrollment fixture
         if: ${{ !cancelled() && steps.r2_browser.outcome == 'failure' }}
         timeout-minutes: 18
         working-directory: .
@@ -955,12 +969,25 @@ jobs:
             WidgetsFlutterBinding.ensureInitialized();
             runApp(MaterialApp(
               title: 'IAMINA synthetic enrollment render probe',
+              locale: const Locale('ar'),
               theme: AminaVisualLanguage.harmonize(AminaTheme.light),
               themeMode: ThemeMode.light,
               localizationsDelegates: AppLocalizations.localizationsDelegates,
               supportedLocales: AppLocalizations.supportedLocales,
               debugShowCheckedModeBanner: false,
-              home: const LocalDeviceEnrollmentScreen(),
+              home: Builder(builder: (context) {
+                final mode = Uri.base.queryParameters['r2_direction'];
+                if (mode != 'rtl' && mode != 'ltr') {
+                  throw StateError('Missing or invalid diagnostic direction');
+                }
+                return Directionality(
+                  textDirection: mode == 'rtl' ? TextDirection.rtl : TextDirection.ltr,
+                  child: Builder(builder: (context) {
+                    debugPrint('R2_DIRECTION_ACTUAL=${Directionality.of(context).name};locale=${Localizations.localeOf(context).languageCode}');
+                    return const LocalDeviceEnrollmentScreen();
+                  }),
+                );
+              }),
             ));
           }
           DART
@@ -997,17 +1024,12 @@ jobs:
               "interaction_disabled_by_test_scope": True,
           },indent=2))
           PY
-          # Isolated environments, same fixture bytes, accessibility ON in both arms.
-          # Keep the existing browser toolchain intact; do not install system dependencies for B.
-          old_status=0
-          new_status=0
-          R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || old_status=$?
-          python3 -m venv "$RUNNER_TEMP/r2-engine-159"
-          "$RUNNER_TEMP/r2-engine-159/bin/python" -m pip install playwright==1.59.0 Pillow==11.3.0
-          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/r2-engine-159-browsers"
-          "$RUNNER_TEMP/r2-engine-159/bin/python" -m playwright install webkit
-          R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-engine-159/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || new_status=$?
-          printf 'R2_ENGINE_ARMS v155=%s v159=%s\n' "$old_status" "$new_status"
+          # Same fixture, SDK, browser, locale, semantics and guard; direction is the only arm variable.
+          rtl_status=0
+          ltr_status=0
+          R2_FIXTURE_DIRECTION=rtl R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || rtl_status=$?
+          R2_FIXTURE_DIRECTION=ltr R2_FIXTURE_SEMANTICS=on "$RUNNER_TEMP/r2-browser-venv/bin/python" "$RUNNER_TEMP/r2-screen-fixture.py" || ltr_status=$?
+          printf 'R2_DIRECTION_ARMS rtl=%s ltr=%s\n' "$rtl_status" "$ltr_status"
           python3 - <<'PY'
           import hashlib
           import json
@@ -1020,7 +1042,7 @@ jobs:
                     for p in sorted(web.rglob("*")) if p.is_file()}
           assert actual == expected, "Fixture build changed during experiment"
           PY
-          test "$old_status" -eq 0 && test "$new_status" -eq 0
+          test "$rtl_status" -eq 0 && test "$ltr_status" -eq 0
       - name: Retain isolated enrollment screen diagnostic
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
