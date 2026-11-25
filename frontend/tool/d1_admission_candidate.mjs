@@ -364,6 +364,7 @@ class AdmissionSession {
       const existing=JSON.parse(await window.d1GlucoseRead(bytes,owner,uuid));this.#local();
       if(action==='delete'&&deleted===true){
         require(existing===null,'Deletion invariant failed');
+        require(expectedRevision<=r.revision,'Checkpoint conflict');
         const current=await this.#read();this.#local();
         require(sameRecord(current,r),'Checkpoint conflict');
         return {revision:r.revision,replay:true,deleted:true,measurement:null};

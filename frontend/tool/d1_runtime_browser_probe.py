@@ -1698,6 +1698,10 @@ I5_JOURNAL_CHANGE = r"""async ({a,b})=>{
   check(ack.revision===4&&!ack.replay&&!ack.deleted&&ack.measurement.mgDl===121.25&&
     ack.measurement.loggedAtSeconds===t+10,'Edit ACK mismatch');
   const edited=await s.auditSnapshot();
+  const originalRow=initial.tables.log_entries.find(x=>x.client_uuid===u);
+  const editedRow=edited.tables.log_entries.find(x=>x.client_uuid===u);
+  check(originalRow&&editedRow&&Object.keys(originalRow).every(k=>
+    ['blood_sugar','logged_at'].includes(k)||originalRow[k]===editedRow[k]),'Edit changed unrelated field');
   const noOp=await s.editGlucose(4,u,121.25,'mg/dL',t+10);
   check(noOp.revision===4&&noOp.replay&&(await s.auditSnapshot()).sha256===edited.sha256,'Edit no-op mutated data');
   await reject(()=>s.editGlucose(4,u,122.25,'mg/dL',t+20,{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
@@ -1717,6 +1721,9 @@ I5_JOURNAL_CHANGE = r"""async ({a,b})=>{
   const del=await s.deleteGlucose(5,u);
   check(del.revision===6&&del.replay&&del.deleted&&del.measurement===null,'Delete recovery mismatch');
   const deleted=await s.auditSnapshot();
+  await reject(()=>s.deleteGlucose(7,u),'Checkpoint conflict');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===deleted.sha256,'Future revision changed bytes');
   check(deleted.tables.d1_fixture_deleted_glucose.length===1&&
     deleted.tables.d1_fixture_deleted_glucose[0].uuid===u,'Missing tombstone');
   check((await s.readGlucose(u)).measurement===null,'Deleted measurement visible');
@@ -1752,7 +1759,8 @@ I5_JOURNAL_CHANGE = r"""async ({a,b})=>{
   await s.retire();
   return {invalidRefused:true,staleRefused:true,editPrecommitUnchanged:true,editAck:true,
     editNoOp:true,editLostAck:true,deletePrecommitUnchanged:true,deleteLostAck:true,
-    deleteAck:true,noResurrection:true,otherTablesUnchanged:true,ownerIsolation:true};
+    deleteAck:true,noResurrection:true,otherTablesUnchanged:true,ownerIsolation:true,
+    futureRevisionRefused:true,editFieldsPreserved:true};
 }"""
 I5_JOURNAL_CHANGE_RESTART = r"""async ({a,b})=>{
   const api=await import('/d1_admission_candidate.mjs'),t=1795564800;
@@ -1818,7 +1826,8 @@ def exercise_journal_change(browser_type,profile,locale,origin):
             assert result=={"invalidRefused":True,"staleRefused":True,"editPrecommitUnchanged":True,
                 "editAck":True,"editNoOp":True,"editLostAck":True,"deletePrecommitUnchanged":True,
                 "deleteLostAck":True,"deleteAck":True,"noResurrection":True,
-                "otherTablesUnchanged":True,"ownerIsolation":True}
+                "otherTablesUnchanged":True,"ownerIsolation":True,
+                "futureRevisionRefused":True,"editFieldsPreserved":True}
             assert not blocked and not errors
         finally:
             ctx.close()

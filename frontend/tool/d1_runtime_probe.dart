@@ -198,7 +198,7 @@ class _MemoryVault {
     final profiles = await db.select(db.patientProfiles).get();
     _require(profiles.length == 1 && profiles.single.userId == owner,
         'Profile owner mismatch');
-    final rows = await db.getRecentLogs();
+    final rows = await db.select(db.logEntries).get();
     _require(rows.isNotEmpty &&
         rows.every((row) =>
           (row.mealDescription == _marker && row.clientUuid.startsWith('d1-i1-$owner-')) ||
