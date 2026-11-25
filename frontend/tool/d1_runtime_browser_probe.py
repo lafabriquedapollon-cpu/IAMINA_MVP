@@ -25,14 +25,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-def open_context(browser_type, profile, locale, origin):
+def open_context(browser_type, profile, locale, origin, extra_origin=None):
     context = browser_type.launch_persistent_context(
         str(profile), headless=True, locale=locale,
         viewport={"width":390,"height":844}, service_workers="block",
     )
     blocked, errors = [], []
     def route(r):
-        if r.request.url.startswith(origin + "/") and "/api/" not in r.request.url:
+        allowed = (origin,) if extra_origin is None else (origin, extra_origin)
+        if any(r.request.url.startswith(o + "/") for o in allowed) and "/api/" not in r.request.url:
             r.continue_()
         else:
             blocked.append(r.request.url.split("?")[0])
@@ -528,14 +529,184 @@ def restore_i3(page):
 
 
 
+# I4: independent browser origins in one profile, explicit encrypted transfer.
+# The legacy fixture is a synthetic raw snapshot, not a real Drift worker store.
+I4_LEGACY = r"""async (action)=>{
+  const {sealArchive}=await import('/d1_archive_candidate.mjs');
+  const owner=900001,scope='amina_vault_v1_native_900001',secret='synthetic transfer secret 2026';
+  const hex=bytes=>Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
+  const digest=async bytes=>hex(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)));
+  // Same DB name and key as the new origin, intentionally different record.
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onupgradeneeded=()=>req.result.createObjectStore('state');
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);
+  });
+  async function read(){
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const r=store.get('owner:900001'),f=store.get('fence');
+      tx.oncomplete=()=>resolve({record:r.result??null,fence:f.result??null});
+      tx.onabort=()=>reject(tx.error);
+    });
+  }
+  async function put(bytes){
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readwrite',{durability:'strict'});
+      tx.objectStore('state').put({legacyBytes:bytes},'owner:900001');
+      tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);
+    });
+  }
+  try{
+    let state=await read();
+    if(action==='create'){
+      if(state.record!==null)throw new Error('Unexpected existing source');
+      await put(await window.d1LegacySnapshot(owner));
+      state=await read();
+    }
+    if(state.fence!==null || !(state.record?.legacyBytes instanceof Uint8Array) ||
+        Object.keys(state.record).join(',')!=='legacyBytes')
+      throw new Error('Unexpected source state or crossed origin');
+    if(action==='mutate'){
+      await put(await window.d1Mutate(state.record.legacyBytes,owner,'old-client-001'));
+      state=await read();
+    }
+    const bytes=state.record.legacyBytes;
+    const sha256=await digest(bytes);
+    const tables=JSON.parse(await window.d1FullInspect(bytes,owner));
+    if(action==='create'){
+      const archive=await sealArchive(bytes,secret,scope);
+      const invalid=new Uint8Array(128);
+      const invalidArchive=await sealArchive(invalid,secret,scope);
+      return {manifest:{kind:'scoped-v12',owner,sha256},transfer:Array.from(archive),
+        invalid:{sha256:await digest(invalid),transfer:Array.from(invalidArchive)},tables};
+    }
+    return {sha256,tables};
+  }finally{db.close();}
+}"""
+
+I4_IMPORT = r"""async ({manifest,transfer,invalid,tables})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const owner=900001,phrase='synthetic migrated possession 2026',secret='synthetic transfer secret 2026';
+  const proof=()=>api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch:1});
+  const archive=new Uint8Array(transfer);
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,expected)=>{try{await fn();}catch(e){
+    if(expected&&!String(e).includes(expected))throw e;return;
+  }throw new Error('Expected rejection: '+expected);};
+  const load=(m=manifest,a=archive,s=secret,hooks={})=>
+    api.importScopedArchive(owner,1,proof(),phrase,m,a,s,hooks);
+  await reject(()=>load({...manifest,kind:'unscoped-mixed'}),'Explicit scoped source provenance required');
+  await reject(()=>load({...manifest,owner:900002}),'Explicit scoped source provenance required');
+  await reject(()=>load({...manifest,sha256:'0'.repeat(64)}),'Source digest mismatch');
+  await reject(()=>load(manifest,archive,'synthetic wrong transfer secret'),'Archive authentication failed');
+  const tampered=archive.slice();tampered[tampered.length-1]^=1;
+  await reject(()=>load(manifest,tampered),'Archive authentication failed');
+  await reject(()=>load({...manifest,sha256:invalid.sha256},new Uint8Array(invalid.transfer)),null);
+  await reject(()=>load(manifest,archive,secret,{beforeActivate:()=>{throw new Error('Interrupted import');}}),'Interrupted import');
+  await reject(()=>api.admit(owner,1,proof(),phrase),'Vault unavailable');
+  const session=await load();
+  window.i4Session=session;
+  const observed=await session.auditSnapshot();
+  check(observed.revision===1&&observed.sha256===manifest.sha256&&
+    JSON.stringify(observed.tables)===JSON.stringify(tables),'Imported bytes/tables differ');
+  await reject(()=>load(),'Existing vault cannot be overwritten');
+  check((await session.auditSnapshot()).sha256===manifest.sha256,'Overwrite changed imported vault');
+  return {observed,negativeCases:9};
+}"""
+
+I4_DEST = r"""async ({expected,restore})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const owner=900001,phrase='synthetic migrated possession 2026';
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  if(restore){
+    const proof=api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch:2});
+    window.i4Session=await api.admit(owner,2,proof,phrase);
+  }
+  const observed=await window.i4Session.auditSnapshot();
+  check(observed.revision===1&&observed.sha256===expected,'Imported bytes changed');
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);
+  });
+  let stored;
+  try{
+    stored=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const r=store.get('owner:900001'),keys=store.getAllKeys();
+      tx.oncomplete=()=>resolve({record:r.result,keys:keys.result});tx.onabort=()=>reject(tx.error);
+    });
+  }finally{db.close();}
+  check(Object.keys(stored.record).sort().join(',')==='archive,envelope,revision' &&
+        JSON.stringify(stored.keys.sort())==='["fence","owner:900001"]','Unexpected destination state');
+  const needles=['SQLite format 3','D1_I1_SYNTHETIC_NOT_PATIENT','synthetic migrated possession 2026',
+    'synthetic transfer secret 2026'].map(x=>new TextEncoder().encode(x));
+  const contains=(h,n)=>h.some((_,i)=>n.every((v,j)=>h[i+j]===v));
+  for(const bytes of [stored.record.archive,stored.record.envelope])
+    check(bytes instanceof Uint8Array&&!needles.some(n=>contains(bytes,n)),'Destination plaintext');
+  check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]' &&
+        !localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length,'Unexpected destination storage');
+  if(navigator.storage?.getDirectory){
+    const root=await navigator.storage.getDirectory();
+    for await(const _ of root.values())throw new Error('Unexpected destination OPFS file');
+  }
+  return observed;
+}"""
+
+
+def exercise_i4(ctx,page,legacy_origin,errors):
+    source=new_ready_page(ctx,legacy_origin,errors)
+    assert source.evaluate("location.origin") != page.evaluate("location.origin")
+    exported=source.evaluate(I4_LEGACY,"create")
+    tables=exported["tables"]
+    assert len(tables)==6 and all(len(rows)==1 for rows in tables.values()),tables
+    assert tables["log_entries"][0]["sync_status"]=="pending" and tables["log_entries"][0]["sync_attempts"]==2
+    assert tables["patient_treatment_declarations_v1"][0]["sync_status"]=="pending"
+    assert tables["patient_treatment_declarations_v1"][0]["local_generation"]==3
+    assert tables["reminders"][0]["enabled"] in (0,False)
+    imported=page.evaluate(I4_IMPORT,exported)
+    assert imported["observed"]["tables"]==tables
+    expected=exported["manifest"]["sha256"]
+    unchanged=source.evaluate(I4_LEGACY,"read")
+    assert unchanged=={"sha256":expected,"tables":tables},unchanged
+    # An old document writes its own origin after cutover. It cannot update
+    # the new origin's IDB even though both use the identical store and key.
+    changed=source.evaluate(I4_LEGACY,"mutate")
+    assert changed["sha256"]!=expected and len(changed["tables"]["log_entries"])==2,changed
+    final=page.evaluate(I4_DEST,{"expected":expected,"restore":False})
+    assert final==imported["observed"],final
+    assert page.evaluate("window.i4Session.retire()") is True
+    source.close()
+    return {"sourceSha":expected,"oldClientChangedSha":changed["sha256"],
+            "sourcePreservedBeforeOldWrite":True,"oldOriginWriteIsolated":True,
+            "negativeCases":imported["negativeCases"],"imported":final}
+
+
+def restore_i4(ctx,page,legacy_origin,errors,record):
+    source=new_ready_page(ctx,legacy_origin,errors)
+    old=source.evaluate(I4_LEGACY,"read")
+    assert old["sha256"]==record["oldClientChangedSha"] and len(old["tables"]["log_entries"])==2,old
+    source.close()
+    new=page.evaluate(I4_DEST,{"expected":record["sourceSha"],"restore":True})
+    assert new==record["imported"],new
+    assert page.evaluate("window.i4Session.retire()") is True
+    return {"sourceSha":old["sha256"],"destinationSha":new["sha256"],
+            "sourceRows":len(old["tables"]["log_entries"]),"destinationRows":len(new["tables"]["log_entries"]),
+            "exactTablesPreserved":True}
+
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
     results = []
     with tempfile.TemporaryDirectory(prefix="d1-runtime-") as root:
-        with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, \
+             http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as legacy_server:
             threading.Thread(target=server.serve_forever, daemon=True).start()
+            threading.Thread(target=legacy_server.serve_forever, daemon=True).start()
             origin = f"http://127.0.0.1:{server.server_port}"
+            legacy_origin = f"http://127.0.0.1:{legacy_server.server_port}"
             try:
                 with sync_playwright() as pw:
                     browser_type = getattr(pw, ENGINE)
@@ -583,6 +754,19 @@ def run():
                                 assert not blocked and not errors, (blocked,errors)
                             finally:
                                 ctx.close()
+                            i4_profile=Path(root)/(locale+"-migration")
+                            ctx,page,blocked,errors=open_context(browser_type,i4_profile,locale,origin,legacy_origin)
+                            try:
+                                record["i4"]=exercise_i4(ctx,page,legacy_origin,errors)
+                                assert not blocked and not errors,(blocked,errors)
+                            finally:
+                                ctx.close()
+                            ctx,page,blocked,errors=open_context(browser_type,i4_profile,locale,origin,legacy_origin)
+                            try:
+                                record["i4_restart"]=restore_i4(ctx,page,legacy_origin,errors,record["i4"])
+                                assert not blocked and not errors,(blocked,errors)
+                            finally:
+                                ctx.close()
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -590,10 +774,12 @@ def run():
                         print("D1_RUNTIME " + json.dumps(record,ensure_ascii=False),flush=True)
             finally:
                 server.shutdown()
+                legacy_server.shutdown()
     assert len(results)==2 and all(x["result"]=="PASS" for x in results), "D1 actual Drift encrypted checkpoint failed"
     print("D1_RUNTIME_PASS 2/2",flush=True)
     print("D1_I2_DURABLE_MUTATION_PASS 2/2",flush=True)
     print("D1_I3_ADMISSION_FENCE_PASS 2/2",flush=True)
+    print("D1_I4_COPY_MIGRATION_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":
