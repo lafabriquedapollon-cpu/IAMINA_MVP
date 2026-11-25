@@ -26,6 +26,7 @@ function consume(ticket,owner,epoch) {
   require(owners.has(owner)&&Number.isSafeInteger(epoch)&&epoch>0&&p&&
     p.owner===owner&&p.epoch===epoch&&p.identityVerified===true&&p.unlocked===true&&
     performance.now()-p.issued<30000,'Admission proof rejected');
+  return p.issued+30000;
 }
 function checkPhrase(phrase) {
   require(typeof phrase==='string'&&Array.from(phrase).length>=16&&phrase.length<=1024,
@@ -78,6 +79,11 @@ function sameRecord(a,b) {
 function fenceMatches(f,lease) {
   return f&&f.owner===lease.owner&&f.token===lease.token&&f.epoch===lease.epoch;
 }
+function validFence(f) {
+  require(f&&typeof f.token==='string'&&/^[0-9a-f]{64}$/.test(f.token)&&
+    ((f.owner===null&&f.epoch===null)||(owners.has(f.owner)&&Number.isSafeInteger(f.epoch)&&f.epoch>0)),
+    'Admission fence unavailable');
+}
 function sameFence(a,b) {
   return a===null&&b===null || !!(a&&b&&a.owner===b.owner&&a.token===b.token&&a.epoch===b.epoch);
 }
@@ -123,10 +129,12 @@ class AdmissionSession {
   #local(){require(!this.#retired,'Session retired');}
   async #read(){
     this.#local();
-    const r=await transaction(this.#lease.owner,false,(r,f)=>{
-      require(fenceMatches(f,this.#lease),'Admission fence retired');validRecord(r);return r;
-    });
-    this.#local();return r;
+    try{
+      const r=await transaction(this.#lease.owner,false,(r,f)=>{
+        require(fenceMatches(f,this.#lease),'Admission fence retired');validRecord(r);return r;
+      });
+      this.#local();return r;
+    }catch(e){this.#retired=true;this.#key=null;throw e;}
   }
   async #verifyFence(){await this.#read();this.#local();}
   async inspect(){
@@ -182,13 +190,16 @@ class AdmissionSession {
       if(beforeAck)await beforeAck();
       await this.#verifyFence();
       return {revision,replay:false,operation};
+    }catch(e){
+      if(String(e).includes('Admission fence retired')){this.#retired=true;this.#key=null;}
+      throw e;
     }finally{bytes?.fill(0);next?.fill(0);this.#busy=false;}
   }
 }
 
 // Explicit initial creation only; missing material is never silently repaired.
 export async function enroll(owner,epoch,proof,phrase){
-  consume(proof,owner,epoch);checkPhrase(phrase);
+  const deadline=consume(proof,owner,epoch);checkPhrase(phrase);
   const baseline=await transaction(owner,false,(r,f)=>{require(r===null,'Existing vault cannot be overwritten');return f;});
   const seed=crypto.getRandomValues(new Uint8Array(32));
   const key=hex(seed);
@@ -201,6 +212,7 @@ export async function enroll(owner,epoch,proof,phrase){
     const lease={owner,epoch,token:randomToken()};
     await transaction(owner,true,(existing,f,store)=>{
       require(existing===null,'Existing vault cannot be overwritten');
+      require(performance.now()<deadline,'Admission proof expired');
       require(sameFence(f,baseline),'Admission fence changed');
       store.put({revision:1,envelope,archive},'owner:'+owner);
       store.put(lease,'fence');
@@ -210,8 +222,8 @@ export async function enroll(owner,epoch,proof,phrase){
 }
 
 export async function admit(owner,epoch,proof,phrase,{beforeActivate}={}){
-  consume(proof,owner,epoch);checkPhrase(phrase);
-  const {record,baseline}=await transaction(owner,false,(r,f)=>{validRecord(r);return {record:r,baseline:f};});
+  const deadline=consume(proof,owner,epoch);checkPhrase(phrase);
+  const {record,baseline}=await transaction(owner,false,(r,f)=>{validRecord(r);validFence(f);return {record:r,baseline:f};});
   const key=await unwrapKey(record.envelope,phrase,owner);
   let bytes;
   try{
@@ -220,6 +232,7 @@ export async function admit(owner,epoch,proof,phrase,{beforeActivate}={}){
     const lease={owner,epoch,token:randomToken()};
     if(beforeActivate)await beforeActivate();
     await transaction(owner,true,(current,f,store)=>{
+      require(performance.now()<deadline,'Admission proof expired');
       require(sameRecord(current,record),'Vault changed during admission');
       require(sameFence(f,baseline),'Admission fence changed');
       store.put(lease,'fence');
