@@ -167,7 +167,7 @@ Future<Uint8List> _legacySnapshot(int owner) async {
       await db.customStatement("INSERT INTO chat_messages (conversation_id, role, message, created_at) VALUES (?, ?, ?, ?)", ['synthetic-conversation', 'user', _marker, 1795564800]);
       await db.customStatement("INSERT INTO medication_events (label, dose, unit, taken_at, created_at) VALUES (?, ?, ?, ?, ?)", ['synthetic-medication', 1.25, 'synthetic-unit', 1795564800, 1795564800]);
       await db.customStatement("INSERT INTO reminders (title, due_at, enabled, created_at) VALUES (?, ?, ?, ?)", [_marker, 1795564800, 0, 1795564800]);
-      await db.customStatement("INSERT INTO patient_treatment_declarations_v1 (user_id, declaration_state, codes_json, updated_at_utc, sync_status, local_generation) VALUES (?, ?, ?, ?, ?, ?)", [owner, 'unsure', '[]', '2026-11-25T00:00:00Z', 'pending', 3]);
+      await db.customStatement("INSERT INTO patient_treatment_declarations_v1 (user_id, declaration_state, codes_json, provenance, updated_at_utc, sync_status, local_generation) VALUES (?, ?, ?, ?, ?, ?, ?)", [owner, 'unsure', '[]', 'patient_declared', '2026-11-25T00:00:00Z', 'pending', 3]);
     });
     await vault.inspect();
     await db.close();
