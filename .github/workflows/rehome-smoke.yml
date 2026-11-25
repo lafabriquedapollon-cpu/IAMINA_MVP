@@ -1276,7 +1276,7 @@ jobs:
           "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_opfs_capability_probe.py
           archive_status=0
           portable_status=0
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_archive_browser_probe.py || archive_status=$?
+          D1_LINUX_CAPABILITY_GATE=1 "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_archive_browser_probe.py || archive_status=$?
           "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_portable_browser_probe.py || portable_status=$?
           echo "D1_TRANSPORT_STATUS opfs_idb=$archive_status portable=$portable_status"
           test "$archive_status" -eq 0 && test "$portable_status" -eq 0
@@ -1314,7 +1314,8 @@ jobs:
           python manage.py makemigrations --check --dry-run
           python -m pytest -q core/tests/test_d3_feature_intents.py core/tests/test_account_consent_identity_safety.py core/tests/test_ai_egress_boundary_gate.py
 
-  # Separate platform evidence; never masks the Linux gate.
+  # Mandatory full OPFS restoration on a supporting platform; Linux must
+  # independently attest supported restoration or exact fail-closed capability.
   phase1-d1-macos-storage:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && github.head_ref == 'phase1/d1-backup' }}
     runs-on: macos-15

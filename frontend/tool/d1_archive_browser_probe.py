@@ -5,6 +5,7 @@ import hashlib
 import http.server
 import json
 import os
+import platform
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -175,6 +176,9 @@ def connect(engine, profile, locale, origin):
 
 def run():
     sha = os.environ["EXPECTED_SHA"]
+    linux_capability_gate = os.environ.get("D1_LINUX_CAPABILITY_GATE") == "1"
+    if linux_capability_gate:
+        assert platform.system() == "Linux", "Capability gate restricted to Linux"
     with tempfile.TemporaryDirectory(prefix="d1-synthetic-") as td, http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
         root = Path(td)
         raw = fixture(root / "source.sqlite")
@@ -186,6 +190,7 @@ def run():
             with sync_playwright() as pw:
                 records = []
                 failures = []
+                unsupported = []
                 for engine_name, mode in (("chromium", "idb"), ("webkit", "opfs")):
                     for locale in ("fr-FR", "ar-MA"):
                         try:
@@ -193,6 +198,32 @@ def run():
                             profile = root / f"{engine_name}-{locale}"
                             ctx, page, blocked = connect(engine, profile, locale, origin)
                             try:
+                                if mode == "opfs" and linux_capability_gate:
+                                    capability = page.evaluate("""() => ({
+                                      secure: isSecureContext,
+                                      storage: typeof navigator.storage,
+                                      directory: typeof navigator.storage?.getDirectory,
+                                      crypto: typeof crypto?.subtle
+                                    })""")
+                                    # Only the exact attested Linux port limitation is
+                                    # classified as unsupported. Any available API
+                                    # must pass the full original restoration oracle.
+                                    if capability == dict(secure=True, storage="undefined", directory="undefined", crypto="object"):
+                                        for operation in ("write", "read"):
+                                            try:
+                                                page.evaluate(STORAGE, {"op": operation, "mode": mode, "bytes": [0]})
+                                            except Exception as error:
+                                                assert "Secure OPFS unavailable" in str(error), str(error)
+                                            else:
+                                                raise AssertionError("Unavailable OPFS operation did not fail closed")
+                                        assert not blocked
+                                        assert digest((root / "source.sqlite").read_bytes()) == original_digest
+                                        record = dict(source_sha=sha, engine=engine_name, locale=locale, storage=mode,
+                                                      result="UNSUPPORTED", capability=capability, fail_closed=True,
+                                                      rejected_operations=2, source_unchanged=True)
+                                        unsupported.append(record)
+                                        print("D1_ARCHIVE_BROWSER " + json.dumps(record), flush=True)
+                                        continue
                                 sealed = bytes(page.evaluate("""async ({raw, secret, owner}) => {
                                   const {sealArchive} = await import('/d1_archive_candidate.mjs');
                                   return Array.from(await sealArchive(new Uint8Array(raw), secret, owner));
@@ -239,9 +270,16 @@ def run():
                                            result="FAIL", error=str(error)[:500])
                             failures.append(failure)
                             print("D1_ARCHIVE_BROWSER " + json.dumps(failure), flush=True)
-                assert len(records) + len(failures) == 4, "Incomplete matrix"
-                assert len(records) == 4 and not failures, f"Browser archive matrix: {len(records)}/4 PASS"
-                print("D1_ARCHIVE_BROWSER_PASS 4/4", flush=True)
+                assert len(records) + len(failures) + len(unsupported) == 4, "Incomplete matrix"
+                assert not failures, f"Browser archive matrix: {len(records)} PASS, {len(unsupported)} UNSUPPORTED, {len(failures)} FAIL"
+                if linux_capability_gate:
+                    assert len(records) + len(unsupported) == 4
+                    assert len([r for r in records if r["storage"] == "idb"]) == 2
+                    assert all(r["storage"] == "opfs" and r["engine"] == "webkit" and r["fail_closed"] for r in unsupported)
+                    print(f"D1_LINUX_CAPABILITY_GATE_PASS restored={len(records)} unsupported={len(unsupported)}", flush=True)
+                else:
+                    assert len(records) == 4 and not unsupported
+                    print("D1_ARCHIVE_BROWSER_PASS 4/4", flush=True)
         finally:
             server.shutdown()
 
