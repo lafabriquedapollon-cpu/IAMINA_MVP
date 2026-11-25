@@ -78,6 +78,9 @@ function sameRecord(a,b) {
 function fenceMatches(f,lease) {
   return f&&f.owner===lease.owner&&f.token===lease.token&&f.epoch===lease.epoch;
 }
+function sameFence(a,b) {
+  return a===null&&b===null || !!(a&&b&&a.owner===b.owner&&a.token===b.token&&a.epoch===b.epoch);
+}
 async function wrapKey(seed,phrase,owner) {
   const payload=new Uint8Array(tag.length+seed.length);
   payload.set(tag);payload.set(seed,tag.length);
@@ -186,6 +189,7 @@ class AdmissionSession {
 // Explicit initial creation only; missing material is never silently repaired.
 export async function enroll(owner,epoch,proof,phrase){
   consume(proof,owner,epoch);checkPhrase(phrase);
+  const baseline=await transaction(owner,false,(r,f)=>{require(r===null,'Existing vault cannot be overwritten');return f;});
   const seed=crypto.getRandomValues(new Uint8Array(32));
   const key=hex(seed);
   let bytes;
@@ -195,8 +199,9 @@ export async function enroll(owner,epoch,proof,phrase){
     await inspect(bytes,owner);
     const archive=await encrypt(bytes,key,owner,1);
     const lease={owner,epoch,token:randomToken()};
-    await transaction(owner,true,(existing,_f,store)=>{
+    await transaction(owner,true,(existing,f,store)=>{
       require(existing===null,'Existing vault cannot be overwritten');
+      require(sameFence(f,baseline),'Admission fence changed');
       store.put({revision:1,envelope,archive},'owner:'+owner);
       store.put(lease,'fence');
     });
@@ -204,17 +209,19 @@ export async function enroll(owner,epoch,proof,phrase){
   }finally{seed.fill(0);bytes?.fill(0);}
 }
 
-export async function admit(owner,epoch,proof,phrase){
+export async function admit(owner,epoch,proof,phrase,{beforeActivate}={}){
   consume(proof,owner,epoch);checkPhrase(phrase);
-  const record=await transaction(owner,false,r=>{validRecord(r);return r;});
+  const {record,baseline}=await transaction(owner,false,(r,f)=>{validRecord(r);return {record:r,baseline:f};});
   const key=await unwrapKey(record.envelope,phrase,owner);
   let bytes;
   try{
     bytes=await decrypt(record,key,owner);
     await inspect(bytes,owner);
     const lease={owner,epoch,token:randomToken()};
-    await transaction(owner,true,(current,_f,store)=>{
+    if(beforeActivate)await beforeActivate();
+    await transaction(owner,true,(current,f,store)=>{
       require(sameRecord(current,record),'Vault changed during admission');
+      require(sameFence(f,baseline),'Admission fence changed');
       store.put(lease,'fence');
     });
     return new AdmissionSession(constructorPermit,lease,key);
