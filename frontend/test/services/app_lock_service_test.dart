@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -30,6 +31,8 @@ class _FakeAuthenticator implements AppLockAuthenticator {
   Object? unlockError;
   int enrollCalls = 0;
   int unlockCalls = 0;
+  Completer<AppLockAssertion>? pendingUnlock;
+  Completer<AppLockCredential>? pendingEnroll;
 
   _FakeAuthenticator({
     this.capabilityValue = AppLockCapability.supported,
@@ -44,7 +47,8 @@ class _FakeAuthenticator implements AppLockAuthenticator {
     enrollCalls += 1;
     final error = enrollError;
     if (error != null) throw error;
-    return enrollmentCredential;
+    final pending = pendingEnroll;
+    return pending == null ? enrollmentCredential : await pending.future;
   }
 
   @override
@@ -53,7 +57,8 @@ class _FakeAuthenticator implements AppLockAuthenticator {
     final error = unlockError;
     if (error != null) throw error;
     expect(credential.credentialId, enrollmentCredential.credentialId);
-    return assertion;
+    final pending = pendingUnlock;
+    return pending == null ? assertion : await pending.future;
   }
 }
 
@@ -616,6 +621,77 @@ void main() {
     expect(service.isUnlocked, isFalse);
     expect(authenticator.unlockCalls, 0);
     service.dispose();
+  });
+
+  test('D1 pending unlock cannot reopen after explicit lock; fresh retry works', () async {
+    seedStorage({_credentialKey: _credential.encode(), _requiredKey: 'required'});
+    final pending = Completer<AppLockAssertion>();
+    final authenticator = _FakeAuthenticator()..pendingUnlock = pending;
+    final service = AppLockService(authenticator: authenticator);
+    await service.initialize();
+    final attempt = service.unlock();
+    final rejected = expectLater(attempt, throwsA(isA<AppLockException>()));
+    await expectLater(service.unlock(), throwsA(isA<AppLockException>()));
+    service.lock();
+    pending.complete(const AppLockAssertion(signCount: 8));
+    await rejected;
+    expect(service.isUnlocked, isFalse);
+    expect(await const FlutterSecureStorage().read(key: _credentialKey), _credential.encode());
+    authenticator.pendingUnlock = null;
+    await service.unlock();
+    expect(service.isUnlocked, isTrue);
+    service.dispose();
+  });
+
+  test('D1 pending unlock cannot reopen after real AuthService sign-out', () async {
+    seedStorage({_localSessionKey: _localSessionValue,
+      _credentialKey: _credential.encode(), _requiredKey: 'required'});
+    final auth = AuthService(httpClient: MockClient((_) async {
+      fail('Local sign-out must not use remote API');
+    }));
+    await auth.initialize();
+    final pending = Completer<AppLockAssertion>();
+    final authenticator = _FakeAuthenticator()..pendingUnlock = pending;
+    final service = AppLockService(authenticator: authenticator, authService: auth);
+    await service.initialize();
+    final rejected = expectLater(service.unlock(), throwsA(isA<AppLockException>()));
+    await auth.signOut();
+    pending.complete(const AppLockAssertion(signCount: 8));
+    await rejected;
+    expect(auth.isAuthenticated, isFalse);
+    expect(service.isUnlocked, isFalse);
+    service.dispose();
+    auth.dispose();
+  });
+
+  test('D1 pending enrollment cannot reopen after detach', () async {
+    seedStorage({});
+    final pending = Completer<AppLockCredential>();
+    final authenticator = _FakeAuthenticator()..pendingEnroll = pending;
+    final service = AppLockService(authenticator: authenticator);
+    await service.initialize();
+    final rejected = expectLater(service.configure(), throwsA(isA<AppLockException>()));
+    await Future<void>.delayed(Duration.zero);
+    expect(authenticator.enrollCalls, 1);
+    service.noteDetached();
+    pending.complete(_credential);
+    await rejected;
+    expect(service.isUnlocked, isFalse);
+    expect(service.isConfigured, isFalse);
+    expect(await const FlutterSecureStorage().read(key: _credentialKey), isNull);
+    service.dispose();
+  });
+
+  test('D1 pending unlock cannot publish after disposal', () async {
+    seedStorage({_credentialKey: _credential.encode(), _requiredKey: 'required'});
+    final pending = Completer<AppLockAssertion>();
+    final service = AppLockService(authenticator: _FakeAuthenticator()..pendingUnlock = pending);
+    await service.initialize();
+    final rejected = expectLater(service.unlock(), throwsA(isA<AppLockException>()));
+    service.dispose();
+    pending.complete(const AppLockAssertion(signCount: 8));
+    await rejected;
+    expect(service.isUnlocked, isFalse);
   });
 
   test('secure persistence precedes public unlocked state in source', () {

@@ -1350,6 +1350,7 @@ jobs:
           git diff --exit-code -- pubspec.lock
           flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart test/features/navigation/d2_guest_entry_test.dart
           if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then
+            flutter test --no-pub --reporter expanded test/services/app_lock_service_test.dart
             flutter test --no-pub --reporter expanded --dart-define=IAMINA_D1_CUTOVER_CANDIDATE=true test/services/d1_cutover_policy_test.dart
           fi
           flutter analyze --no-fatal-infos --no-pub

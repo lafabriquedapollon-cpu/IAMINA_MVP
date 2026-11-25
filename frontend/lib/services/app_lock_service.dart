@@ -35,6 +35,9 @@ class AppLockService extends ChangeNotifier {
   bool _required = false;
   bool _explicitlySkipped = false;
   int _choiceGeneration = 0;
+  int _proofGeneration = 0;
+  bool _proofInFlight = false;
+  bool _disposed = false;
   bool _unlocked = false;
   bool _recoveryRequired = false;
   AppLockCredential? _credential;
@@ -69,6 +72,10 @@ class AppLockService extends ChangeNotifier {
   bool get needsSetup => _initialized && !_configured && !_explicitlySkipped && !_recoveryRequired;
 
   Future<void> initialize() async {
+    if (_disposed || _proofInFlight) {
+      throw const AppLockException('lock_verification_in_progress');
+    }
+    _proofGeneration++;
     _configured = false;
     _required = false;
     _explicitlySkipped = false;
@@ -292,6 +299,23 @@ class AppLockService extends ChangeNotifier {
     }
   }
 
+  void _beginProof() {
+    if (_disposed || _proofInFlight) {
+      throw const AppLockException('lock_verification_in_progress');
+    }
+    _proofInFlight = true;
+  }
+
+  bool _isCurrentProof(int generation, int epoch) =>
+      !_disposed && generation == _proofGeneration &&
+      epoch == AuthService.authEpoch;
+
+  void _requireCurrentProof(int generation, int epoch) {
+    if (!_isCurrentProof(generation, epoch)) {
+      throw const AppLockException('lock_verification_retired');
+    }
+  }
+
   Future<void> configure() async {
     if (!_initialized) {
       throw StateError('App lock requires initialized state');
@@ -299,25 +323,43 @@ class AppLockService extends ChangeNotifier {
     if (_recoveryRequired) {
       throw const AppLockException('recovery_required');
     }
-    final capability = await _authenticator.capability();
-    if (capability == AppLockCapability.insecureContext) {
-      throw const AppLockException('insecure_context');
-    }
-    if (capability != AppLockCapability.supported) {
-      throw const AppLockException('strong_auth_unavailable');
-    }
+    _beginProof();
+    final generation = _proofGeneration;
+    final epoch = AuthService.authEpoch;
+    try {
+      final capability = await _authenticator.capability();
+      _requireCurrentProof(generation, epoch);
+      if (capability == AppLockCapability.insecureContext) {
+        throw const AppLockException('insecure_context');
+      }
+      if (capability != AppLockCapability.supported) {
+        throw const AppLockException('strong_auth_unavailable');
+      }
 
-    final credential = await _authenticator.enroll();
-    await _storage.write(key: _credentialKey, value: credential.encode());
-    await _storage.write(key: _requiredKey, value: _requiredValue);
+      final credential = await _authenticator.enroll();
+      _requireCurrentProof(generation, epoch);
+      // Once persistence starts, complete the device credential and marker.
+      // If retirement occurs mid-write, retain the credential but not access.
+      await _storage.write(key: _credentialKey, value: credential.encode());
+      await _storage.write(key: _requiredKey, value: _requiredValue);
 
-    _credential = credential;
-    _explicitlySkipped = false;
-    _configured = true;
-    _required = true;
-    _recoveryRequired = false;
-    _unlocked = true;
-    notifyListeners();
+      if (!_disposed) {
+        _credential = credential;
+        _explicitlySkipped = false;
+        _configured = true;
+        _required = true;
+        _recoveryRequired = false;
+        if (!_isCurrentProof(generation, epoch)) {
+          _unlocked = false;
+          notifyListeners();
+        }
+      }
+      _requireCurrentProof(generation, epoch);
+      _unlocked = true;
+      notifyListeners();
+    } finally {
+      _proofInFlight = false;
+    }
   }
 
   Future<void> unlock() async {
@@ -331,17 +373,29 @@ class AppLockService extends ChangeNotifier {
     if (!_configured || credential == null) {
       throw const AppLockException('app_lock_not_configured');
     }
+    _beginProof();
+    final generation = _proofGeneration;
+    final epoch = AuthService.authEpoch;
+    try {
+      final assertion = await _authenticator.unlock(credential);
+      _requireCurrentProof(generation, epoch);
+      final updated = credential.copyWith(signCount: assertion.signCount);
+      await _storage.write(key: _credentialKey, value: updated.encode());
 
-    final assertion = await _authenticator.unlock(credential);
-    final updated = credential.copyWith(signCount: assertion.signCount);
-    await _storage.write(key: _credentialKey, value: updated.encode());
-
-    _credential = updated;
-    _unlocked = true;
-    notifyListeners();
+      // Preserve the persisted anti-rollback counter even if a lock arrives
+      // during the write. Never publish unlocked from a retired proof.
+      if (!_disposed) _credential = updated;
+      _requireCurrentProof(generation, epoch);
+      _unlocked = true;
+      notifyListeners();
+    } finally {
+      _proofInFlight = false;
+    }
   }
 
   void lock() {
+    // Invalidate a pending verification even when already locked.
+    _proofGeneration++;
     if (!_unlocked) return;
     _unlocked = false;
     notifyListeners();
@@ -354,7 +408,7 @@ class AppLockService extends ChangeNotifier {
   void noteResumed() {
     final backgroundedAt = _backgroundedAt;
     _backgroundedAt = null;
-    if (backgroundedAt == null || !_configured || !_unlocked) return;
+    if (backgroundedAt == null || (!_unlocked && !_proofInFlight)) return;
     final elapsed = _now().difference(backgroundedAt);
     if (elapsed >= gracePeriod) lock();
   }
@@ -365,11 +419,9 @@ class AppLockService extends ChangeNotifier {
   }
 
   void _handleAuthChanged() {
-    final auth = _authService;
     final generation = ++_choiceGeneration;
-    if (auth != null && auth.isInitialized && !auth.isAuthenticated) {
-      lock();
-    }
+    // Any identity transition retires an in-flight device proof.
+    lock();
     // Revoke the prior owner's opt-out synchronously before an async scope
     // lookup. Never carry patient A's choice over to patient B.
     if (_explicitlySkipped) {
@@ -406,6 +458,9 @@ class AppLockService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    _proofGeneration++;
+    _choiceGeneration++;
     _authService?.removeListener(_handleAuthChanged);
     super.dispose();
   }
