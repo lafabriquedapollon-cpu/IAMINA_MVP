@@ -166,6 +166,7 @@ class AuthService extends ChangeNotifier {
   bool _auditSession = false;
   bool _remoteCredentialVerified = false;
   int _identityGeneration = 0;
+  int? _verifiedIdentityGeneration;
   bool _disposed = false;
   Future<void> _identityStorageTail = Future<void>.value();
 
@@ -253,6 +254,17 @@ class AuthService extends ChangeNotifier {
       _localSessionEnrolled ||
       (_firebaseAuth?.currentUser != null);
   bool get isRemoteCredentialVerified => _remoteCredentialVerified;
+
+  /// Current-process native login binding only. Cached bearer restoration and
+  /// a new/pending identity attempt cannot supply this authority. This is not
+  /// an online revocation check, nor a cryptographic possession proof.
+  int? get verifiedNativeAdmissionGeneration =>
+      !_disposed && _initialized && !_auditSession && isAuthenticated &&
+          _remoteCredentialVerified && hasRemoteApiCredential &&
+          boundNativeAccountId != null &&
+          _verifiedIdentityGeneration == _identityGeneration
+      ? _identityGeneration
+      : null;
   /// Previously authenticated Django ID bound to this exact bearer.
   /// Offline restoration does not verify that the bearer is still active.
   int? get boundNativeAccountId =>
@@ -617,6 +629,7 @@ class AuthService extends ChangeNotifier {
       _nativeAccountId = id;
       _localSessionEnrolled = true;
       _remoteCredentialVerified = true;
+      _verifiedIdentityGeneration = generation;
       _notifyAuthChanged();
     });
   }

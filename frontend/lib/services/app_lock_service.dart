@@ -9,6 +9,19 @@ import 'auth_service.dart';
 
 typedef ProtectedLocalStateProbe = Future<bool> Function();
 
+/// Opaque, process-local preadmission capability, not a vault key or session.
+/// Only its issuing AppLockService may consume it; no public constructor.
+final class D1VaultAdmissionProof {
+  final int _owner;
+  final int _authGeneration;
+  final int _epoch;
+  final int _admissionGeneration;
+  final Duration _issuedAt;
+
+  D1VaultAdmissionProof._(this._owner, this._authGeneration, this._epoch,
+      this._admissionGeneration, this._issuedAt);
+}
+
 class AppLockService extends ChangeNotifier {
   static const _credentialKey = 'iamina_app_lock_credential_v1';
   static const _requiredKey = 'iamina_app_lock_required_v1';
@@ -29,6 +42,11 @@ class AppLockService extends ChangeNotifier {
   final ProtectedLocalStateProbe? _protectedLocalStateProbe;
   final DateTime Function() _now;
   final Duration gracePeriod;
+  final Stopwatch _admissionClock = Stopwatch()..start();
+  final Duration Function()? _admissionElapsedForTesting;
+  static const _admissionLifetime = Duration(seconds: 30);
+  int _admissionGeneration = 0;
+  D1VaultAdmissionProof? _pendingAdmission;
 
   bool _initialized = false;
   bool _configured = false;
@@ -49,13 +67,16 @@ class AppLockService extends ChangeNotifier {
     AuthService? authService,
     ProtectedLocalStateProbe? protectedLocalStateProbe,
     DateTime Function()? now,
+    // Test seam only. Production uses the process-local monotonic stopwatch.
+    Duration Function()? admissionElapsedForTesting,
     this.gracePeriod = defaultGracePeriod,
   })  : _storage = storage ?? const FlutterSecureStorage(),
         _authenticator =
             authenticator ?? createPlatformAppLockAuthenticator(),
         _authService = authService,
         _protectedLocalStateProbe = protectedLocalStateProbe,
-        _now = now ?? DateTime.now {
+        _now = now ?? DateTime.now,
+        _admissionElapsedForTesting = admissionElapsedForTesting {
     _authService?.addListener(_handleAuthChanged);
   }
 
@@ -72,6 +93,7 @@ class AppLockService extends ChangeNotifier {
   bool get needsSetup => _initialized && !_configured && !_explicitlySkipped && !_recoveryRequired;
 
   Future<void> initialize() async {
+    _retireAdmission();
     if (_disposed || _proofInFlight) {
       throw const AppLockException('lock_verification_in_progress');
     }
@@ -158,6 +180,7 @@ class AppLockService extends ChangeNotifier {
   Future<AppLockCapability> capability() => _authenticator.capability();
 
   Future<void> recoverWithVerifiedRemoteAccount() async {
+    _retireAdmission();
     if (!_initialized) {
       throw StateError('App lock requires initialized state');
     }
@@ -187,6 +210,7 @@ class AppLockService extends ChangeNotifier {
   /// an ambiguous/recovery vault. A compromised browser profile is out of
   /// scope for device-local data when the user deliberately declines a lock.
   Future<void> continueWithoutAppLock() async {
+    _retireAdmission();
     if (!canOptOutOfAppLock) {
       throw const AppLockException('web_encrypted_vault_required');
     }
@@ -211,6 +235,7 @@ class AppLockService extends ChangeNotifier {
   /// verification. Keep the credential for other locally saved owners.
   /// Nothing here grants backend auth or enables clinical data sync.
   Future<void> disableForCurrentVault() async {
+    _retireAdmission();
     if (!canOptOutOfAppLock) {
       throw const AppLockException('web_encrypted_vault_required');
     }
@@ -249,6 +274,7 @@ class AppLockService extends ChangeNotifier {
   /// Re-enable protection for this owner. The device credential is never
   /// silently reused: enabling requires verification or new enrollment.
   Future<void> enableForCurrentVault() async {
+    _retireAdmission();
     if (!_initialized || _recoveryRequired || !_explicitlySkipped) {
       throw const AppLockException('lock_preference_not_available');
     }
@@ -299,7 +325,73 @@ class AppLockService extends ChangeNotifier {
     }
   }
 
+  void _retireAdmission() {
+    _pendingAdmission = null;
+    _admissionGeneration++;
+  }
+
+  Duration get _admissionElapsed =>
+      _admissionElapsedForTesting?.call() ?? _admissionClock.elapsed;
+
+  bool _hasAdmissionContext(int owner, int generation, int epoch) {
+    final auth = _authService;
+    return !_disposed && _initialized && _configured && _required &&
+        !_explicitlySkipped && !_recoveryRequired && _credential != null &&
+        _backgroundedAt == null && auth != null &&
+        auth.boundNativeAccountId == owner &&
+        auth.verifiedNativeAdmissionGeneration == generation &&
+        AuthService.authEpoch == epoch;
+  }
+
+  /// Requires a new platform assertion, even when UI lock is already open.
+  /// A successful enrollment alone is not enough. Never returns key material.
+  Future<D1VaultAdmissionProof> issueVaultAdmissionProof() async {
+    _retireAdmission();
+    final owner = _authService?.boundNativeAccountId;
+    final generation = _authService?.verifiedNativeAdmissionGeneration;
+    final epoch = AuthService.authEpoch;
+    if (owner == null || generation == null ||
+        !_hasAdmissionContext(owner, generation, epoch) || _proofInFlight) {
+      throw const AppLockException('vault_admission_identity_required');
+    }
+    // unlock() synchronously enters _beginProof, retiring exactly one
+    // generation. A reentrant proof, lock or lifecycle transition invalidates
+    // issuance even if the legacy UI's grace period leaves it unlocked.
+    final expected = _admissionGeneration + 1;
+    final started = _admissionElapsed;
+    await unlock();
+    final now = _admissionElapsed;
+    if (_admissionGeneration != expected || !_unlocked ||
+        !_hasAdmissionContext(owner, generation, epoch) ||
+        now < started || now - started >= _admissionLifetime) {
+      throw const AppLockException('vault_admission_retired');
+    }
+    final proof = D1VaultAdmissionProof._(
+        owner, generation, epoch, expected, started);
+    _pendingAdmission = proof;
+    return proof;
+  }
+
+  /// Synchronous, one-shot validation. A wrong-owner attempt burns the ticket.
+  /// This is only preadmission; an eventual async vault adapter must recheck
+  /// identity/lock and durable lease at every relevant boundary.
+  void consumeVaultAdmissionProof(D1VaultAdmissionProof proof,
+      {required int owner}) {
+    if (!identical(_pendingAdmission, proof)) {
+      throw const AppLockException('vault_admission_retired');
+    }
+    _pendingAdmission = null;
+    final now = _admissionElapsed;
+    if (owner != proof._owner || !_unlocked ||
+        _admissionGeneration != proof._admissionGeneration ||
+        !_hasAdmissionContext(owner, proof._authGeneration, proof._epoch) ||
+        now < proof._issuedAt || now - proof._issuedAt >= _admissionLifetime) {
+      throw const AppLockException('vault_admission_retired');
+    }
+  }
+
   void _beginProof() {
+    _retireAdmission();
     if (_disposed || _proofInFlight) {
       throw const AppLockException('lock_verification_in_progress');
     }
@@ -394,6 +486,7 @@ class AppLockService extends ChangeNotifier {
   }
 
   void lock() {
+    _retireAdmission();
     // Invalidate a pending verification even when already locked.
     _proofGeneration++;
     if (!_unlocked) return;
@@ -402,6 +495,7 @@ class AppLockService extends ChangeNotifier {
   }
 
   void noteBackgrounded() {
+    _retireAdmission();
     _backgroundedAt ??= _now();
   }
 
@@ -459,6 +553,7 @@ class AppLockService extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _retireAdmission();
     _proofGeneration++;
     _choiceGeneration++;
     _authService?.removeListener(_handleAuthChanged);
