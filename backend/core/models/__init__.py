@@ -15,6 +15,7 @@ from core.models.d2_notification import (  # noqa: F401
     D2NotificationPreference,
     D2ProactiveEmissionReceipt,
 )
+from core.models.d3_feature_intent import D3FeatureIntent  # noqa: F401
 from core.models.erasure_record import ErasureRecord  # noqa: F401
 from core.models.finops_budget import (  # noqa: F401
     AIBudgetAccount,
