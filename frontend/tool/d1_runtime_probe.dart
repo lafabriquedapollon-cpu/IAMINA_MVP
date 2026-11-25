@@ -13,6 +13,8 @@ import 'package:sqlite3/wasm.dart';
 
 @JS('d1Snapshot')
 external set _snapshotFn(JSFunction function);
+@JS('d1Mutate')
+external set _mutateFn(JSFunction function);
 @JS('d1Inspect')
 external set _inspectFn(JSFunction function);
 
@@ -96,7 +98,11 @@ class _MemoryVault {
   }
 }
 
-Future<Uint8List> _snapshot(Uint8List? previous, int owner) async {
+Future<Uint8List> _snapshot(Uint8List? previous, int owner, [String? operation]) async {
+  if (operation != null) {
+    _require(RegExp(r'^[a-z0-9-]{8,64}$').hasMatch(operation), 'Invalid operation ID');
+    _require(previous != null, 'Existing checkpoint required');
+  }
   final vault = await _MemoryVault.open(owner, previous);
   var closed = false;
   try {
@@ -109,10 +115,13 @@ Future<Uint8List> _snapshot(Uint8List? previous, int owner) async {
         ));
       }
       final next = await db.countLogs() + 1;
+      final id = operation == null ? 'd1-i1-$owner-$next' : 'd1-i1-$owner-op-$operation';
+      _require((await (db.select(db.logEntries)..where((row) => row.clientUuid.equals(id))).get()).isEmpty,
+          'Duplicate operation');
       await db.into(db.logEntries).insert(LogEntriesCompanion.insert(
         createdAt: DateTime.utc(2026, 11, 25, 0, next),
         bloodSugar: 100.25 + next,
-        clientUuid: 'd1-i1-$owner-$next',
+        clientUuid: id,
         mealDescription: const Value(_marker),
       ));
     });
@@ -145,6 +154,8 @@ void main() {
   WidgetsFlutterBinding.ensureInitialized();
   _snapshotFn = ((JSUint8Array? bytes, JSNumber owner) =>
       _snapshot(bytes?.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
+  _mutateFn = ((JSUint8Array bytes, JSNumber owner, JSString operation) =>
+      _snapshot(bytes.toDart, owner.toDartInt, operation.toDart).then((value) => value.toJS).toJS).toJS;
   _inspectFn = ((JSUint8Array bytes, JSNumber owner) =>
       _inspect(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
   runApp(const MaterialApp(home: Scaffold(

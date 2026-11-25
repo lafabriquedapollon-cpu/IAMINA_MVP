@@ -61,7 +61,8 @@ export async function readCheckpoint(owner, secret) {
   const bytes = await decode(record, owner, secret);
   return {revision: record.revision, archive: record.archive, bytes};
 }
-export async function commitCheckpoint(owner, secret, expected, bytes) {
+export async function commitCheckpoint(owner, secret, expected, bytes, {signal, onStaged} = {}) {
+  signal?.throwIfAborted();
   requireOwner(owner);
   if (!(bytes instanceof Uint8Array) || bytes.length < 1 || bytes.length > MAX)
     throw new Error('Invalid checkpoint bytes');
@@ -72,6 +73,7 @@ export async function commitCheckpoint(owner, secret, expected, bytes) {
     expected = {revision: expected.revision, archive: expected.archive.slice()};
     const old = await decode(expected, owner, secret);
     old.fill(0);
+    signal?.throwIfAborted();
     if (expected.revision === 0xffffffff) throw new Error('Revision exhausted');
     revision = expected.revision + 1;
   }
@@ -81,8 +83,10 @@ export async function commitCheckpoint(owner, secret, expected, bytes) {
   let archive;
   try { archive = await sealArchive(payload, secret, owner); }
   finally { payload.fill(0); }
+  signal?.throwIfAborted();
   const db = await connect();
   try {
+    signal?.throwIfAborted();
     // No await inside the transaction. Read/compare/replace are atomic across
     // tabs for this origin. Success is returned only on transaction completion.
     await new Promise((resolve, reject) => {
@@ -94,16 +98,29 @@ export async function commitCheckpoint(owner, secret, expected, bytes) {
       }
       const objectStore = tx.objectStore(TABLE);
       let conflict = false;
-      tx.oncomplete = () => resolve();
-      tx.onabort = () => reject(new Error(conflict ? 'Checkpoint conflict' : 'Checkpoint commit failed'));
+      const abort = () => { try { tx.abort(); } catch { /* already completed */ } };
+      const cleanup = () => signal?.removeEventListener('abort', abort);
+      tx.oncomplete = () => { cleanup(); resolve(); };
+      tx.onabort = () => {
+        cleanup();
+        reject(new Error(signal?.aborted ? 'Session retired' :
+          conflict ? 'Checkpoint conflict' : 'Checkpoint commit failed'));
+      };
+      signal?.addEventListener('abort', abort, {once: true});
+      if (signal?.aborted) { abort(); return; }
       const req = objectStore.get(owner);
       req.onsuccess = () => {
+        if (signal?.aborted) { abort(); return; }
         const current = req.result ?? null;
         const matches = expected === null ? current === null :
           current !== null && current.revision === expected.revision &&
           sameBytes(current.archive, expected.archive);
         if (!matches) { conflict = true; tx.abort(); return; }
-        objectStore.put({revision, archive}, owner);
+        const put = objectStore.put({revision, archive}, owner);
+        // Synthetic fault injection only: observe staged request, before commit.
+        if (onStaged) put.onsuccess = () => {
+          try { onStaged(); } catch { abort(); }
+        };
       };
     });
     return {revision, archive};
