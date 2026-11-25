@@ -304,6 +304,230 @@ def exercise_i2(ctx, page, origin, errors):
 
 
 
+# I3 deliberately runs in a fresh profile, not on the I1/I2 storage.
+# The test authority is synthetic, with no actual account or app-lock proof.
+I3_INIT = r"""async () => {
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,pa='synthetic possession A 2026',pb='synthetic possession B 2026';
+  const proof=(owner,epoch,options={})=>api.syntheticProof(owner,
+    {identityVerified:true,unlocked:true,epoch,...options});
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,expected)=>{try{await fn();}catch(e){
+    if(expected&&!String(e).includes(expected))throw e;return;
+  }throw new Error('Expected rejection: '+expected);};
+  window.i3={api,A,B,pa,pb,proof,check,reject};
+  await reject(()=>api.admit(A,1,proof(A,1),pa),'Vault unavailable');
+  await reject(()=>api.enroll(A,1,proof(A,1,{identityVerified:false}),pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,1,proof(A,1,{unlocked:false}),pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,1,proof(B,1),pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,2,proof(A,1),pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,1,proof(A,1),'short'),'Possession secret required');
+  const once=proof(A,1);
+  const a=await api.enroll(A,1,once,pa);
+  check((await a.inspect()).revision===1,'First enrollment');
+  await reject(()=>api.admit(A,1,once,pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,1,proof(A,1),pa),'Existing vault cannot be overwritten');
+  await reject(()=>api.admit(A,1,proof(A,1),pb),'Archive authentication failed');
+  const b=await api.enroll(B,2,proof(B,2),pb);
+  await reject(()=>a.inspect(),'Admission fence retired');
+  check((await b.inspect()).owner===B,'B admission');
+  check(await a.retire()===false,'Stale A retired newer B');
+  check((await b.inspect()).revision===1,'B stale retire damage');
+  check(await b.retire()===true,'B revoke');
+  await reject(()=>b.inspect(),'Session retired');
+  window.i3.session=await api.admit(A,3,proof(A,3),pa);
+  check((await window.i3.session.inspect()).rows===1,'A re-admission');
+  return {negativeCases:9,ownerSwitch:true,staleRetireRejected:true};
+}"""
+
+I3_SETUP = r"""async () => {
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,pa='synthetic possession A 2026',pb='synthetic possession B 2026';
+  const proof=(owner,epoch)=>api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch});
+  window.i3={api,A,B,pa,pb,proof};
+}"""
+
+I3_START = r"""({operation,gate,epoch})=>{
+  const x=window.i3;
+  const state=window.i3State={stage:'starting',outcome:null,release:null};
+  const hold=stage=>new Promise(resolve=>{state.stage=stage;state.release=resolve;});
+  const settle=p=>p.then(result=>{state.outcome={ok:true,result};},
+    error=>{state.outcome={ok:false,error:String(error)};});
+  if(gate==='admission'){
+    settle(x.api.admit(x.A,epoch,x.proof(x.A,epoch),x.pa,
+      {beforeActivate:()=>hold('verified')}));
+  }else{
+    settle(x.session.mutate(operation,{
+      beforeCommit:()=>gate==='commit'?hold('prepared'):undefined,
+      beforeAck:()=>gate==='ack'?hold('committed'):undefined,
+    }));
+  }
+  return true;
+}"""
+
+I3_DISK = r"""async () => {
+  const db=await new Promise((resolve,reject)=>{
+    const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);
+  });
+  let records;
+  try{
+    records=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const a=store.get('owner:900001'),b=store.get('owner:900002'),f=store.get('fence'),k=store.getAllKeys();
+      tx.oncomplete=()=>resolve({a:a.result,b:b.result,f:f.result,keys:k.result});
+      tx.onabort=()=>reject(tx.error);
+    });
+  }finally{db.close();}
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const needles=['SQLite format 3','D1_I1_SYNTHETIC_NOT_PATIENT',
+    'synthetic possession A 2026','synthetic possession B 2026'].map(x=>new TextEncoder().encode(x));
+  const contains=(h,n)=>h.some((_,i)=>n.every((v,j)=>h[i+j]===v));
+  for(const r of [records.a,records.b]){
+    check(Object.keys(r).sort().join(',')==='archive,envelope,revision','Unexpected owner record fields');
+    for(const bytes of [r.archive,r.envelope]){
+      check(bytes instanceof Uint8Array&&bytes.length>52&&!needles.some(n=>contains(bytes,n)),
+        'Unexpected durable plaintext');
+    }
+  }
+  check(!records.a.envelope.every((v,i)=>v===records.b.envelope[i]),'Owner envelope collision');
+  check(JSON.stringify(records.keys.sort())==='["fence","owner:900001","owner:900002"]','Unexpected durable keys');
+  check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]'&&
+    !localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length,'Unexpected durable storage');
+  if(navigator.storage?.getDirectory){
+    const root=await navigator.storage.getDirectory();
+    for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+  }
+  return {revisionA:records.a.revision,revisionB:records.b.revision,
+    fenceOwner:records.f.owner,encryptedOwners:2};
+}"""
+
+I3_TAMPER = r"""async () => {
+  const {api,A,B,pa,pb,proof}=window.i3;
+  const db=await new Promise((resolve,reject)=>{
+    const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);
+  });
+  async function read(owner){
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),r=tx.objectStore('state').get('owner:'+owner);
+      tx.oncomplete=()=>resolve(r.result);tx.onabort=()=>reject(tx.error);
+    });
+  }
+  async function put(owner,value){
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readwrite',{durability:'strict'});
+      tx.objectStore('state').put(value,'owner:'+owner);
+      tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);
+    });
+  }
+  const original=await read(A), other=await read(B);
+  const rejected=async()=>{try{await api.admit(A,19,proof(A,19),pa);return false;}catch{return true;}};
+  let count=0;
+  try{
+    const corrupt=original.envelope.slice();corrupt[corrupt.length-1]^=1;
+    await put(A,{...original,envelope:corrupt});
+    if(!await rejected())throw new Error('Tampered envelope admitted');count++;
+    await put(A,{...original,envelope:other.envelope});
+    if(!await rejected())throw new Error('Cross-owner envelope admitted');count++;
+    await put(A,{revision:original.revision,archive:original.archive});
+    if(!await rejected())throw new Error('Missing envelope admitted');count++;
+    try{await api.enroll(A,19,proof(A,19),pa);throw new Error('Unexpected reset');}
+    catch(e){if(!String(e).includes('Existing vault cannot be overwritten'))throw e;}count++;
+    await put(A,{...original,revision:original.revision+1});
+    if(!await rejected())throw new Error('Revision tamper admitted');count++;
+  }finally{await put(A,original);db.close();}
+  return count;
+}"""
+
+
+def i3_start(page,operation,gate,epoch=0):
+    page.evaluate(I3_START,{"operation":operation,"gate":gate,"epoch":epoch})
+
+
+def i3_stage(page,expected):
+    page.wait_for_function("(s)=>window.i3State?.stage===s",arg=expected,timeout=30000)
+
+
+def i3_outcome(page):
+    page.wait_for_function("window.i3State?.outcome!=null",timeout=30000)
+    return page.evaluate("window.i3State.outcome")
+
+
+def i3_release(page):
+    page.evaluate("window.i3State.release()")
+
+
+def i3_admit(page,owner,epoch):
+    return page.evaluate("""async ({owner,epoch})=>{
+        const x=window.i3;
+        x.session=await x.api.admit(owner,epoch,x.proof(owner,epoch),owner===x.A?x.pa:x.pb);
+        return await x.session.inspect();
+    }""",{"owner":owner,"epoch":epoch})
+
+
+def exercise_i3(ctx,page,origin,errors):
+    record=page.evaluate(I3_INIT)
+    second=new_ready_page(ctx,origin,errors)
+    second.evaluate(I3_SETUP)
+    # An independently verified but delayed admission cannot outlive revocation.
+    i3_start(second,"unused","admission",4)
+    i3_stage(second,"verified")
+    assert page.evaluate("window.i3.session.retire()") is True
+    i3_release(second)
+    late=i3_outcome(second)
+    assert not late["ok"] and "Admission fence changed" in late["error"],late
+    assert i3_admit(page,900001,5)["revision"]==1
+
+    # Old tab already holds plaintext in memory and has sealed a next snapshot.
+    # B admission changes the durable fence, with no notification dependency.
+    i3_start(page,"stale-cross-owner-001","commit")
+    i3_stage(page,"prepared")
+    assert i3_admit(second,900002,6)["owner"]==900002
+    i3_release(page)
+    stale=i3_outcome(page)
+    assert not stale["ok"] and "Admission fence retired" in stale["error"],stale
+    assert page.evaluate("window.i3.session.retire()") is False
+    assert second.evaluate("window.i3.session.inspect()")["revision"]==1
+    a=i3_admit(page,900001,7)
+    assert a["revision"]==1 and a["rows"]==1,a
+
+    # Durable commit, then another tab admits the SAME owner before ACK.
+    i3_start(page,"fenced-ack-001","ack")
+    i3_stage(page,"committed")
+    a=i3_admit(second,900001,8)
+    assert a["revision"]==2 and a["rows"]==2,a
+    i3_release(page)
+    stale_ack=i3_outcome(page)
+    assert not stale_ack["ok"] and "Admission fence retired" in stale_ack["error"],stale_ack
+    i3_start(second,"fenced-ack-001","none")
+    replay=i3_outcome(second)
+    assert replay=={"ok":True,"result":{"revision":2,"replay":True,"operation":"fenced-ack-001"}},replay
+
+    # Lock from the current tab invalidates all old leases; explicit re-admission.
+    assert second.evaluate("window.i3.session.retire()") is True
+    assert page.evaluate(I3_DISK)=={"revisionA":2,"revisionB":1,"fenceOwner":None,"encryptedOwners":2}
+    assert page.evaluate(I3_TAMPER)==5
+    assert i3_admit(page,900001,20)["ids"]==["d1-i1-900001-1","d1-i1-900001-op-fenced-ack-001"]
+    assert page.evaluate("window.i3.session.retire()") is True
+    second.close()
+    record.update(delayedAdmissionRejected=True,crossOwnerStaleCommitRejected=True,
+                  sameOwnerLateAckRejected=True,replay=True,tamperCases=5,
+                  durable=page.evaluate(I3_DISK))
+    return record
+
+
+def restore_i3(page):
+    page.evaluate(I3_SETUP)
+    a=i3_admit(page,900001,21)
+    assert a["revision"]==2 and a["raw"]==[101.25,102.25] and a["schema"]==12 and a["integrity"]=="ok",a
+    b=i3_admit(page,900002,22)
+    assert b["revision"]==1 and b["raw"]==[101.25] and b["schema"]==12 and b["integrity"]=="ok",b
+    assert page.evaluate("window.i3.session.retire()") is True
+    return {"a":a,"b":b,"durable":page.evaluate(I3_DISK)}
+
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -346,6 +570,19 @@ def run():
                                 assert not blocked and not errors, (blocked,errors)
                             finally:
                                 ctx.close()
+                            i3_profile = Path(root)/(locale+"-admission")
+                            ctx,page,blocked,errors = open_context(browser_type,i3_profile,locale,origin)
+                            try:
+                                record["i3"] = exercise_i3(ctx,page,origin,errors)
+                                assert not blocked and not errors, (blocked,errors)
+                            finally:
+                                ctx.close()
+                            ctx,page,blocked,errors = open_context(browser_type,i3_profile,locale,origin)
+                            try:
+                                record["i3_restart"] = restore_i3(page)
+                                assert not blocked and not errors, (blocked,errors)
+                            finally:
+                                ctx.close()
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -356,6 +593,7 @@ def run():
     assert len(results)==2 and all(x["result"]=="PASS" for x in results), "D1 actual Drift encrypted checkpoint failed"
     print("D1_RUNTIME_PASS 2/2",flush=True)
     print("D1_I2_DURABLE_MUTATION_PASS 2/2",flush=True)
+    print("D1_I3_ADMISSION_FENCE_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":
