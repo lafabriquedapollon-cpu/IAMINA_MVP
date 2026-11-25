@@ -1273,6 +1273,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/d1-browser-venv"
           "$RUNNER_TEMP/d1-browser-venv/bin/python" -m pip install playwright==1.55.0
           "$RUNNER_TEMP/d1-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
+          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_opfs_capability_probe.py
           archive_status=0
           portable_status=0
           "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_archive_browser_probe.py || archive_status=$?
@@ -1312,3 +1313,33 @@ jobs:
           python manage.py migrate --noinput
           python manage.py makemigrations --check --dry-run
           python -m pytest -q core/tests/test_d3_feature_intents.py core/tests/test_account_consent_identity_safety.py core/tests/test_ai_egress_boundary_gate.py
+
+  # Separate platform evidence; never masks the Linux gate.
+  phase1-d1-macos-storage:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && github.head_ref == 'phase1/d1-backup' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Attest macOS source and browser environment
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          sw_vers
+          python -m venv "$RUNNER_TEMP/d1-macos-venv"
+          "$RUNNER_TEMP/d1-macos-venv/bin/python" -m pip install playwright==1.55.0
+          "$RUNNER_TEMP/d1-macos-venv/bin/python" -m playwright install chromium webkit
+      - name: Probe OPFS capability and verify encrypted archive restart
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/d1-macos-venv/bin/python" frontend/tool/d1_opfs_capability_probe.py
+          "$RUNNER_TEMP/d1-macos-venv/bin/python" frontend/tool/d1_archive_browser_probe.py
