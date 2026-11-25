@@ -271,6 +271,58 @@ class AdmissionSession {
       return {sha256,revision:r.revision,tables};
     }finally{bytes?.fill(0);}
   }
+  async readGlucose(uuid){
+    require(this.#guard,'Bound authority required');
+    require(typeof uuid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid),'Invalid measurement UUID');
+    const r=await this.#read();
+    let bytes;
+    try{
+      bytes=await decrypt(r,this.#key,this.#lease.owner);this.#local();
+      const measurement=JSON.parse(await window.d1GlucoseRead(bytes,this.#lease.owner,uuid));
+      await this.#verifyFence();this.#local();
+      return {revision:r.revision,measurement};
+    }finally{bytes?.fill(0);}
+  }
+  async insertGlucose(expectedRevision,uuid,mgDl,unit,seconds,{beforeCommit,beforeAck}={}){
+    require(this.#guard,'Bound authority required');this.#local();
+    require(Number.isSafeInteger(expectedRevision)&&expectedRevision>0&&
+      typeof uuid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)&&
+      unit==='mg/dL'&&Number.isFinite(mgDl)&&mgDl>0&&Number.isSafeInteger(seconds)&&
+      seconds>0&&seconds<=4102444800,'Invalid measurement');
+    require(!this.#busy,'Mutation already pending');this.#busy=true;
+    let bytes,next;
+    const owner=this.#lease.owner,key=this.#key;
+    const matches=m=>m&&m.uuid===uuid&&m.mgDl===mgDl&&m.loggedAtSeconds===seconds&&
+      m.source==='manual'&&m.syncStatus==='pending';
+    try{
+      const r=await this.#read();
+      bytes=await decrypt(r,key,owner);this.#local();
+      const existing=JSON.parse(await window.d1GlucoseRead(bytes,owner,uuid));this.#local();
+      if(existing!==null){
+        require(matches(existing),'Measurement UUID conflict');
+        await this.#verifyFence();this.#local();
+        return {revision:r.revision,replay:true,measurement:existing};
+      }
+      require(r.revision===expectedRevision,'Checkpoint conflict');
+      next=await window.d1GlucoseInsert(bytes,owner,uuid,mgDl,seconds);this.#local();
+      const measurement=JSON.parse(await window.d1GlucoseRead(next,owner,uuid));this.#local();
+      require(matches(measurement),'Measurement invariant failed');
+      require(r.revision<0xffffffff,'Revision exhausted');
+      const revision=r.revision+1;
+      const archive=await encrypt(next,key,owner,revision);this.#local();
+      if(beforeCommit)await beforeCommit();
+      this.#local();
+      await transaction(owner,true,(current,f,store)=>{
+        this.#local();
+        require(fenceMatches(f,this.#lease),'Admission fence retired');
+        require(sameRecord(current,r),'Checkpoint conflict');
+        store.put({revision,envelope:r.envelope,archive},'owner:'+owner);
+      });
+      if(beforeAck)await beforeAck();
+      await this.#verifyFence();this.#local();
+      return {revision,replay:false,measurement};
+    }finally{bytes?.fill(0);next?.fill(0);this.#busy=false;}
+  }
   async readTreatment(){
     require(this.#guard,'Bound authority required');
     const r=await this.#read();
@@ -522,6 +574,8 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
     return Object.freeze({
       inspect:()=>perform(()=>session.inspect()),
       auditSnapshot:()=>perform(()=>session.auditSnapshot()),
+      readGlucose:uuid=>perform(()=>session.readGlucose(uuid)),
+      insertGlucose:(revision,uuid,mgDl,unit,seconds,hooks)=>perform(()=>session.insertGlucose(revision,uuid,mgDl,unit,seconds,hooks)),
       readTreatment:()=>perform(()=>session.readTreatment()),
       writeTreatment:(revision,state,codes,hooks)=>perform(()=>session.writeTreatment(revision,state,codes,hooks)),
       mutate:(operation,hooks)=>perform(()=>session.mutate(operation,hooks)),

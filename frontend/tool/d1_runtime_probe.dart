@@ -29,6 +29,10 @@ external set _legacyFn(JSFunction function);
 external set _fullInspectFn(JSFunction function);
 @JS('d1Inspect')
 external set _inspectFn(JSFunction function);
+@JS('d1GlucoseRead')
+external set _glucoseReadFn(JSFunction function);
+@JS('d1GlucoseInsert')
+external set _glucoseInsertFn(JSFunction function);
 @JS('d1TreatmentRead')
 external set _treatmentReadFn(JSFunction function);
 @JS('d1TreatmentChange')
@@ -134,6 +138,8 @@ Future<JSFunction> _boundProof(int owner) async {
 const _filename = 'vault.sqlite';
 const _path = '/vault.sqlite';
 const _marker = 'D1_I1_SYNTHETIC_NOT_PATIENT';
+const _glucoseMarker = 'D1_I5C_SYNTHETIC_GLUCOSE';
+final _fixtureUuid = RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$');
 const _owners = [900001, 900002];
 
 void _require(bool value, String reason) {
@@ -188,8 +194,11 @@ class _MemoryVault {
         'Profile owner mismatch');
     final rows = await db.getRecentLogs();
     _require(rows.isNotEmpty &&
-        rows.every((row) => row.mealDescription == _marker &&
-          row.clientUuid.startsWith('d1-i1-$owner-')), 'Synthetic rows mismatch');
+        rows.every((row) =>
+          (row.mealDescription == _marker && row.clientUuid.startsWith('d1-i1-$owner-')) ||
+          (row.mealDescription == _glucoseMarker && _fixtureUuid.hasMatch(row.clientUuid) &&
+           row.source == 'manual' && row.bloodSugar.isFinite && row.bloodSugar > 0 &&
+           row.loggedAt != null && row.insulinUnits == null && row.syncStatus == 'pending')), 'Synthetic rows mismatch');
     final integrity = await db.customSelect('PRAGMA integrity_check').getSingle();
     final schema = await db.customSelect('PRAGMA user_version').getSingle();
     _require(integrity.data.values.single == 'ok' &&
@@ -374,6 +383,67 @@ Future<Uint8List> _changeTreatment(
   }
 }
 
+Future<LogEntryData?> _fixtureGlucose(AppDatabase db, String uuid) async {
+  _require(_fixtureUuid.hasMatch(uuid), 'Invalid measurement UUID');
+  final row = await (db.select(db.logEntries)
+      ..where((r) => r.clientUuid.equals(uuid))).getSingleOrNull();
+  _require(row == null || (row.mealDescription == _glucoseMarker &&
+      row.source == 'manual' && row.loggedAt != null &&
+      row.bloodSugar.isFinite && row.bloodSugar > 0 &&
+      row.insulinUnits == null && row.syncStatus == 'pending'),
+      'Unexpected measurement row');
+  return row;
+}
+
+Future<String> _readGlucose(Uint8List input, int owner, String uuid) async {
+  final vault = await _MemoryVault.open(owner, input);
+  try {
+    await vault.inspect();
+    final row = await _fixtureGlucose(vault.db, uuid);
+    return jsonEncode(row == null ? null : {
+      'uuid': row.clientUuid, 'mgDl': row.bloodSugar,
+      'loggedAtSeconds': row.loggedAt!.millisecondsSinceEpoch ~/ 1000,
+      'syncStatus': row.syncStatus, 'source': row.source,
+    });
+  } finally {
+    try { await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
+// Actual Drift insertion primitive, explicit mg/dL fixture only.
+Future<Uint8List> _insertGlucose(Uint8List input, int owner, String uuid,
+    double mgDl, int seconds) async {
+  _require(_fixtureUuid.hasMatch(uuid) && mgDl.isFinite && mgDl > 0 &&
+      seconds > 0 && seconds <= 4102444800, 'Invalid measurement');
+  final vault = await _MemoryVault.open(owner, input);
+  var closed = false;
+  try {
+    await vault.inspect();
+    final db = vault.db;
+    final count = await db.countLogs();
+    _require(await _fixtureGlucose(db, uuid) == null, 'Duplicate measurement UUID');
+    final time = DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+    await db.into(db.logEntries).insert(LogEntriesCompanion.insert(
+      createdAt: time, loggedAt: Value(time), bloodSugar: mgDl,
+      clientUuid: uuid, mealDescription: const Value(_glucoseMarker),
+    ));
+    final row = await _fixtureGlucose(db, uuid);
+    _require(row != null && row.bloodSugar == mgDl &&
+        row.loggedAt!.millisecondsSinceEpoch == seconds * 1000 &&
+        await db.countLogs() == count + 1, 'Measurement invariant failed');
+    await vault.inspect();
+    await db.close();
+    closed = true;
+    _require(vault.fs.fileData.keys.every((key) => key == _path),
+        'Unexpected SQLite auxiliary file');
+    return Uint8List.fromList(vault.fs.fileData[_path]!);
+  } finally {
+    try { if (!closed) await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   _boundLoginFn = ((JSNumber owner) =>
@@ -387,6 +457,14 @@ void main() {
       _snapshot(bytes.toDart, owner.toDartInt, operation.toDart).then((value) => value.toJS).toJS).toJS;
   _legacyFn = ((JSNumber owner) =>
       _legacySnapshot(owner.toDartInt).then((value) => value.toJS).toJS).toJS;
+  _glucoseReadFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid) =>
+      _readGlucose(bytes.toDart, owner.toDartInt, uuid.toDart)
+          .then((value) => value.toJS).toJS).toJS;
+  _glucoseInsertFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid,
+      JSNumber mgDl, JSNumber seconds) =>
+      _insertGlucose(bytes.toDart, owner.toDartInt, uuid.toDart,
+          mgDl.toDartDouble, seconds.toDartInt)
+          .then((value) => value.toJS).toJS).toJS;
   _treatmentReadFn = ((JSUint8Array bytes, JSNumber owner) =>
       _readTreatment(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
   _treatmentChangeFn = ((JSUint8Array bytes, JSNumber owner, JSString state, JSString codes) =>

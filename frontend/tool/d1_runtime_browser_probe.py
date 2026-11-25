@@ -1419,6 +1419,144 @@ def exercise_clinical_store(browser_type,profile,locale,origin):
 
 
 
+I5_GLUCOSE = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,t=1795564800;
+  const u='ab123456-1234-4abc-8def-000000000001',v='ab123456-1234-4abc-8def-000000000002';
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected refusal');return;
+  }throw new Error('Expected refusal');};
+  const open=async(owner,secret)=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  };
+  let s=await open(A,a);
+  const initial=await s.auditSnapshot();
+  check((await s.readGlucose(u)).measurement===null,'Unexpected reading');
+  await reject(()=>s.insertGlucose(1,u,123.25,'mmol/L',t),'Invalid measurement');
+  s=await open(A,a);
+  await reject(()=>s.insertGlucose(1,u,0,'mg/dL',t),'Invalid measurement');
+  s=await open(A,a);
+  await reject(()=>s.insertGlucose(2,u,123.25,'mg/dL',t),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.insertGlucose(1,u,123.25,'mg/dL',t,{beforeCommit:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const before=await s.auditSnapshot();
+  check(before.sha256===initial.sha256&&before.revision===1,'Precommit changed snapshot');
+  const ack=await s.insertGlucose(1,u,123.25,'mg/dL',t);
+  check(ack.revision===2&&!ack.replay&&ack.measurement.mgDl===123.25&&
+    ack.measurement.loggedAtSeconds===t&&ack.measurement.syncStatus==='pending','ACK mismatch');
+  const first=await s.auditSnapshot();
+  const replay=await s.insertGlucose(1,u,123.25,'mg/dL',t);
+  check(replay.revision===2&&replay.replay&&(await s.auditSnapshot()).sha256===first.sha256,'Replay changed snapshot');
+  await reject(()=>s.insertGlucose(2,u,124.25,'mg/dL',t),'Measurement UUID conflict');
+  s=await open(A,a);
+  await reject(()=>s.insertGlucose(2,u,123.25,'mg/dL',t+1),'Measurement UUID conflict');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===first.sha256,'UUID conflict changed snapshot');
+  await reject(()=>s.insertGlucose(2,v,137.5,'mg/dL',t+60,{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const recovered=await s.insertGlucose(2,v,137.5,'mg/dL',t+60);
+  check(recovered.revision===3&&recovered.replay,'Lost ACK not replayed');
+  const end=await s.auditSnapshot();
+  check(end.tables.log_entries.length===initial.tables.log_entries.length+2,'Wrong log count');
+  for(const k of Object.keys(initial.tables)){
+    if(k!=='log_entries')check(JSON.stringify(initial.tables[k])===JSON.stringify(end.tables[k]),'Other table changed');
+  }
+  check(initial.tables.log_entries.every(old=>end.tables.log_entries.some(row=>JSON.stringify(row)===JSON.stringify(old))),'Existing log changed');
+  await window.d1BoundLogin(B);
+  await reject(()=>s.readGlucose(u),'Bound authority retired');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,window.d1BoundEpoch(),bp,b);
+  check((await bs.readGlucose(u)).measurement===null,'Cross-owner reading leak');
+  const other=await bs.insertGlucose(1,u,211.75,'mg/dL',t);
+  check(other.revision===2&&other.measurement.mgDl===211.75,'B same UUID failure');
+  await bs.retire();
+  s=await open(A,a);
+  check((await s.readGlucose(u)).measurement.mgDl===123.25&&
+    (await s.auditSnapshot()).sha256===end.sha256,'A changed by B');
+  await s.retire();
+  return {explicitUnit:true,invalidRefused:true,staleRefused:true,precommitUnchanged:true,
+    durableAck:true,exactReplay:true,uuidConflict:true,lostAckRecovered:true,
+    otherTablesUnchanged:true,sameUuidOwnerIsolation:true};
+}"""
+I5_GLUCOSE_RESTART = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const u='ab123456-1234-4abc-8def-000000000001',v='ab123456-1234-4abc-8def-000000000002';
+  const result=[];
+  for(const [owner,secret] of [[900001,a],[900002,b]]){
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    const s=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+    const x=await s.readGlucose(u),y=await s.readGlucose(v);
+    result.push({revision:x.revision,value:x.measurement.mgDl,second:y.measurement?.mgDl??null});
+    await s.retire();
+  }
+  const check=(ok)=>{if(!ok)throw new Error('Unexpected durable storage');};
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{
+    const records=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),st=tx.objectStore('state');
+      const x=st.get('owner:900001'),y=st.get('owner:900002'),keys=st.getAllKeys();
+      tx.oncomplete=()=>resolve({x:x.result,y:y.result,keys:keys.result});tx.onabort=reject;
+    });
+    const enc=x=>new TextEncoder().encode(x);
+    const raw=x=>Uint8Array.from(x.match(/../g),y=>parseInt(y,16));
+    const needles=[enc(u),enc(v),enc('D1_I5C_SYNTHETIC_GLUCOSE'),enc('SQLite format 3'),enc(a),enc(b),raw(a),raw(b)];
+    check(JSON.stringify(records.keys.sort())==='["fence","owner:900001","owner:900002"]');
+    for(const rec of [records.x,records.y]){
+      check(Object.keys(rec).sort().join(',')==='archive,envelope,revision');
+      for(const bytes of [rec.archive,rec.envelope])
+        check(bytes instanceof Uint8Array&&!needles.some(n=>bytes.some((_,i)=>n.every((x,j)=>bytes[i+j]===x))));
+    }
+    check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]');
+    check(!localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length);
+    if(navigator.storage?.getDirectory){
+      const root=await navigator.storage.getDirectory();
+      for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+    }
+  }finally{db.close();}
+  return result;
+}"""
+
+
+def exercise_glucose_store(browser_type,profile,locale,origin):
+    secrets=None
+    stage="bootstrap"
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="glucose-operations"
+            result=page.evaluate(I5_GLUCOSE,{"a":secrets[0],"b":secrets[1]})
+            assert result=={"explicitUnit":True,"invalidRefused":True,"staleRefused":True,
+                "precommitUnchanged":True,"durableAck":True,"exactReplay":True,
+                "uuidConflict":True,"lostAckRecovered":True,"otherTablesUnchanged":True,
+                "sameUuidOwnerIsolation":True}
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        stage="restart-storage"
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_GLUCOSE_RESTART,{"a":secrets[0],"b":secrets[1]})
+            assert restored==[{"revision":3,"value":123.25,"second":137.5},
+                {"revision":2,"value":211.75,"second":None}]
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {**result,"restart":True,"noKnownPlaintext":True}
+    except Exception:
+        raise RuntimeError("D1 glucose qualification failed at "+stage) from None
+    finally:
+        secrets=None
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -1496,6 +1634,7 @@ def run():
                             record["i5_revocation_failure"]=exercise_revocation_failure(browser_type,Path(root)/(locale+"-revoke-fault"),locale,origin)
                             record["i5_cross_hints"]=exercise_cross_hints(browser_type,Path(root)/(locale+"-cross-hints"),locale,origin)
                             record["i5_clinical_store"]=exercise_clinical_store(browser_type,Path(root)/(locale+"-clinical-store"),locale,origin)
+                            record["i5_glucose_store"]=exercise_glucose_store(browser_type,Path(root)/(locale+"-glucose-store"),locale,origin)
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -1516,6 +1655,7 @@ def run():
     print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)
     print("D1_I5_CLINICAL_STORE_PASS 2/2",flush=True)
     print("D1_I5_CLINICAL_STORAGE_PASS 2/2",flush=True)
+    print("D1_I5_GLUCOSE_STORE_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":
