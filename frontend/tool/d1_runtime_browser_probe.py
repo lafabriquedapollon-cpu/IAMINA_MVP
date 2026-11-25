@@ -1118,57 +1118,96 @@ I5_PROBE_HINTS = r"""()=>{
 
 def exercise_cross_hints(browser_type,profile,locale,origin):
     secrets=None
+    stage="open-context"
     try:
         ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
         try:
+            stage="step-01"
             secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="step-02"
             assert page.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            stage="step-03"
             second=ctx.new_page()
             second.on("pageerror",lambda error: errors.append(str(error)[:300]))
+            stage="step-04"
             second.goto(origin,wait_until="domcontentloaded")
+            stage="step-05"
             second.wait_for_function("typeof window.d1BoundProof === 'function'",timeout=60000)
+            stage="step-06"
             page.evaluate(I5_PROBE_HINTS)
             # False hint must not authorize or revoke a current lease.
+            stage="step-07"
             second.evaluate(I5_HINT_SEND)
-            page.wait_for_function("window.d1Hints.length===2",timeout=5000)
+            stage="step-08"
+            page.wait_for_function("window.d1Hints.length===2",polling=50,timeout=5000)
+            stage="step-09"
             assert page.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            stage="step-10"
             assert page.evaluate("window.d1CrossSession.revocationStatus()")=="active"
+            stage="step-11"
             page.evaluate("window.d1Hints.length=0")
             # Real A->B admission emits an anonymous hint only after commit.
+            stage="step-12"
             assert second.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
-            page.wait_for_function("window.d1Hints.length>=1",timeout=5000)
+            stage="step-13"
+            page.wait_for_function("window.d1Hints.length>=1",polling=50,timeout=5000)
+            stage="step-14"
             assert page.evaluate("window.d1Hints.every(x=>x==='fence-changed')")
+            stage="step-15"
             assert page.evaluate(I5_WAIT_SUPERSEDED)
+            stage="step-16"
             assert page.evaluate(I5_OLD_REFUSAL)
+            stage="step-17"
             assert page.evaluate(I5_CROSS_FENCE)==900002
             # Late/duplicate signal from old A cannot revoke or resurrect B.
+            stage="step-18"
             page.evaluate(I5_HINT_SEND)
+            stage="step-19"
             assert second.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            stage="step-20"
             assert second.evaluate("window.d1CrossSession.revocationStatus()")=="active"
             # Same-owner replacement with sender transport disabled: the
             # receiver must retire without a new operation or delivered hint.
+            stage="step-21"
             page.evaluate("""()=>{window.d1SavedPost=BroadcastChannel.prototype.postMessage;
               BroadcastChannel.prototype.postMessage=function(){throw new Error('Injected hint loss');};}""")
             try:
+                stage="step-22"
                 assert page.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
             finally:
+                stage="step-23"
                 page.evaluate("BroadcastChannel.prototype.postMessage=window.d1SavedPost")
+            stage="step-24"
             assert second.evaluate(I5_WAIT_SUPERSEDED)
+            stage="step-25"
             assert second.evaluate(I5_OLD_REFUSAL)
+            stage="step-26"
             assert page.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            stage="step-27"
             assert second.evaluate("window.d1CrossSession.retire()") is False
             # No BroadcastChannel at all in receiver: per-operation/fallback
             # durable fencing still works after another admission.
+            stage="step-28"
             assert page.evaluate("window.d1CrossSession.retire()") is True
+            stage="step-29"
             second.evaluate("window.BroadcastChannel=undefined")
+            stage="step-30"
             assert second.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            stage="step-31"
             assert page.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+            stage="step-32"
             assert second.evaluate(I5_WAIT_SUPERSEDED)
+            stage="step-33"
             assert second.evaluate(I5_OLD_REFUSAL)
+            stage="step-34"
             assert page.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            stage="step-35"
             assert page.evaluate("window.d1CrossSession.retire()") is True
+            stage="step-36"
             assert page.evaluate(I5_CROSS_FENCE) is None
+            stage="step-37"
             page.evaluate("window.d1HintObserver.close()")
+            stage="step-38"
             assert not blocked and not errors
         finally:
             ctx.close()
@@ -1177,7 +1216,7 @@ def exercise_cross_hints(browser_type,profile,locale,origin):
                 "lostHintFallback":True,"noChannelFallback":True,
                 "sameOwnerFenced":True,"noResurrection":True}
     except Exception:
-        raise RuntimeError("D1 cross-document hint qualification failed") from None
+        raise RuntimeError("D1 cross-document hint qualification failed at "+stage) from None
     finally:
         secrets=None
 
