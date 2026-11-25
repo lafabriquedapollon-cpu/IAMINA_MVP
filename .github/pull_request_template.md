@@ -40,15 +40,19 @@
 - [ ] No Execution/Adversarial averaging used; retained score is the minimum admissible score
 - [ ] Any score gap `>0.5` investigated and resolved
 - [ ] Required caps applied (`7.9` missing/red proof, `6.9` regression, `5.9 + BLOCKED` security/privacy/data/clinical blocker, UI fidelity `7.5` without Target ↔ Render)
-- [ ] Same executor + adversarial reviewer capped at `9.4/10`
-- [ ] Any `9.5+` score has a genuinely independent review
+- [ ] Applicable FUE: 100% required cases PASS, or justified FUE_NA with complete technical proofs
+- [ ] Any `9.5+` score has exhaustive applicable evidence, adversarial counter-tests and fresh confirmation, no open material weakness
+- [ ] No unresolved BLOCKER/MAJOR; all risk-specific specialist/human gates met
 - [ ] No weak critical dimension hidden by a stronger average
 - [ ] All required binary gates green on exact HEAD
 - [ ] Final retained LOT score is `>=9.0/10` before `VERIFIED`
 - [ ] Final Perfection Pass completed and all materially improvable in-scope weaknesses fixed + affected evidence rerun
 
 Final retained LOT score: `/10`
-Independent reviewer: `yes | no`
+FUE verdict: `FUE_PASS | FUE_NO_GO | FUE_NA (justified)`
+FUE matrix / technical proof references:
+Fresh confirmation evidence:
+Required risk-specialist/human approvals:
 Perfection Pass result:
 
 ## Documentation closeout

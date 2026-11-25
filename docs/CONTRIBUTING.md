@@ -44,17 +44,17 @@ Use short-lived prefixes such as `feature/`, `fix/`, `docs/`, or `chore/`.
 
 One roadmap unit should normally map to one focused branch and one PR.
 
-## Mandatory Builder → full Decision FUE → evidence-based Certifier workflow
+## Mandatory Builder → applicable FUE → evidence-based Certifier workflow
 
-`AGENTS.md` and `docs/QUALITY_SCORING_POLICY.md` are normative. For **every product decision D**, the Builder must execute a **FUE (FIRST USER EXPERIENCE)** over **100% of the D's in-scope functionality** rather than waiting for a mandatory independent Reviewer. A FUE is a **case-adaptive**, feature-by-feature journey from the relevant user state in actual Flutter Web/PWA. Choose the required paths and controls from the decision's actual scope and risk: FR/AR RTL, affected mobile/tablet/desktop viewports, click/touch, keyboard, navigation, negative/recovery and storage/account behavior **where applicable**. the cross-account isolation check is a W02-style owner-isolation security regression, **not a mandatory generic FUE journey**; only run/reuse it when cross-account boundaries are affected or evidence is missing. Record which cases apply, which do not and why.
+`AGENTS.md` and `docs/QUALITY_SCORING_POLICY.md` are normative. For **every decision and LOT**, the Builder must execute a **FUE (FIRST USER EXPERIENCE)** over **100% of affected user journeys and in-scope functionality**. A technical-only LOT without an affected user journey must document justified FUE_NA and complete the applicable technical proof matrix. A FUE is a **case-adaptive**, feature-by-feature journey from the relevant user state in actual Flutter Web/PWA. Choose the required paths and controls from the decision's actual scope and risk: FR/AR RTL, affected mobile/tablet/desktop viewports, click/touch, keyboard, navigation, negative/recovery and storage/account behavior **where applicable**. the cross-account isolation check is a W02-style owner-isolation security regression, **not a mandatory generic FUE journey**; only run/reuse it when cross-account boundaries are affected or evidence is missing. Record which cases apply, which do not and why.
 
-1. Builder defines the full D inventory, acceptance criteria and required FUE scenarios; implements and records focused/negative tests.
-2. An adversarial pass challenges the result; then FUE records for each D feature: expected → observed → screenshot/log/test evidence → PASS/FAIL/NOT_RUN. **100% of required cases must have an observed PASS**. No independent Reviewer is required *just because the work is a D*; no static test or 9/9 CI may replace FUE.
-3. Release Certification independently re-checks the **evidence**, score caps, final FUE verdict and exact-HEAD CI in a fresh pass. The same executor may perform isolated passes but must never claim independent review and is score-capped at 9.4.
+1. Builder defines the full LOT inventory, acceptance criteria and required FUE scenarios; implements and records focused/negative tests.
+2. An adversarial pass challenges the result; then FUE records for each LOT feature: expected → observed → screenshot/log/test evidence → PASS/FAIL/NOT_RUN. **100% of required cases must have an observed PASS**. No generic independent Reviewer gate applies; no static test or green CI may replace an applicable FUE.
+3. Release Certification re-checks the **evidence**, score caps, final FUE verdict or justified N/A and exact-HEAD CI in a fresh pass. The same executor may perform isolated passes but must never claim independence that did not occur.
 4. Any risk-specific clinical/privacy/security/database reviewer or human approval is still mandatory **where risk and established policy require it**; no FUE can bypass safety gates.
 5. Merge uses expected-head SHA locking where supported; verify `main` and post-merge CI before claiming 100%.
 
-For non-D LOTs/hotfix/governance, use a Builder → critical evidence review → Release Certification chain. Mandatory skills for each relevant LOT: `.skills/lot-execution/SKILL.md` and `.skills/release-certification/SKILL.md`; include `.skills/ux-ui-certification/SKILL.md` for visual/interaction work. After any code or documentation change, revalidate all applicable exact-HEAD gates.
+For technical/hotfix/governance LOTs use the same FUE-or-justified-N/A chain, with critical technical proof and release certification. Mandatory skills for each relevant LOT: `.skills/lot-execution/SKILL.md` and `.skills/release-certification/SKILL.md`; include `.skills/ux-ui-certification/SKILL.md` for visual/interaction work. After any code or documentation change, revalidate all applicable exact-HEAD gates.
 
 ## Mandatory quality scoring and verification
 
@@ -64,8 +64,7 @@ For non-D LOTs/hotfix/governance, use a Builder → critical evidence review →
 - The retained score is always the lower admissible score after applicable caps, never an average.
 - A LOT score is the lowest retained material-step score, never an average across steps.
 - A score gap greater than `0.5` requires investigation, remediation/justification, rerun of affected evidence, and rescore.
-- `10/10` is exceptional; `9.5+` requires genuine independent review **to claim that exceptional score**, not as a generic D gate.
-- Same executor + adversarial reviewer is automatically capped at `9.4/10`.
+- `10/10` is exceptional; `9.5+` requires exhaustive applicable FUE or justified FUE_NA, all required exact-HEAD evidence, adversarial counter-tests and fresh confirmation, no open material weakness, per the scoring policy. No executor-identity cap.
 - Required red test or missing/stale required proof caps at `7.9/10`.
 - Demonstrated regression caps at `6.9/10` until remediated and rerun.
 - Blocking security/privacy/data-integrity/clinical-claim finding caps at `5.9/10` and forces `BLOCKED`.
@@ -103,7 +102,7 @@ A PR should state:
 6. Perfection Pass result before VERIFIED;
 7. any manual verification still required;
 8. which canonical docs must change at closeout;
-9. Builder pass, **for D: exhaustive FUE feature matrix, coverage and FUE_PASS/FUE_NO_GO**, any risk-specialist verdicts, and Release Certifier verdict.
+9. Builder pass, **exhaustive applicable FUE matrix and FUE_PASS/FUE_NO_GO, or justified FUE_NA plus technical proofs**, any risk-specialist verdicts, and Release Certifier verdict.
 
 Keep PRs focused. Large diffs are acceptable when a coherent cleanup cannot safely be split, but explain why.
 

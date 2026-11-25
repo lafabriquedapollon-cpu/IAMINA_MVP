@@ -2,15 +2,15 @@
 
 `AGENTS.md` is the canonical repository-wide execution contract.
 
-## Mandatory gate for product decisions D: complete FUE
+## Mandatory gate for all decisions and LOTs: applicable FUE
 
-`Builder → focused/adversarial tests → FUE (FIRST USER EXPERIENCE) across every feature of D → evidence-based Release Certification / Perfection Pass → authorized merge → post-merge verification`.
+`Builder → focused/adversarial tests → FUE (FIRST USER EXPERIENCE) across every affected feature and journey → evidence-based Release Certification / Perfection Pass → authorized merge → post-merge verification`.
 
-**No default independent Reviewer for a D.** Build a **decision-adaptive FUE** by inventorying the actual features and selecting their relevant first/returning-user entry states and positive/negative/recovery paths. Real Flutter Web FR/AR RTL, responsive, keyboard, scroll, interactions and persistence/permissions must be exercised **where applicable to the affected feature and its risk**. **Do not impose the cross-account isolation check, a fresh onboarding journey, or offline replay on every D.** the cross-account isolation check is a separate owner/session-isolation security regression (not a generic FUE template), mandatory only if required by the decision's scope or an outstanding cross-account risk. Full coverage of the **required case-specific matrix** with observable PASS is mandatory; explicit out-of-scope reasons cannot be counted as PASS. A Builder may run the FUE and a separate adversarial pass, but must not claim independent review; apply the scoring cap.
+**No generic independent Reviewer gate for any LOT.** A purely technical LOT with no affected user journey may record justified `FUE_NA` only with complete applicable technical proofs. Build a **decision-adaptive FUE** by inventorying the actual features and selecting their relevant first/returning-user entry states and positive/negative/recovery paths. Real Flutter Web FR/AR RTL, responsive, keyboard, scroll, interactions and persistence/permissions must be exercised **where applicable to the affected feature and its risk**. **Do not impose the cross-account isolation check, a fresh onboarding journey, or offline replay on every D.** the cross-account isolation check is a separate owner/session-isolation security regression (not a generic FUE template), mandatory only if required by the decision's scope or an outstanding cross-account risk. Full coverage of the **required case-specific matrix** with observable PASS is mandatory; explicit out-of-scope reasons cannot be counted as PASS. A Builder may run the FUE and a separate adversarial pass, but must not claim independence that did not occur; apply the evidence-based scoring policy.
 
-## Risk routing and non-D work
+## Risk routing for every LOT
 
-For non-D work, use a critical review and release certification pass. For any D, FUE **does not waive** the following applicable risk-specialist safety gates:
+For all work, perform adversarial evidence and separate fresh release certification passes. FUE **does not waive** the following applicable risk-specialist safety gates:
 
 | Surface | Evidence / specialist |
 |---|---|
