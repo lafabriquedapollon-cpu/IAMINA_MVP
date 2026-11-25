@@ -112,10 +112,18 @@ def test_missing_receipt_and_invalid_locale_are_denied(settings):
 
 def test_openapi_runtime_exposes_protected_intent_contract():
     from diabetes.api.main import api
-    schema = api.get_openapi_schema()
+    # OpenAPI response codes are strings on the JSON wire; Ninja's Python
+    # representation uses integer keys. Assert the serialized contract.
+    schema = json.loads(json.dumps(api.get_openapi_schema()))
     paths = schema["paths"]
     get = paths[PATH]["get"]
     put = paths[PATH + "/{feature}"]["put"]
     assert get["security"] and put["security"]
     assert "requestBody" in put
     assert "200" in get["responses"] and "200" in put["responses"]
+    get_response = get["responses"]["200"]["content"]["application/json"]["schema"]
+    put_response = put["responses"]["200"]["content"]["application/json"]["schema"]
+    for response_schema in (get_response, put_response):
+        ref = response_schema["$ref"]
+        assert ref.startswith("#/components/schemas/")
+        assert ref.rsplit("/", 1)[1] in schema["components"]["schemas"]
