@@ -1207,7 +1207,7 @@ jobs:
   # Full main-target gates above remain mandatory before product integration.
   phase1-focused:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && startsWith(github.head_ref, 'phase1/') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
