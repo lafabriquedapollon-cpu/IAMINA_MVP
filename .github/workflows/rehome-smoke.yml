@@ -3,7 +3,7 @@ name: IAMINA Rehome Smoke
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    branches: [main]
+    branches: [main, migration/iamina-snapshot-20261123]
     paths:
       - '.github/workflows/rehome-smoke.yml'
       - 'backend/**'
@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   snapshot-source-checks:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -1202,3 +1203,167 @@ jobs:
             diabetes/tests/test_d7_profile_http_isolation.py \
             core/tests/test_ai_egress_boundary_gate.py
 
+  # A scoped phase-1 draft PR receives focused evidence only.
+  # Full main-target gates above remain mandatory before product integration.
+  phase1-focused:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && startsWith(github.head_ref, 'phase1/') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      PHASE_BRANCH: ${{ github.head_ref }}
+      DJANGO_SETTINGS_MODULE: amina.settings
+      SECRET_KEY: ci-phase1-synthetic-not-for-production
+      DEBUG: "True"
+      ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/iamina_phase1_ci
+      REDIS_URL: redis://127.0.0.1:6379/0
+      FIREBASE_CREDENTIALS_PATH: ""
+      ENABLE_FIREBASE_MIGRATION: "False"
+      GEMINI_API_KEY: ""
+      GOOGLE_API_KEY: ""
+      GROQ_API_KEY: ""
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      KIMI_API_KEY: ""
+      LLM_PROVIDER: fallback
+      USE_KIMI: "False"
+      MEDICAL_PILOT_MODE: "False"
+      LLM_MEDICAL_STREAMING: "False"
+      NARRATION_PROTECTED_PROVIDER_SHADOW: "False"
+      NARRATION_PROTECTED_PROVIDER_INTERNAL_LIVE: "False"
+      ALLOW_INSULIN_ADVICE: "False"
+      ALLOW_DIAGNOSIS: "False"
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: iamina_phase1_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d iamina_phase1_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Attest exact source and isolated phase branch
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          case "$PHASE_BRANCH" in
+            phase1/d1-backup|phase1/d2-guest|phase1/d3-intents) ;;
+            *) exit 1 ;;
+          esac
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+      - name: D1 candidate archive cryptographic regression
+        if: ${{ github.head_ref == 'phase1/d1-backup' }}
+        run: node --test frontend/tool/d1_archive_candidate.test.mjs
+      - name: D2 pinned Flutter SDK
+        if: ${{ github.head_ref == 'phase1/d2-guest' }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "cc0734ac716fbb8b90f3f9db8020958b1553afa7"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: D2 isolated widget regressions
+        if: ${{ github.head_ref == 'phase1/d2-guest' }}
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+          flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart test/features/navigation/d2_guest_entry_test.dart
+          flutter analyze --no-fatal-infos --no-pub
+          flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D2_GUEST_CANDIDATE=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
+      - name: D2 Web Chromium mobile-first then desktop
+        if: ${{ github.head_ref == 'phase1/d2-guest' }}
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/d2-browser-venv"
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium
+          D2_BROWSER_TARGET=chromium "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+      - name: Retain D2 candidate screenshots and exact SHA matrix
+        if: ${{ always() && github.head_ref == 'phase1/d2-guest' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: d2-guest-browser-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/d2-browser-proof/
+          if-no-files-found: error
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        if: ${{ github.head_ref == 'phase1/d3-intents' }}
+        with:
+          python-version: '3.12'
+      - name: D3 isolated PostgreSQL migration and regression
+        if: ${{ github.head_ref == 'phase1/d3-intents' }}
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          test "$DATABASE_URL" = 'postgresql://postgres:postgres@127.0.0.1:5432/iamina_phase1_ci'
+          test ! -e ../.env
+          python -m pip install -r requirements.txt
+          python manage.py shell -c "from django.db import connection; assert connection.vendor == 'postgresql'; assert connection.settings_dict['HOST'] == '127.0.0.1'; assert connection.settings_dict['NAME'] == 'iamina_phase1_ci'; connection.ensure_connection(); assert 160000 <= connection.pg_version < 170000"
+          python manage.py check
+          python manage.py migrate --noinput
+          python manage.py makemigrations --check --dry-run
+          python -m pytest -q core/tests/test_d3_feature_intents.py core/tests/test_account_consent_identity_safety.py core/tests/test_ai_egress_boundary_gate.py
+
+  # Web-only qualification: this runner is needed for the reference WebKit
+  # browser engine, not a native macOS application or separate product target.
+  # Linux WebKit port failures remain recorded; explicit diagnostic-all mode
+  # reproduces them without substituting them for Safari-target evidence.
+  phase1-d2-macos-webkit:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && github.head_ref == 'phase1/d2-guest' }}
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      D2_BROWSER_TARGET: webkit
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Attest source and pinned Flutter SDK
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          sw_vers
+          git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "cc0734ac716fbb8b90f3f9db8020958b1553afa7"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Build identical D2 candidate flags
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+          flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D2_GUEST_CANDIDATE=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: D2 Web WebKit mobile-first then desktop
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/d2-browser-venv"
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install webkit
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+      - name: Retain macOS D2 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: d2-macos-webkit-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/d2-browser-proof/
+          if-no-files-found: error
