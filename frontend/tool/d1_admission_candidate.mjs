@@ -119,6 +119,9 @@ async function decrypt(record,key,owner) {
 async function inspect(bytes,owner) {
   return JSON.parse(await window.d1Inspect(bytes,owner));
 }
+async function digest(bytes){
+  return hex(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)));
+}
 const constructorPermit=Object.freeze({});
 class AdmissionSession {
   #lease; #key; #retired=false; #busy=false;
@@ -146,6 +149,19 @@ class AdmissionSession {
       const result=await inspect(bytes,this.#lease.owner);
       await this.#verifyFence();
       return {revision:r.revision,...result};
+    }finally{bytes?.fill(0);}
+  }
+  async auditSnapshot(){
+    // Synthetic test oracle: report exact bytes digest and full schema rows.
+    // Do not expose the plaintext file to callers.
+    const r=await this.#read();
+    let bytes;
+    try{
+      bytes=await decrypt(r,this.#key,this.#lease.owner);this.#local();
+      const sha256=await digest(bytes);
+      const tables=JSON.parse(await window.d1FullInspect(bytes,this.#lease.owner));
+      await this.#verifyFence();
+      return {sha256,revision:r.revision,tables};
     }finally{bytes?.fill(0);}
   }
   async retire(){
@@ -239,4 +255,43 @@ export async function admit(owner,epoch,proof,phrase,{beforeActivate}={}){
     });
     return new AdmissionSession(constructorPermit,lease,key);
   }finally{bytes?.fill(0);}
+}
+
+ // I4: explicit copy-only import of an independently attributed scoped v12
+ // snapshot. The synthetic authority must NOT be used to adopt mixed legacy
+ // data. Source file is neither changed nor deleted by this adapter.
+export async function importScopedArchive(owner,epoch,proof,phrase,manifest,transfer,transferPhrase,{beforeActivate}={}){
+  const deadline=consume(proof,owner,epoch);checkPhrase(phrase);checkPhrase(transferPhrase);
+  require(manifest&&manifest.kind==='scoped-v12'&&manifest.owner===owner&&
+    typeof manifest.sha256==='string'&&/^[0-9a-f]{64}$/.test(manifest.sha256),
+    'Explicit scoped source provenance required');
+  const expectedDigest=manifest.sha256;
+  const baseline=await transaction(owner,false,(r,f)=>{
+    require(r===null,'Existing vault cannot be overwritten');return f;
+  });
+  const seed=crypto.getRandomValues(new Uint8Array(32));
+  const key=hex(seed);
+  let bytes,verified;
+  try{
+    bytes=await openArchive(transfer,transferPhrase,scope(owner));
+    require(await digest(bytes)===expectedDigest,'Source digest mismatch');
+    await inspect(bytes,owner);
+    await window.d1FullInspect(bytes,owner);
+    const envelope=await wrapKey(seed,phrase,owner);
+    const archive=await encrypt(bytes,key,owner,1);
+    // Verify the ciphertext copy before publication, including all source bytes.
+    verified=await decrypt({revision:1,envelope,archive},key,owner);
+    require(equal(bytes,verified),'Imported snapshot mismatch');
+    await window.d1FullInspect(verified,owner);
+    const lease={owner,epoch,token:randomToken()};
+    if(beforeActivate)await beforeActivate();
+    await transaction(owner,true,(existing,f,store)=>{
+      require(existing===null,'Existing vault cannot be overwritten');
+      require(performance.now()<deadline,'Admission proof expired');
+      require(sameFence(f,baseline),'Admission fence changed');
+      store.put({revision:1,envelope,archive},'owner:'+owner);
+      store.put(lease,'fence');
+    });
+    return new AdmissionSession(constructorPermit,lease,key);
+  }finally{seed.fill(0);bytes?.fill(0);verified?.fill(0);}
 }
