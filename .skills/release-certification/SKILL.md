@@ -1,19 +1,19 @@
 # Skill — Release Certification
 
 ## Purpose
-Provide an evidence-based GO/NO-GO after Builder work. **For every product D, a complete FUE replaces the mandatory independent Reviewer gate.** Use a fresh-evidence pass separate from Builder claims.
+Provide an evidence-based GO/NO-GO after Builder work. **For every decision and LOT, applicable FUE replaces the generic independent Reviewer gate.** A technical-only LOT with no affected user journey requires justified FUE_NA and complete technical proofs. Use a fresh-evidence pass separate from Builder claims.
 
 The Certifier MUST apply `docs/QUALITY_SCORING_POLICY.md`.
 
 ## Certifier must verify
 1. Scope matches one LOT and the PR diff contains no unrelated changes.
-2. For product D: require FUE inventory and PASS for every in-scope feature on real Web across applicable responsive/FR/AR RTL/keyboard journeys, with observable artifacts and exact HEAD; missing/failed case = NO_GO. For non-D work: critical review findings resolved. Clinical/security/privacy blockers cannot be overridden by FUE.
+2. Require FUE inventory and PASS for every affected feature on real Web across applicable responsive/FR/AR RTL/keyboard journeys, with observable artifacts and exact HEAD; missing/failed case = NO_GO. For technical-only work without an affected journey: justified FUE_NA and all required technical proofs; no unresolved BLOCKER/MAJOR. Clinical/security/privacy blockers cannot be overridden by FUE.
 3. Exact-head CI and migration drift are green after the final code/docs SHA.
 4. Required specialized evidence is green: UX captures, PostgreSQL, clinical safety, security, OpenAPI, locale parity, etc., according to touched surfaces.
 5. Every material step has an `EXECUTION_SCORE /10`, an `ADVERSARIAL_SCORE /10`, applicable caps, and a retained score equal to the lower admissible value — never an average.
 6. Every score gap greater than `0.5` has a documented investigation, affected remediation/evidence rerun, and final rescore.
 7. The LOT retained score is the lowest retained material-step score; no weak critical dimension is hidden by an average.
-8. `9.5+` has a genuinely independent review. If the same executor performed the adversarial review, the `9.4/10` cap is enforced.
+8. `9.5+` has exhaustive applicable FUE or justified FUE_NA, all required exact-HEAD proofs, adversarial counter-tests, fresh confirmation and no open material weakness; executor identity alone imposes no cap.
 9. Required red/missing evidence, regressions, blockers, and UI-without-Target↔Render caps from the canonical scoring policy have been applied.
 10. The mandatory final Perfection Pass is complete: remaining weaknesses were enumerated, every materially improvable in-scope weakness was fixed, affected evidence was rerun, and the final score was recalculated.
 11. Canonical docs reflect the delivered truth and do not claim work not yet merged.
@@ -25,8 +25,8 @@ The Certifier MUST apply `docs/QUALITY_SCORING_POLICY.md`.
 A LOT may be `VERIFIED` / `CERTIFIED` only when:
 
 - final retained score is `>= 9.0/10`;
-- every required binary gate is green (**including full D FUE coverage**);
-- no blocking finding remains;
+- every required binary gate is green (**including full applicable FUE or justified FUE_NA**);
+- no unresolved BLOCKER or MAJOR finding remains;
 - every `>0.5` Execution/Adversarial discrepancy is resolved;
 - the Perfection Pass is complete.
 

@@ -15,20 +15,19 @@ Execute one roadmap LOT from evidence to merge without scope drift.
 9. For every material step, record `EXECUTION_SCORE /10` and an adversarial `ADVERSARIAL_SCORE /10`; retain the lower score and apply every cap in `docs/QUALITY_SCORING_POLICY.md`.
 10. If the two scores differ by more than `0.5`, investigate, remediate/justify, rerun affected evidence and rescore before continuing.
 11. Review the final diff file-by-file; remove temporary workflows/scripts/generated noise.
-12. **For each product decision D**, derive a **case-adaptive FUE** covering every actual in-scope feature and risk: choose relevant first/returning-user entry, actions, positive/negative/recovery states and real-Web FR/AR RTL viewports 390×844, 768×1024 and 1280×900 for affected screens, keyboard/touch/refresh/persistence where applicable. **Do not require onboarding or the cross-account isolation check for every D**; the cross-account isolation check is a targeted owner-isolation security regression (W02), to run or reuse only when the identity/storage boundary is relevant or evidence missing. Record the feature-to-scenario matrix, justified N/A cases, BEFORE/AFTER when UI changes, and `FUE_PASS` only if 100% of genuinely required cases passed. A separate independent Reviewer is not a blanket D gate.
-13. Run a fresh-evidence adversarial pass; remediate blockers, rerun affected FUE. For non-D LOTs use the applicable critical review; never bypass safety/clinical/privacy specialists where necessary.
-14. Run a distinct evidence-based Release Certification pass. It may be conducted in a separate pass by the same executor, but is not an independent review and is score-capped.
+12. **For each decision and LOT**, derive a **case-adaptive FUE** covering every actual in-scope feature and risk: choose relevant first/returning-user entry, actions, positive/negative/recovery states and real-Web FR/AR RTL viewports 390×844, 768×1024 and 1280×900 for affected screens, keyboard/touch/refresh/persistence where applicable. **Do not require onboarding or the cross-account isolation check for every D**; the cross-account isolation check is a targeted owner-isolation security regression (W02), to run or reuse only when the identity/storage boundary is relevant or evidence missing. Record the feature-to-scenario matrix, justified N/A cases, BEFORE/AFTER when UI changes, and `FUE_PASS` only if 100% of genuinely required cases passed. A technical-only LOT may use justified `FUE_NA` only when no user journey is affected and all required technical proofs pass. No generic independent Reviewer gate.
+13. Run a fresh-evidence adversarial pass; remediate blockers, rerun affected FUE. For technical-only LOTs retain critical technical proofs; never bypass safety/clinical/privacy specialists or required human approval.
+14. Run a distinct evidence-based Release Certification pass. It may be conducted in a separate pass by the same executor, but must not be represented as independent review.
 15. If the LOT retained score is `>= 9.0/10` and binary gates are green, perform the mandatory final **Perfection Pass** from `docs/QUALITY_SCORING_POLICY.md`; fix every materially improvable in-scope weakness, rerun affected evidence and rescore.
 16. Update canonical docs before closure. If the SHA changes, re-run exact-head gates.
-17. A LOT may be `VERIFIED` only when the final retained score is `>= 9.0/10`, every required binary gate is green, no blocker remains, scoring discrepancies are resolved, and the Perfection Pass is complete.
+17. A LOT may be `VERIFIED` only when the final retained score is `>= 9.0/10`, every required binary gate is green, no unresolved BLOCKER or MAJOR remains, scoring discrepancies are resolved, and the Perfection Pass is complete.
 18. Merge with expected-head locking.
 19. Verify `main`, then require post-merge CI and migration drift before declaring 100% complete.
 
 ## Scoring invariants
 - Never average Execution and Adversarial scores; retained score is the lower value after applicable caps.
 - The LOT score is the lowest retained material-step score, never an average across steps.
-- Same executor + adversarial reviewer caps the retained score at `9.4/10`.
-- `9.5+` requires a genuinely independent review.
+- `9.5+` requires exhaustive applicable FUE or justified FUE_NA, all required exact-HEAD evidence, adversarial counter-tests, fresh confirmation and no open material weakness. Executor identity alone imposes no cap.
 - Required red test or missing/stale required proof caps at `7.9/10`.
 - Demonstrated regression caps at `6.9/10` until remediated and rerun.
 - Blocking security/privacy/data/clinical-claim finding caps at `5.9/10` and forces `BLOCKED`.
@@ -40,9 +39,9 @@ Execute one roadmap LOT from evidence to merge without scope drift.
 - More than one roadmap responsibility in the same LOT without explicit inseparability rationale.
 - Temporary bypass or weakened safety gate.
 - Stale test evidence after the head SHA changed.
-- Declaring a product D closed with incomplete FUE coverage, or substituting independent review/CI for the required first-user journeys.
+- Declaring any LOT closed with incomplete applicable FUE coverage or unjustified FUE_NA, or substituting independent review/CI for the required first-user journeys.
 - Canonical documentation disagreeing with merged reality.
 - Declaring `VERIFIED` below `9.0/10`, with a red/missing binary gate, unresolved `>0.5` score gap, or before the Perfection Pass.
 
 ## Required closeout evidence
-Branch, PR, exact head SHA, tests/gates, **for every D: full FUE inventory, case matrix, PASS/FAIL/NOT_RUN coverage and verdict**, per-material-step scores/caps and discrepancy investigations, risk-specialist findings if applicable, Perfection Pass and Certifier verdicts, merge SHA, post-merge gates, next LOT.
+Branch, PR, exact head SHA, tests/gates, **full applicable FUE inventory, case matrix, PASS/FAIL/NOT_RUN coverage and verdict, or justified FUE_NA with technical proofs**, per-material-step scores/caps and discrepancy investigations, risk-specialist findings if applicable, Perfection Pass and Certifier verdicts, merge SHA, post-merge gates, next LOT.

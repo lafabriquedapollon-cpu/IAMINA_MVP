@@ -13,6 +13,8 @@
     "docs/QUALITY_SCORING_POLICY.md",
     "docs/architecture/ARCHITECTURE.md"
   ],
-  "exceptions": [],
-  "notes": "Central doctrine is a minimum baseline. IAmina's patient-companion authority ceiling, deterministic clinical/safety authority, privacy/data-egress controls, local-first patient-runtime boundary, Builder-Reviewer-Certifier chain, and stricter scoring/release gates remain authoritative additions."
+  "exceptions": [
+    "2026-11-25 owner-authorized local FUE amendment: generic independent-review gate and executor-identity scoring restriction superseded by applicable FUE or justified FUE_NA plus technical proofs, adversarial and fresh certification passes. Risk-specific specialist/human and safety/release gates unchanged. See docs/ENGINEERING_GOVERNANCE_ADOPTION.md."
+  ],
+  "notes": "Central doctrine pin unchanged. IAmina patient-companion authority ceiling, deterministic clinical/safety authority, privacy/data-egress controls, local-first patient-runtime boundary, exact-HEAD gates and evidence-based scoring/release remain authoritative. Local FUE amendment documented as an explicit exception, not upstream doctrine approval."
 }

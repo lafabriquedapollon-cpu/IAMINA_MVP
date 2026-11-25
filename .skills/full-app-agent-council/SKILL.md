@@ -28,4 +28,4 @@ Agent skill specification requires a `SKILL.md` folder with `name` and `descript
 5. Critical clinical/safety/privacy/egress failures block release. Distinguish open human gates. For UI changes capture BEFORE/AFTER same viewports; no fabricated scores. Vercel requires user authorization.
 
 ## Contract
-Target: 15/15 **actual** agent executions + deterministic checks + independent adversarial pass + exact-head CI. Missing runtime, test, evidence or signed approval remains `OPEN`, not `PASS`. A green CI cannot certify clinical/regulatory compliance.
+The fifteen-agent council is a scoped comprehensive audit when explicitly commissioned or required by a specific risk policy; it is not a routine LOT closure gate. Applicable FUE and fresh evidence under `AGENTS.md` replace the generic independent-review gate; preserve required risk-specialist/human approvals. For a claimed council audit, target: 15/15 **actual** agent executions + deterministic checks + independent adversarial pass + exact-head CI. Missing runtime, test, evidence or signed approval remains `OPEN`, not `PASS`. A green CI cannot certify clinical/regulatory compliance.

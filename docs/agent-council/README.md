@@ -17,7 +17,7 @@
 
 # IAMINA Full-Application Agent Council — 15 domains
 
-This council is a **tooling layer**, not a new authority replacing `AGENTS.md`. GitHub Copilot custom agents are in `.github/agents/iamina-ia*.md`; `.agents/` keeps its existing seven canonical Builder/Reviewer/Certifier briefs; `.skills/full-app-agent-council/SKILL.md` is the orchestration skill. The user supplied an Oct 4 `SKILLS.md` document marked **draft, not canonical**; its 15-role taxonomy was adapted only for this scoped execution.
+This council is a **tooling layer**, not a new authority replacing `AGENTS.md`. Under the 2026-11-25 FUE amendment, it remains a scoped audit when requested or risk-required, not a generic independent-review closure gate for every LOT. Applicable FUE and fresh certification are the routine gate; specialized and human approvals remain mandatory when required. GitHub Copilot custom agents are in `.github/agents/iamina-ia*.md`; `.agents/` keeps its existing seven canonical Builder/Reviewer/Certifier briefs; `.skills/full-app-agent-council/SKILL.md` is the orchestration skill. The user supplied an Oct 4 `SKILLS.md` document marked **draft, not canonical**; its 15-role taxonomy was adapted only for this scoped execution.
 
 **Profiles**: IA01-ARCHITECTURE, IA02-CLINICAL-SAFETY, IA03-DIABETES-CLINICAL, IA04-CGM-METRICS, IA05-MEDICATION, IA06-NUTRITION, IA07-MENA-LANGUAGE, IA08-SECURITY-PRIVACY, IA09-DATA-OFFLINE, IA10-COMPANION-AI, IA11-QA-VERIFICATION, IA12-UX-ACCESSIBILITY, IA13-RELEASE-OPS, IA14-REGULATORY-QMS, IA15-ADVERSARIAL plus `iamina-council-coordinator`.
 

@@ -9,7 +9,7 @@ This file is a **stable execution brief**, not a session diary or status tracker
 3. `docs/CONTRIBUTING.md` — workflow + non-negotiable safety rules.
 4. `docs/MISTAKES.md` — reusable engineering lessons.
 5. `.skills/lot-execution/SKILL.md` — mandatory LOT procedure.
-6. `.agents/README.md` — mandatory Builder/Reviewer/Certifier routing.
+6. `.agents/README.md` — mandatory FUE and risk-specialist routing.
 7. Every domain skill required by the touched surface.
 
 Do not infer current priorities from old commit messages, assessments, archived transformation plans, or historical phase numbers.
@@ -73,14 +73,14 @@ See `docs/ROADMAP.md` for exact checkboxes.
 
 Every LOT must execute the repository-owned team model:
 
-`Builder -> applicable Reviewer(s) -> Release Certifier -> merge -> post-merge verification`
+`Builder -> focused/adversarial tests -> applicable FUE (or justified FUE_NA + technical proof) -> fresh Release Certification/Perfection Pass -> authorized merge -> post-merge verification`
 
 - Builder: `.agents/lead-engineer.md`.
-- Reviewer routing: `.agents/README.md`.
+- FUE and risk-specialist routing: `.agents/README.md`.
 - Final Certifier: `.agents/release-certifier.md`.
 - Every LOT loads `.skills/lot-execution/SKILL.md` and `.skills/release-certification/SKILL.md`.
 - Domain skills/reviewers are mandatory when their surface is touched.
-- Builder may not self-certify. Prefer separate agents; if only one runtime exists, execute isolated role passes with a fresh evidence review.
+- Generic independent review is replaced by FUE for every LOT. The same executor may perform distinct evidence passes and must not claim independence. All risk-specific specialist/human approvals remain mandatory when applicable. Apply `docs/QUALITY_SCORING_POLICY.md`.
 - UX/UI work additionally requires `.skills/ux-ui-certification/SKILL.md` and a final score strictly above 9.0/10.
 - Any final code or documentation SHA change invalidates stale exact-head certification evidence and requires the applicable gates to run again.
 

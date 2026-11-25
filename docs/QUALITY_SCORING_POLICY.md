@@ -25,9 +25,9 @@ A LOT cannot become `VERIFIED` while such a discrepancy remains unresolved.
 
 ## Score discipline
 
-- `10.0/10` is exceptional. It requires complete evidence, all binary gates green, no known in-scope weakness that is realistically improvable, and a genuinely independent review.
-- Any retained score `>= 9.5/10` requires a **genuinely independent adversarial review** by a reviewer that did not perform the execution and independently re-reads the diff/evidence.
-- If the same person/model/session performs both execution and adversarial review, the retained score is automatically capped at `9.4/10`, even when the passes are isolated.
+- `10.0/10` is exceptional: complete evidence, every required binary gate green and no known realistically improvable in-scope weakness.
+- Any retained score `>= 9.5/10` requires exhaustive applicable FUE (or strictly justified `FUE_NA`), all exact-HEAD technical/risk gates green, documented adversarial counter-tests and a separate fresh confirmation pass, with no open material weakness.
+- Executor identity alone imposes no score cap; never infer a higher score from removal of the generic independent-review gate.
 - A required test that is red, or required proof that is absent/stale, caps the retained score at `7.9/10`.
 - A demonstrated regression caps the retained score at `6.9/10` until the regression is remediated and the affected evidence is rerun.
 - A blocking security, privacy, data-integrity, or clinical-claim finding caps the retained score at `5.9/10` and the status MUST be `BLOCKED` until resolved.
@@ -36,18 +36,18 @@ A LOT cannot become `VERIFIED` while such a discrepancy remains unresolved.
 
 Caps stack by taking the lowest applicable cap.
 
-## FUE as required binary gate for product decisions D
+## FUE as required binary gate for every decision and LOT
 
-Every D must run a **case-adaptive FUE (FIRST USER EXPERIENCE)** covering **all in-scope features of that D**. Build the required journey matrix from that decision's actual actions, user states and risks, not from a universal script: use relevant entry/return states, affected real-Web viewports (390×844 / 768×1024 / 1280×900), FR/AR RTL, keyboard/navigation, positive-negative-recovery states, and permission/persistence/offline/account checks **where applicable**. **the cross-account isolation check is a targeted W02-style owner/session-isolation security regression, never a default FUE prerequisite**; run or reuse it only when cross-owner boundaries are affected or existing evidence fails to cover the risk. Mark excluded cases N/A with justification, not PASS. Record `D feature → journey → expected → observed → evidence → PASS/FAIL/NOT_RUN`. **100% required PASS** is a binary gate for `VERIFIED`; any missing, failed or not-run required case means `FUE_NO_GO` regardless of CI.
+Every decision and LOT must run a **case-adaptive FUE (FIRST USER EXPERIENCE)** covering **all affected user journeys and features**. A technical-only LOT may record `FUE_NA` only with a specific justification that no user journey is affected; all required technical and risk proofs must still pass. Build the required journey matrix from that decision's actual actions, user states and risks, not from a universal script: use relevant entry/return states, affected real-Web viewports (390×844 / 768×1024 / 1280×900), FR/AR RTL, keyboard/navigation, positive-negative-recovery states, and permission/persistence/offline/account checks **where applicable**. **the cross-account isolation check is a targeted W02-style owner/session-isolation security regression, never a default FUE prerequisite**; run or reuse it only when cross-owner boundaries are affected or existing evidence fails to cover the risk. Mark excluded cases N/A with justification, not PASS. Record `LOT feature → journey → expected → observed → evidence → PASS/FAIL/NOT_RUN`. **100% required PASS** is a binary gate for `VERIFIED`; any missing, failed or not-run required case means `FUE_NO_GO` regardless of CI.
 
-An independent code Reviewer is **not a blanket D gate**; FUE may be executed by the Builder in a separate adversarial pass. Existing risk-specific approvals remain mandatory. The `>=9.5` independent-review score rule remains a **score-specific constraint**, not a default requirement to close a D at an admissible `9.0–9.4`.
+FUE replaces the generic independent Reviewer gate for every LOT. The Builder may execute FUE; perform separate adversarial and fresh confirmation passes. Existing risk-specific reviews, clinical/security/privacy/data/linguistic approvals and human gates remain mandatory when applicable. No FUE or score substitutes for them.
 
 ## Binary gates
 
 Scores never override binary gates. A LOT may be `VERIFIED` only when:
 
-1. every required binary gate is green on the exact applicable HEAD/evidence set (**including full FUE for any D**);
-2. no blocking finding remains;
+1. every required binary gate is green on the exact applicable HEAD/evidence set (**including full applicable FUE or justified FUE_NA**);
+2. no unresolved BLOCKER or MAJOR finding remains;
 3. every material step has both required scores;
 4. all score discrepancies `> 0.5` have been investigated and resolved;
 5. the LOT retained score is at least `9.0/10`;
@@ -87,10 +87,8 @@ Remaining weaknesses:
 Next exact action:
 ```
 
-For LOT closeout, record retained scores, binary gates, **for D the full FUE feature matrix + verdict**, risk-specialist approvals if required, independent-review status only when claimed/score-required, Perfection Pass result, and exact evidence/HEAD.
+For LOT closeout, record retained scores, binary gates, **the full applicable FUE feature matrix + verdict or justified FUE_NA with technical proofs**, risk-specialist approvals if required, actual reviewer participation only when relevant, Perfection Pass result, and exact evidence/HEAD.
 
-## Independence definition
+## Fresh-evidence confirmation
 
-A **genuinely independent review** means the reviewer did not author the implementation and performs a fresh review of the final diff, rendered/runtime evidence, tests and claims without inheriting the Builder's conclusion as proof. A different human, agent, or model context may satisfy this only when it actually performs that independent evidence review.
-
-An isolated second pass by the same executor is still valuable and mandatory when no independent reviewer is available, but the automatic `9.4/10` cap applies.
+A distinct confirmation pass must re-read the final diff, runtime/rendered evidence, tests and claims without treating Builder conclusions as proof. The same executor may perform it; record actual execution and evidence, never invent independence. Specialist or human approvals required by risk-specific policy are unchanged.

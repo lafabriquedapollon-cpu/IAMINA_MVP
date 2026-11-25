@@ -7,6 +7,7 @@
 ## Gouvernance
 
 - **Source unique des décisions, dépendances, priorités, statuts et Next exact :** la page Notion ci-dessus.
+- **Gate de clôture actif (25/11/2026) :** FUE exhaustive pour chaque décision/lot ; FUE_NA justifié uniquement sans parcours utilisateur affecté et avec preuves techniques complètes. La revue indépendante générique et le plafond lié à l'identité de l'exécutant sont remplacés par la FUE, les contre-épreuves et la confirmation fraîche sur SHA exact. Les validations spécialisées et humaines applicables restent obligatoires. Voir `AGENTS.md` et `docs/QUALITY_SCORING_POLICY.md`.
 - **Périmètre :** Web/PWA en priorité ; D1–D12 sont validées **côté produit seulement**. Les preuves d'exécution et les gates sécurité restent à acquérir selon les lots.
 - **Prochain lot :** D1 / P0-A, protection des anciennes bases IndexedDB et des anciens clients PWA hors ligne, sans migration automatique ni effacement de données.
 - **Preuves techniques détaillées :** `docs/assessments/`, `docs/security/`, `docs/operations/`, PR et runs GitHub ; ces documents sont des preuves, **pas des roadmaps supplémentaires**.
