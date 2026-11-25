@@ -1282,6 +1282,23 @@ jobs:
           flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart test/features/navigation/d2_guest_entry_test.dart
           flutter analyze --no-fatal-infos --no-pub
           flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D2_GUEST_CANDIDATE=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
+      - name: D2 compiled candidate first-use browser evidence
+        if: ${{ github.head_ref == 'phase1/d2-guest' }}
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/d2-browser-venv"
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+      - name: Retain D2 candidate screenshots and exact SHA matrix
+        if: ${{ always() && github.head_ref == 'phase1/d2-guest' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: d2-guest-browser-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/d2-browser-proof/
+          if-no-files-found: error
+
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         if: ${{ github.head_ref == 'phase1/d3-intents' }}
         with:

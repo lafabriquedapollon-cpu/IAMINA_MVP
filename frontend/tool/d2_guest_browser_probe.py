@@ -1,0 +1,129 @@
+"""D2 compiled candidate real-browser evidence; no remote identity or patient DB."""
+import hashlib
+import http.server
+import json
+import os
+from pathlib import Path
+import threading
+
+from playwright.sync_api import sync_playwright, expect
+from PIL import Image
+
+WEB = Path("frontend/build/web").resolve()
+PROOF = Path(os.environ["RUNNER_TEMP"]) / "d2-browser-proof"
+COPY = {
+    "fr-FR": ("Accueil", "Mesures", "Rapports", "Profil", "Ajouter une mesure", "Identification", "Retour", "Connexion indisponible dans cette version de test."),
+    "ar-MA": ("الرئيسية", "القياسات", "التقارير", "الملف الشخصي", "إضافة قياس", "تسجيل الدخول", "رجوع", "تسجيل الدخول غير متاح في هذه النسخة التجريبية."),
+}
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(WEB), **kwargs)
+
+    def do_GET(self):
+        if self.path.startswith("/api/"):
+            self.send_error(403)
+            return
+        super().do_GET()
+
+    def log_message(self, *_):
+        pass
+
+
+def shot(page, name):
+    path = PROOF / (name + ".png")
+    page.screenshot(path=str(path), animations="disabled", timeout=15000)
+    with Image.open(path) as image:
+        rgb = image.convert("RGB")
+        assert rgb.size == (page.viewport_size["width"], page.viewport_size["height"])
+        colors = rgb.getcolors(rgb.width * rgb.height)
+        assert colors and len(colors) > 50, "Blank or visually incomplete canvas"
+    return {"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def enable_semantics(page):
+    page.wait_for_selector("flutter-view, flt-glass-pane", timeout=60000)
+    placeholder = page.locator("flt-semantics-placeholder")
+    if placeholder.count():
+        placeholder.evaluate("(element) => element.click()")
+
+
+def named(page, label):
+    return page.get_by_text(label, exact=True).first
+
+
+def run():
+    PROOF.mkdir(parents=True, exist_ok=True)
+    assert (WEB / "main.dart.js").stat().st_size > 1000
+    build_sha = hashlib.sha256((WEB / "main.dart.js").read_bytes()).hexdigest()
+    records = []
+    with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        origin = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with sync_playwright() as pw:
+                for engine in ("chromium", "webkit"):
+                    browser = getattr(pw, engine).launch(headless=True)
+                    try:
+                        for locale, copy in COPY.items():
+                            for w, h in ((390, 844), (1180, 860)):
+                                name = f"{engine}-{locale}-{w}"
+                                record = dict(source_sha=os.environ["EXPECTED_SHA"], build_sha256=build_sha,
+                                              engine=engine, browser_version=browser.version, locale=locale, viewport=[w,h])
+                                ctx = browser.new_context(locale=locale, viewport={"width":w,"height":h},
+                                                          device_scale_factor=1, service_workers="block")
+                                blocked, errors, frames = [], [], []
+                                try:
+                                    def route(r):
+                                        url = r.request.url
+                                        if url.startswith(origin + "/") and "/api/" not in url:
+                                            r.continue_()
+                                        else:
+                                            blocked.append(url.split("?")[0])
+                                            r.abort()
+                                    ctx.route("**/*", route)
+                                    page = ctx.new_page()
+                                    page.on("pageerror", lambda e: errors.append(str(e)[:200]))
+                                    page.goto(origin, wait_until="domcontentloaded")
+                                    enable_semantics(page)
+                                    home, measures, reports, profile, add, identity, back, disabled = copy
+                                    expect(named(page, add)).to_be_visible(timeout=30000)
+                                    frames.append(shot(page, name+"-guest"))
+                                    for label in (measures, reports, profile, home):
+                                        named(page, label).click(timeout=10000)
+                                        page.wait_for_timeout(300)
+                                    expect(named(page, add)).to_be_visible()
+                                    named(page, add).click(timeout=10000)
+                                    expect(named(page, disabled)).to_be_visible(timeout=10000)
+                                    frames.append(shot(page, name+"-identity"))
+                                    page.get_by_role("button", name=back, exact=True).click(timeout=10000)
+                                    expect(named(page, add)).to_be_visible(timeout=10000)
+                                    if locale == "ar-MA" and w == 390:
+                                        page.set_viewport_size({"width":391,"height":844})
+                                        expect(named(page, add)).to_be_visible(timeout=10000)
+                                        page.set_viewport_size({"width":390,"height":844})
+                                        expect(named(page, add)).to_be_visible(timeout=10000)
+                                        frames.append(shot(page, name+"-resize"))
+                                    assert not blocked, "Guest made non-static network request"
+                                    assert not errors, "Browser runtime error"
+                                    record.update(result="PASS", screenshots=frames, blocked_requests=0, page_errors=0)
+                                except Exception as error:
+                                    record.update(result="FAIL", error=str(error)[:500], blocked_requests=blocked,
+                                                  page_errors=errors, screenshots=frames)
+                                finally:
+                                    ctx.close()
+                                records.append(record)
+                                print("D2_BROWSER " + json.dumps(record, ensure_ascii=False), flush=True)
+                                (PROOF / "matrix.json").write_text(json.dumps(records, ensure_ascii=False, indent=2))
+                    finally:
+                        browser.close()
+            assert len(records) == 8
+            assert all(r["result"] == "PASS" for r in records), "D2 candidate browser matrix failed"
+            print("D2_BROWSER_PASS 8/8")
+        finally:
+            server.shutdown()
+
+
+if __name__ == "__main__":
+    run()
