@@ -140,6 +140,7 @@ function retryRetirement(entry){
   entry.promise=retireFence(entry.lease).then(removed=>{
     entry.status=removed?'revoked':'superseded';
     pendingRetirements.delete(entry.lease.token);
+    if(removed)notifyFenceChange();
     return removed;
   },()=>{
     entry.status='failed';
@@ -160,6 +161,68 @@ export async function retryPendingBoundRevocations(){
 export function pendingBoundRevocations(){
   return {pending:[...pendingRetirements.values()].filter(e=>e.status==='pending').length,
     failed:[...pendingRetirements.values()].filter(e=>e.status==='failed').length};
+}
+// Hints carry no owner, epoch, token or key. The committed fence is the
+// only cross-document authority. Unsupported/dropped hints are harmless.
+const FENCE_CHANNEL='iamina-d1-admission-probe-fence-v1';
+function notifyFenceChange(){
+  let channel;
+  try{
+    channel=new BroadcastChannel(FENCE_CHANNEL);
+    channel.postMessage('fence-changed');
+  }catch(_){/* optional optimization only */}
+  finally{try{channel?.close();}catch(_){}}
+}
+async function readFence(){
+  const db=await connect();
+  try{
+    return await new Promise((resolve,reject)=>{
+      const tx=db.transaction(STORE,'readonly');
+      const request=tx.objectStore(STORE).get('fence');
+      tx.oncomplete=()=>resolve(request.result??null);
+      tx.onabort=()=>reject(new Error('Admission fence unavailable'));
+    });
+  }finally{db.close();}
+}
+function monitorBoundFence(lease,authority,revoke){
+  let stopped=false,busy=false,channel,timer;
+  const check=async()=>{
+    if(stopped||busy)return;
+    busy=true;
+    try{
+      if(authority('session',lease.owner,lease.epoch,null)!==true)
+        throw new Error('Bound authority retired');
+      const actual=await readFence();
+      if(stopped)return;
+      if(!fenceMatches(actual,lease)||
+         authority('session',lease.owner,lease.epoch,null)!==true)
+        throw new Error('Admission fence retired');
+    }catch(_){
+      // Ambiguous IDB read also fails closed. Never resurrect on later reads.
+      if(!stopped)void revoke().catch(()=>{});
+    }finally{busy=false;}
+  };
+  const hint=event=>{if(event.data==='fence-changed')void check();};
+  const wake=()=>{void check();};
+  try{
+    channel=new BroadcastChannel(FENCE_CHANNEL);
+    channel.addEventListener('message',hint);
+  }catch(_){try{channel?.close();}catch(__){}channel=null;}
+  // Best effort only while a document executes JS; no timing guarantee
+  // for suspended/backgrounded documents. Existing per-operation fence
+  // validation remains mandatory and independent of this monitor.
+  timer=setInterval(wake,2000);
+  window.addEventListener('focus',wake);
+  document.addEventListener('visibilitychange',wake);
+  void check();
+  return ()=>{
+    if(stopped)return;
+    stopped=true;
+    clearInterval(timer);
+    window.removeEventListener('focus',wake);
+    document.removeEventListener('visibilitychange',wake);
+    try{channel?.close();}catch(_){}
+  };
 }
 const constructorPermit=Object.freeze({});
 class AdmissionSession {
@@ -351,9 +414,10 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
   const check=phase=>require(authority(phase,owner,epoch,null)===true,'Bound authority retired');
   check('claim');
   requirePossessionSecret(phrase);
-  let bytes,session,retirement,retired=false;
+  let bytes,session,retirement,stopMonitor,retired=false;
   const revoke=()=>{
     retired=true;
+    stopMonitor?.();
     session?.retireLocal();
     if(!retirement)return Promise.resolve(false);
     return retryRetirement(retirement);
@@ -379,6 +443,7 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
       require(sameFence(f,baseline),'Admission fence changed');
       store.put(lease,'fence');
     });
+    notifyFenceChange();
     retirement={lease,status:'active',promise:null};
     session=new AdmissionSession(constructorPermit,lease,key,authority);
     if(retired){await revoke();throw new Error('Bound authority retired');}
@@ -397,6 +462,8 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
       require(fenceMatches(f,lease)&&sameRecord(r,record),'Admission fence retired');
     });
     check('activate');
+    stopMonitor=monitorBoundFence(lease,authority,revoke);
+    if(retired){stopMonitor();await revoke();throw new Error('Bound authority retired');}
     // Verify the now-active guard and fence before exposing any operation.
     await session.inspect();
     const perform=async fn=>{

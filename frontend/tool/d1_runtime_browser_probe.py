@@ -1088,6 +1088,101 @@ def exercise_revocation_failure(browser_type,profile,locale,origin):
 
 
 
+# Broadcast hints are never admission authority. Independent documents
+# verify the committed fence even when the transport is disabled.
+I5_HINT_SEND = r"""async ()=>{
+  const ch=new BroadcastChannel('iamina-d1-admission-probe-fence-v1');
+  try{ch.postMessage({owner:900001,token:'forged',epoch:1});
+      ch.postMessage('fence-changed');}
+  finally{ch.close();}
+}"""
+I5_WAIT_SUPERSEDED = r"""async ()=>{
+  for(let i=0;i<160;i++){
+    const state=window.d1CrossSession.revocationStatus();
+    if(state==='superseded')return true;
+    if(state==='failed'||state==='revoked')return false;
+    await new Promise(r=>setTimeout(r,25));
+  }
+  return false;
+}"""
+I5_OLD_REFUSAL = r"""async ()=>{
+  try{await window.d1CrossSession.inspect();return false;}
+  catch(e){return String(e).includes('Bound authority retired');}
+}"""
+I5_PROBE_HINTS = r"""()=>{
+  window.d1Hints=[];
+  window.d1HintObserver=new BroadcastChannel('iamina-d1-admission-probe-fence-v1');
+  window.d1HintObserver.onmessage=e=>window.d1Hints.push(e.data);
+}"""
+
+
+def exercise_cross_hints(browser_type,profile,locale,origin):
+    secrets=None
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            second=ctx.new_page()
+            second.on("pageerror",lambda error: errors.append(str(error)[:300]))
+            second.goto(origin,wait_until="domcontentloaded")
+            second.wait_for_function("typeof window.d1BoundProof === 'function'",timeout=60000)
+            page.evaluate(I5_PROBE_HINTS)
+            # False hint must not authorize or revoke a current lease.
+            second.evaluate(I5_HINT_SEND)
+            page.wait_for_function("window.d1Hints.length===2",timeout=5000)
+            assert page.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            assert page.evaluate("window.d1CrossSession.revocationStatus()")=="active"
+            page.evaluate("window.d1Hints.length=0")
+            # Real A->B admission emits an anonymous hint only after commit.
+            assert second.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+            page.wait_for_function("window.d1Hints.length>=1",timeout=5000)
+            assert page.evaluate("window.d1Hints.every(x=>x==='fence-changed')")
+            assert page.evaluate(I5_WAIT_SUPERSEDED)
+            assert page.evaluate(I5_OLD_REFUSAL)
+            assert page.evaluate(I5_CROSS_FENCE)==900002
+            # Late/duplicate signal from old A cannot revoke or resurrect B.
+            page.evaluate(I5_HINT_SEND)
+            assert second.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            assert second.evaluate("window.d1CrossSession.revocationStatus()")=="active"
+            # Same-owner replacement with sender transport disabled: the
+            # receiver must retire without a new operation or delivered hint.
+            page.evaluate("""()=>{window.d1SavedPost=BroadcastChannel.prototype.postMessage;
+              BroadcastChannel.prototype.postMessage=function(){throw new Error('Injected hint loss');};}""")
+            try:
+                assert page.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+            finally:
+                page.evaluate("BroadcastChannel.prototype.postMessage=window.d1SavedPost")
+            assert second.evaluate(I5_WAIT_SUPERSEDED)
+            assert second.evaluate(I5_OLD_REFUSAL)
+            assert page.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            assert second.evaluate("window.d1CrossSession.retire()") is False
+            # No BroadcastChannel at all in receiver: per-operation/fallback
+            # durable fencing still works after another admission.
+            assert page.evaluate("window.d1CrossSession.retire()") is True
+            second.evaluate("window.BroadcastChannel=undefined")
+            assert second.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+            assert second.evaluate(I5_WAIT_SUPERSEDED)
+            assert second.evaluate(I5_OLD_REFUSAL)
+            assert page.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            assert page.evaluate("window.d1CrossSession.retire()") is True
+            assert page.evaluate(I5_CROSS_FENCE) is None
+            page.evaluate("window.d1HintObserver.close()")
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {"anonymousCommitHint":True,"falseHintIgnored":True,
+                "idleSuperseded":True,"lateHintSafe":True,
+                "lostHintFallback":True,"noChannelFallback":True,
+                "sameOwnerFenced":True,"noResurrection":True}
+    except Exception:
+        raise RuntimeError("D1 cross-document hint qualification failed") from None
+    finally:
+        secrets=None
+
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -1163,6 +1258,7 @@ def run():
                             record["i5_bound"]=exercise_bound(browser_type,Path(root)/(locale+"-bound"),locale,origin)
                             record["i5_cross_revocation"]=exercise_cross_revocation(browser_type,Path(root)/(locale+"-cross-revoke"),locale,origin)
                             record["i5_revocation_failure"]=exercise_revocation_failure(browser_type,Path(root)/(locale+"-revoke-fault"),locale,origin)
+                            record["i5_cross_hints"]=exercise_cross_hints(browser_type,Path(root)/(locale+"-cross-hints"),locale,origin)
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -1180,6 +1276,7 @@ def run():
     print("D1_I5_BOUND_ADMISSION_PASS 2/2",flush=True)
     print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
     print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
+    print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":
