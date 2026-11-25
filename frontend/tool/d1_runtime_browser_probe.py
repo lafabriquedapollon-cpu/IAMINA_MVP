@@ -977,6 +977,117 @@ def exercise_cross_revocation(browser_type,profile,locale,origin):
         secrets=None
 
 
+# Fault injection at the native IDB boundary in an isolated browser profile.
+# Abort AFTER staging the fence tombstone, not just before calling retire().
+I5_REVOCATION_FAILURE = r"""async ()=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const key=await import('/d1_possession_candidate.mjs');
+  const A=900001,B=900002,a=key.generatePossessionSecret(),b=key.generatePossessionSecret();
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected failure reason');return;
+  }throw new Error('Expected refusal');};
+  const proof=(o)=>api.syntheticProof(o,{identityVerified:true,unlocked:true,epoch:1});
+  for(const [owner,secret] of [[A,a],[B,b]]){
+    const s=await api.enroll(owner,1,proof(owner),secret);await s.retire();
+  }
+  const read=async()=>{
+    const db=await new Promise((resolve,reject)=>{
+      const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+      r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(new Error('Store unavailable'));
+    });
+    try{return await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),s=tx.objectStore('state');
+      const f=s.get('fence'),a=s.get('owner:900001'),b=s.get('owner:900002');
+      tx.oncomplete=()=>resolve({f:f.result,a:a.result.revision,b:b.result.revision});
+      tx.onabort=()=>reject(new Error('Store failed'));
+    });}finally{db.close();}
+  };
+  const admit=async(owner,secret,hooks={})=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret,hooks);
+  };
+  const nativeOpen=IDBFactory.prototype.open,nativePut=IDBObjectStore.prototype.put;
+  let aborts=0,opens=0;
+  const denyOpen=()=>{IDBFactory.prototype.open=function(...args){
+    if(args[0]==='iamina-d1-admission-probe-v1'){opens++;throw new Error('Injected IDB open failure');}
+    return nativeOpen.apply(this,args);
+  };};
+  const abortRetire=()=>{IDBObjectStore.prototype.put=function(value,k){
+    const request=nativePut.call(this,value,k);
+    if(k==='fence'&&value.owner===null){aborts++;this.transaction.abort();}
+    return request;
+  };};
+  const restore=()=>{IDBFactory.prototype.open=nativeOpen;IDBObjectStore.prototype.put=nativePut;};
+  const waitFailed=async s=>{
+    for(let i=0;i<100&&s.revocationStatus()!=='failed';i++)await new Promise(r=>setTimeout(r,20));
+    check(s.revocationStatus()==='failed','Failure was not recorded');
+  };
+  try{
+    // Open failure: immediate refusal, durable fence unchanged, explicit retry.
+    let s=await admit(A,a);
+    const baseline=await s.auditSnapshot(),first=await read();
+    denyOpen();window.d1BoundLock();await waitFailed(s);
+    await reject(()=>s.retire(),'Durable revocation unconfirmed');
+    await reject(()=>s.inspect(),'Durable revocation unconfirmed');
+    check(opens>=3&&api.pendingBoundRevocations().failed===1,'Missing open failure evidence');
+    restore();
+    check(JSON.stringify(await read())===JSON.stringify(first),'Open failure changed durable state');
+    const retry=await api.retryPendingBoundRevocations();
+    check(retry.revoked===1&&retry.failed===0&&retry.superseded===0,'Retry did not clear original fence');
+    check(s.revocationStatus()==='revoked'&&(await read()).f.owner===null,'False retry ACK');
+    await reject(()=>s.inspect(),'Bound authority retired');
+    // Real transaction abort after put: no tombstone or checkpoint change.
+    s=await admit(A,a);
+    const beforeAbort=await read();
+    abortRetire();window.d1BoundLock();await waitFailed(s);restore();
+    check(aborts===1&&JSON.stringify(await read())===JSON.stringify(beforeAbort),'Aborted put changed state');
+    const newer=await admit(B,b);
+    const bBefore=await read();
+    const stale=await api.retryPendingBoundRevocations();
+    check(stale.superseded===1&&stale.revoked===0&&stale.failed===0,'Stale retry result wrong');
+    check(s.revocationStatus()==='superseded'&&JSON.stringify(await read())===JSON.stringify(bBefore),'Stale retry erased B');
+    await reject(()=>s.mutate('failed-retire-001'),'Bound authority retired');
+    check((await newer.inspect()).revision===1,'B corrupted');
+    await newer.retire();
+    // Activation fails after acquiring lease and no session handle is returned.
+    await reject(()=>admit(A,a,{afterLease:()=>{
+      abortRetire();window.d1BoundLock();
+    }}),'Durable revocation unconfirmed');
+    restore();
+    check(api.pendingBoundRevocations().failed===1&&(await read()).f.owner===A,'Lost orphan cleanup handle');
+    const orphan=await api.retryPendingBoundRevocations();
+    check(orphan.revoked===1&&orphan.failed===0&&(await read()).f.owner===null,'Orphan retry failed');
+    const fresh=await admit(A,a);
+    const actual=await fresh.auditSnapshot();
+    check(actual.sha256===baseline.sha256&&actual.revision===baseline.revision&&
+      JSON.stringify(actual.tables)===JSON.stringify(baseline.tables),'A bytes changed during failure');
+    await fresh.retire();
+    check(api.pendingBoundRevocations().failed===0&&api.pendingBoundRevocations().pending===0,'Registry not drained');
+    check((await read()).a===1&&(await read()).b===1&&(await read()).f.owner===null,'Final durable state wrong');
+    return {openFailure:true,abortedStagedPut:true,oldSessionRejected:true,
+      retryRevoked:true,staleRetryPreservesB:true,orphanRetry:true,exactSnapshot:true};
+  }finally{restore();}
+}"""
+
+
+def exercise_revocation_failure(browser_type,profile,locale,origin):
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+    try:
+        result=page.evaluate(I5_REVOCATION_FAILURE)
+        assert result=={"openFailure":True,"abortedStagedPut":True,
+                       "oldSessionRejected":True,"retryRevoked":True,
+                       "staleRetryPreservesB":True,"orphanRetry":True,"exactSnapshot":True}
+        assert not blocked and not errors
+        return result
+    except Exception:
+        raise RuntimeError("D1 durable revocation fault qualification failed") from None
+    finally:
+        ctx.close()
+
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -1051,6 +1162,7 @@ def run():
                             record["i5_possession"]=exercise_possession(browser_type,Path(root)/(locale+"-possession"),locale,origin)
                             record["i5_bound"]=exercise_bound(browser_type,Path(root)/(locale+"-bound"),locale,origin)
                             record["i5_cross_revocation"]=exercise_cross_revocation(browser_type,Path(root)/(locale+"-cross-revoke"),locale,origin)
+                            record["i5_revocation_failure"]=exercise_revocation_failure(browser_type,Path(root)/(locale+"-revoke-fault"),locale,origin)
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -1067,6 +1179,7 @@ def run():
     print("D1_I5_POSSESSION_PASS 2/2",flush=True)
     print("D1_I5_BOUND_ADMISSION_PASS 2/2",flush=True)
     print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
+    print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":

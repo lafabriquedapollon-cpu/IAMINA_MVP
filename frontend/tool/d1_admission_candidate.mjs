@@ -123,6 +123,44 @@ async function inspect(bytes,owner) {
 async function digest(bytes){
   return hex(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)));
 }
+// Failed retirements survive loss of the admission handle within this
+// document. Registry entries contain only fence coordinates, never keys,
+// snapshots, possession phrases or session callbacks. No crash persistence.
+const pendingRetirements=new Map();
+function retireFence(lease){
+  return transaction(lease.owner,true,(_r,f,store)=>{
+    if(!fenceMatches(f,lease))return false;
+    store.put({owner:null,token:randomToken(),epoch:null},'fence');return true;
+  });
+}
+function retryRetirement(entry){
+  if(entry.promise)return entry.promise;
+  entry.status='pending';
+  pendingRetirements.set(entry.lease.token,entry);
+  entry.promise=retireFence(entry.lease).then(removed=>{
+    entry.status=removed?'revoked':'superseded';
+    pendingRetirements.delete(entry.lease.token);
+    return removed;
+  },()=>{
+    entry.status='failed';
+    entry.promise=null;
+    throw new Error('Durable revocation unconfirmed');
+  });
+  return entry.promise;
+}
+// Synthetic recovery surface: no caller-supplied lease or authority.
+// An obsolete lease can only CAS its own token, never the newer fence.
+export async function retryPendingBoundRevocations(){
+  const entries=[...pendingRetirements.values()];
+  await Promise.allSettled(entries.map(retryRetirement));
+  return {revoked:entries.filter(e=>e.status==='revoked').length,
+    superseded:entries.filter(e=>e.status==='superseded').length,
+    failed:entries.filter(e=>e.status==='failed').length};
+}
+export function pendingBoundRevocations(){
+  return {pending:[...pendingRetirements.values()].filter(e=>e.status==='pending').length,
+    failed:[...pendingRetirements.values()].filter(e=>e.status==='failed').length};
+}
 const constructorPermit=Object.freeze({});
 class AdmissionSession {
   #lease; #key; #retired=false; #busy=false; #guard;
@@ -170,13 +208,13 @@ class AdmissionSession {
       return {sha256,revision:r.revision,tables};
     }finally{bytes?.fill(0);}
   }
+  retireLocal(){
+    this.#retired=true;this.#key=null;
+  }
   async retire(){
     // Immediately hide local state. A stale tab cannot revoke a newer lease.
-    this.#retired=true;this.#key=null;
-    return transaction(this.#lease.owner,true,(_r,f,store)=>{
-      if(!fenceMatches(f,this.#lease))return false;
-      store.put({owner:null,token:randomToken(),epoch:null},'fence');return true;
-    });
+    this.retireLocal();
+    return retireFence(this.#lease);
   }
   async mutate(operation,{beforeCommit,beforeAck}={}){
     this.#local();
@@ -313,16 +351,12 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
   const check=phase=>require(authority(phase,owner,epoch,null)===true,'Bound authority retired');
   check('claim');
   requirePossessionSecret(phrase);
-  let bytes,session,revocation,retired=false;
+  let bytes,session,retirement,retired=false;
   const revoke=()=>{
     retired=true;
-    if(!session)return Promise.resolve(false);
-    if(!revocation){
-      // retire() removes the local key synchronously, before opening IDB.
-      // Failed durable removal stays retryable; never resolve it as success.
-      revocation=session.retire().catch(error=>{revocation=null;throw error;});
-    }
-    return revocation;
+    session?.retireLocal();
+    if(!retirement)return Promise.resolve(false);
+    return retryRetirement(retirement);
   };
   require(authority('watch',owner,epoch,()=>{void revoke().catch(()=>{});})===true,
     'Bound authority retired');
@@ -345,6 +379,7 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
       require(sameFence(f,baseline),'Admission fence changed');
       store.put(lease,'fence');
     });
+    retirement={lease,status:'active',promise:null};
     session=new AdmissionSession(constructorPermit,lease,key,authority);
     if(retired){await revoke();throw new Error('Bound authority retired');}
     if(afterLease)await afterLease();
@@ -373,6 +408,7 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
       auditSnapshot:()=>perform(()=>session.auditSnapshot()),
       mutate:(operation,hooks)=>perform(()=>session.mutate(operation,hooks)),
       retire:()=>revoke(),
+      revocationStatus:()=>retirement.status,
     });
   }catch(e){
     if(session)await revoke();
