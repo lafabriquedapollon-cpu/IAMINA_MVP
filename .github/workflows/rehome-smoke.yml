@@ -1273,7 +1273,12 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/d1-browser-venv"
           "$RUNNER_TEMP/d1-browser-venv/bin/python" -m pip install playwright==1.55.0
           "$RUNNER_TEMP/d1-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_archive_browser_probe.py
+          archive_status=0
+          portable_status=0
+          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_archive_browser_probe.py || archive_status=$?
+          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_portable_browser_probe.py || portable_status=$?
+          echo "D1_TRANSPORT_STATUS opfs_idb=$archive_status portable=$portable_status"
+          test "$archive_status" -eq 0 && test "$portable_status" -eq 0
 
       - name: D2 pinned Flutter SDK
         if: ${{ github.head_ref == 'phase1/d2-guest' }}
