@@ -3,6 +3,7 @@ import hashlib
 import http.server
 import json
 import os
+import platform
 import re
 from pathlib import Path
 import threading
@@ -32,15 +33,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-def shot(page, name):
+def shot(page, name, *, require_complete=True):
     path = PROOF / (name + ".png")
     page.screenshot(path=str(path), animations="disabled", timeout=15000)
     with Image.open(path) as image:
         rgb = image.convert("RGB")
         assert rgb.size == (page.viewport_size["width"], page.viewport_size["height"])
         colors = rgb.getcolors(rgb.width * rgb.height)
-        assert colors and len(colors) > 50, "Blank or visually incomplete canvas"
-    return {"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        result = {"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "rgb_sha256": hashlib.sha256(rgb.tobytes()).hexdigest(),
+                  "unique_colors": len(colors) if colors else 0,
+                  "complete": bool(colors and len(colors) > 50)}
+    if require_complete:
+        assert result["complete"], "Blank or visually incomplete canvas"
+    return result
 
 
 def enable_semantics(page):
@@ -68,19 +74,22 @@ def run():
     assert (WEB / "main.dart.js").stat().st_size > 1000
     build_sha = hashlib.sha256((WEB / "main.dart.js").read_bytes()).hexdigest()
     records = []
+    engines = ("webkit",) if os.environ.get("D2_MACOS_WEBKIT") == "1" else ("chromium", "webkit")
+    if len(engines) == 1:
+        assert platform.system() == "Darwin"
     with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         origin = f"http://127.0.0.1:{server.server_port}"
         try:
             with sync_playwright() as pw:
-                for engine in ("chromium", "webkit"):
+                for engine in engines:
                     browser = getattr(pw, engine).launch(headless=True)
                     try:
                         for locale, copy in COPY.items():
                             for w, h in ((390, 844), (1180, 860)):
                                 name = f"{engine}-{locale}-{w}"
                                 record = dict(source_sha=os.environ["EXPECTED_SHA"], build_sha256=build_sha,
-                                              engine=engine, browser_version=browser.version, locale=locale, viewport=[w,h])
+                                              engine=engine, browser_version=browser.version, locale=locale, viewport=[w,h], platform=platform.system())
                                 ctx = browser.new_context(locale=locale, viewport={"width":w,"height":h},
                                                           device_scale_factor=1, service_workers="block")
                                 blocked, errors, frames = [], [], []
@@ -118,11 +127,32 @@ def run():
                                     page.get_by_role("button", name=back, exact=True).click(timeout=10000)
                                     expect(named(page, add)).to_be_visible(timeout=10000)
                                     if locale == "ar-MA" and w == 390:
-                                        page.set_viewport_size({"width":391,"height":844})
+                                        # Keep the before/after oracle strict, including pixels.
+                                        # Semantics alone do not establish that Flutter painted.
+                                        page.wait_for_timeout(350)
+                                        before = shot(page, name+"-before-resize", require_complete=False)
+                                        frames.append(before)
+                                        try:
+                                            page.set_viewport_size({"width":391,"height":844})
+                                            expect(named(page, add)).to_be_visible(timeout=10000)
+                                            page.wait_for_timeout(350)
+                                            frames.append(shot(page, name+"-width391", require_complete=False))
+                                        finally:
+                                            page.set_viewport_size({"width":390,"height":844})
                                         expect(named(page, add)).to_be_visible(timeout=10000)
-                                        page.set_viewport_size({"width":390,"height":844})
-                                        expect(named(page, add)).to_be_visible(timeout=10000)
-                                        frames.append(shot(page, name+"-resize"))
+                                        page.wait_for_timeout(350)
+                                        after = []
+                                        for frame in (1, 2):
+                                            observed = shot(page, name+f"-resize-{frame}", require_complete=False)
+                                            frames.append(observed)
+                                            after.append(observed)
+                                            if frame == 1:
+                                                page.wait_for_timeout(500)
+                                        record["resize_observations"] = {"before": before, "after": after}
+                                        assert before["complete"], "Canvas incomplete before resize"
+                                        assert frames[-3]["complete"], "Canvas incomplete at width 391"
+                                        assert all(f["complete"] for f in after), "Blank or visually incomplete canvas after resize"
+                                        assert all(f["rgb_sha256"] == before["rgb_sha256"] for f in after), "Post-resize RGB mismatch"
                                     assert not blocked, "Guest made non-static network request"
                                     assert not errors, "Browser runtime error"
                                     record.update(result="PASS", screenshots=frames, blocked_requests=0, page_errors=0)
@@ -132,7 +162,7 @@ def run():
                                     if page is not None:
                                         try:
                                             record["aria_tree"] = page.locator("body").aria_snapshot(timeout=5000)[:12000]
-                                            frames.append(shot(page, name+"-failure"))
+                                            frames.append(shot(page, name+"-failure", require_complete=False))
                                         except Exception as diagnostic:
                                             record["diagnostic_error"] = str(diagnostic)[:300]
                                 finally:
@@ -142,9 +172,9 @@ def run():
                                 (PROOF / "matrix.json").write_text(json.dumps(records, ensure_ascii=False, indent=2))
                     finally:
                         browser.close()
-            assert len(records) == 8
+            assert len(records) == len(engines) * 4
             assert all(r["result"] == "PASS" for r in records), "D2 candidate browser matrix failed"
-            print("D2_BROWSER_PASS 8/8")
+            print(f"D2_BROWSER_PASS {len(records)}/{len(records)}")
         finally:
             server.shutdown()
 
