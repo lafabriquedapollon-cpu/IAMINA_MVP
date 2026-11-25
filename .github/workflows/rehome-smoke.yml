@@ -2,12 +2,13 @@ name: IAMINA Rehome Smoke
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
     branches: [main, migration/iamina-snapshot-20261123]
     paths:
       - '.github/workflows/rehome-smoke.yml'
       - 'backend/**'
       - 'scripts/**'
+      - 'docs/**'
       - 'frontend/**'
       - 'vercel.json'
   workflow_dispatch:
@@ -1203,7 +1204,36 @@ jobs:
             diabetes/tests/test_d7_profile_http_isolation.py \
             core/tests/test_ai_egress_boundary_gate.py
 
-  # Phase 1 Web candidate gates. All five jobs run at one exact SHA on integration.
+  # Fail-closed scope selection. Only draft, cumulative non-product changes
+  # may defer macOS; ready-for-review or explicit full qualification reruns it.
+  phase1-web-scope:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/d2-guest' || github.head_ref == 'phase1/integration-web') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Test fail-closed scope policy
+        run: python3 -m unittest discover -s scripts/tests -p test_ci_web_scope.py -v
+      - name: Classify exact cumulative PR diff
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          FORCE_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'full-web-qualification') }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          python3 scripts/ci_web_scope.py
+
+  # Phase 1 Web candidate gates. Full qualification uses one exact SHA.
   phase1-d1-linux:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/integration-web') }}
     runs-on: ubuntu-24.04
@@ -1482,7 +1512,8 @@ jobs:
   # Mandatory full OPFS restoration on a supporting platform; Linux must
   # independently attest supported restoration or exact fail-closed capability.
   phase1-d1-macos-storage:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/integration-web') }}
+    needs: phase1-web-scope
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/integration-web') && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
     runs-on: macos-15
     timeout-minutes: 20
     env:
@@ -1515,7 +1546,8 @@ jobs:
   # Linux WebKit port failures remain recorded; explicit diagnostic-all mode
   # reproduces them without substituting them for Safari-target evidence.
   phase1-d2-macos-webkit:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || github.head_ref == 'phase1/integration-web') }}
+    needs: phase1-web-scope
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || github.head_ref == 'phase1/integration-web') && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
     runs-on: macos-15
     timeout-minutes: 25
     env:
