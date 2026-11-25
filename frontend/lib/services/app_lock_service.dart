@@ -22,6 +22,49 @@ final class D1VaultAdmissionProof {
       this._admissionGeneration, this._issuedAt);
 }
 
+/// Process-local continuation of a consumed ticket. The pending phase has
+/// the original deadline; a live session still requires the same identity
+/// and lock generation. No DB/key access or durable lease is granted here.
+final class D1VaultAdmissionGuard {
+  final AppLockService _issuer;
+  final D1VaultAdmissionProof _proof;
+  bool _claimed = false;
+  bool _active = false;
+
+  D1VaultAdmissionGuard._(this._issuer, this._proof);
+
+  bool _context(int owner, int epoch) =>
+      owner == _proof._owner && epoch == _proof._epoch &&
+      _issuer._unlocked &&
+      _issuer._admissionGeneration == _proof._admissionGeneration &&
+      _issuer._hasAdmissionContext(owner, _proof._authGeneration, epoch);
+
+  bool _pending(int owner, int epoch) {
+    final now = _issuer._admissionElapsed;
+    return !_active && _context(owner, epoch) &&
+        now >= _proof._issuedAt &&
+        now - _proof._issuedAt < AppLockService._admissionLifetime;
+  }
+
+  bool claim(int owner, int epoch) {
+    if (_claimed) return false;
+    _claimed = true;
+    return _pending(owner, epoch);
+  }
+
+  bool checkPending(int owner, int epoch) =>
+      _claimed && _pending(owner, epoch);
+
+  bool activate(int owner, int epoch) {
+    if (!checkPending(owner, epoch)) return false;
+    _active = true;
+    return true;
+  }
+
+  bool checkSession(int owner, int epoch) =>
+      _active && _context(owner, epoch);
+}
+
 class AppLockService extends ChangeNotifier {
   static const _credentialKey = 'iamina_app_lock_credential_v1';
   static const _requiredKey = 'iamina_app_lock_required_v1';
@@ -375,7 +418,7 @@ class AppLockService extends ChangeNotifier {
   /// Synchronous, one-shot validation. A wrong-owner attempt burns the ticket.
   /// This is only preadmission; an eventual async vault adapter must recheck
   /// identity/lock and durable lease at every relevant boundary.
-  void consumeVaultAdmissionProof(D1VaultAdmissionProof proof,
+  D1VaultAdmissionGuard consumeVaultAdmissionProof(D1VaultAdmissionProof proof,
       {required int owner}) {
     if (!identical(_pendingAdmission, proof)) {
       throw const AppLockException('vault_admission_retired');
@@ -388,6 +431,7 @@ class AppLockService extends ChangeNotifier {
         now < proof._issuedAt || now - proof._issuedAt >= _admissionLifetime) {
       throw const AppLockException('vault_admission_retired');
     }
+    return D1VaultAdmissionGuard._(this, proof);
   }
 
   void _beginProof() {

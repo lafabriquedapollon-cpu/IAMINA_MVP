@@ -9,6 +9,12 @@ import 'package:amina/data/drift/patient_vault_scope.dart';
 import 'package:drift/drift.dart';
 import 'package:drift/wasm.dart';
 import 'package:flutter/material.dart';
+import 'package:amina/services/auth_service.dart';
+import 'package:amina/services/app_lock_service.dart';
+import 'package:amina/services/app_lock_authenticator.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:sqlite3/wasm.dart';
 
 @JS('d1Snapshot')
@@ -21,6 +27,102 @@ external set _legacyFn(JSFunction function);
 external set _fullInspectFn(JSFunction function);
 @JS('d1Inspect')
 external set _inspectFn(JSFunction function);
+
+// This synthetic entrypoint is built only by the isolated browser harness.
+@JS('d1BoundLogin')
+external set _boundLoginFn(JSFunction function);
+@JS('d1BoundProof')
+external set _boundProofFn(JSFunction function);
+@JS('d1BoundEpoch')
+external set _boundEpochFn(JSFunction function);
+@JS('d1BoundLock')
+external set _boundLockFn(JSFunction function);
+
+const _fixtureCredential = AppLockCredential(
+  credentialId: 'synthetic-bound-credential', publicKeySpki: 'fixture',
+  rpId: 'localhost', origin: 'https://localhost', signCount: 1,
+);
+
+class _MemorySecureStorage implements FlutterSecureStorage {
+  final Map<String, String> values = {
+    'iamina_app_lock_credential_v1': _fixtureCredential.encode(),
+    'iamina_app_lock_required_v1': 'required',
+  };
+  Future<String?> _read(String key) async => values[key];
+  Future<void> _write(String key, String? value) async {
+    if (value == null) { values.remove(key); } else { values[key] = value; }
+  }
+  Future<void> _delete(String key) async { values.remove(key); }
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    final key = invocation.namedArguments[#key];
+    if (key is String) {
+      if (invocation.memberName == #read) return _read(key);
+      if (invocation.memberName == #write) {
+        return _write(key, invocation.namedArguments[#value] as String?);
+      }
+      if (invocation.memberName == #delete) return _delete(key);
+    }
+    return super.noSuchMethod(invocation);
+  }
+}
+
+class _ProbeAuthenticator implements AppLockAuthenticator {
+  int counter = 1;
+  @override
+  Future<AppLockCapability> capability() async => AppLockCapability.supported;
+  @override
+  Future<AppLockCredential> enroll() async => _fixtureCredential;
+  @override
+  Future<AppLockAssertion> unlock(AppLockCredential credential) async =>
+      AppLockAssertion(signCount: ++counter);
+}
+
+AuthService? _boundAuth;
+AppLockService? _boundLock;
+
+Future<void> _boundLogin(int owner) async {
+  _require(_owners.contains(owner), 'Synthetic owner required');
+  if (_boundAuth == null) {
+    final storage = _MemorySecureStorage();
+    final auth = AuthService(storage: storage, httpClient: MockClient((request) async {
+      final email = jsonDecode(request.body)['email'];
+      final id = email == 'a@example.invalid' ? 900001 :
+          email == 'b@example.invalid' ? 900002 : null;
+      if (id == null || !request.url.path.endsWith('/auth/login')) {
+        return http.Response('{}', 403);
+      }
+      return http.Response(jsonEncode({
+        'access_token': 'iamina.fixture_$id:abc123:signature_$id',
+        'user': {'id': id},
+      }), 200);
+    }));
+    await auth.initialize();
+    final lock = AppLockService(authService: auth, storage: storage,
+        authenticator: _ProbeAuthenticator());
+    await lock.initialize();
+    _boundAuth = auth;
+    _boundLock = lock;
+  }
+  await _boundAuth!.signInWithEmail(
+      owner == 900001 ? 'a@example.invalid' : 'b@example.invalid', 'synthetic');
+}
+
+Future<JSFunction> _boundProof(int owner) async {
+  final lock = _boundLock!;
+  final ticket = await lock.issueVaultAdmissionProof();
+  final guard = lock.consumeVaultAdmissionProof(ticket, owner: owner);
+  return ((JSString phase, JSNumber id, JSNumber epoch) {
+    final o = id.toDartInt, e = epoch.toDartInt;
+    return (switch (phase.toDart) {
+      'claim' => guard.claim(o, e),
+      'pending' => guard.checkPending(o, e),
+      'activate' => guard.activate(o, e),
+      'session' => guard.checkSession(o, e),
+      _ => false,
+    }).toJS;
+  }).toJS;
+}
 
 const _filename = 'vault.sqlite';
 const _path = '/vault.sqlite';
@@ -211,6 +313,11 @@ Future<String> _fullInspect(Uint8List bytes, int owner) async {
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  _boundLoginFn = ((JSNumber owner) =>
+      _boundLogin(owner.toDartInt).then((_) => true.toJS).toJS).toJS;
+  _boundProofFn = ((JSNumber owner) => _boundProof(owner.toDartInt).toJS).toJS;
+  _boundEpochFn = (() => AuthService.authEpoch.toJS).toJS;
+  _boundLockFn = (() { _boundLock!.lock(); }).toJS;
   _snapshotFn = ((JSUint8Array? bytes, JSNumber owner) =>
       _snapshot(bytes?.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
   _mutateFn = ((JSUint8Array bytes, JSNumber owner, JSString operation) =>

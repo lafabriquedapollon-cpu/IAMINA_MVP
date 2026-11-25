@@ -799,6 +799,99 @@ def exercise_possession(browser_type,profile,locale,origin):
 
 
 
+# Actual Dart auth/app-lock services, simulated HTTP/authenticator/storage,
+# connected to the real synthetic encrypted Drift/IndexedDB runtime.
+I5_BOUND = r"""async ()=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const keys=await import('/d1_possession_candidate.mjs');
+  const A=900001,B=900002,a=keys.generatePossessionSecret(),b=keys.generatePossessionSecret();
+  const check=(v,m)=>{if(!v)throw new Error(m);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected bound refusal');return;
+  }throw new Error('Expected bound refusal');};
+  const proof=(o,e)=>api.syntheticProof(o,{identityVerified:true,unlocked:true,epoch:e});
+  // Bootstrap only the isolated fixtures using the previously qualified path.
+  const sa=await api.enroll(A,1,proof(A,1),a);
+  await sa.retire();
+  const sb=await api.enroll(B,1,proof(B,1),b);
+  await sb.retire();
+  const fence=async()=>{
+    const db=await new Promise((resolve,reject)=>{
+      const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+      r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(new Error('Store unavailable'));
+    });
+    try{return await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),r=tx.objectStore('state').get('fence');
+      tx.oncomplete=()=>resolve(r.result.owner);tx.onabort=()=>reject(new Error('Store failed'));
+    });}finally{db.close();}
+  };
+  await window.d1BoundLogin(A);
+  const epoch=()=>window.d1BoundEpoch();
+  const ticket=()=>window.d1BoundProof(A);
+  let negatives=0;
+  let p=await ticket();
+  await reject(()=>api.admitBound(A,epoch(),p,b),'Archive authentication failed');negatives++;
+  await reject(()=>api.admitBound(A,epoch(),p,a),'Bound authority retired');negatives++;
+  p=await ticket();
+  await reject(()=>api.admitBound(B,epoch(),p,b),'Bound authority retired');negatives++;
+  check(await fence()===null,'Invalid proof changed fence');
+  p=await ticket();
+  await reject(()=>api.admitBound(A,epoch(),p,a,{beforeLease:()=>window.d1BoundLock()}),
+    'Bound authority retired');negatives++;
+  check(await fence()===null,'Retired pending ticket changed fence');
+  p=await ticket();
+  await reject(()=>api.admitBound(A,epoch(),p,a,{afterLease:async()=>{
+    check(await fence()===A,'Lease missing before SQLite open');
+    window.d1BoundLock();
+  }}),'Bound authority retired');negatives++;
+  check(await fence()===null,'Retired activation left fence');
+  p=await ticket();
+  const s=await api.admitBound(A,epoch(),p,a,{afterLease:async()=>{
+    check(await fence()===A,'Missing durable activation');
+  }});
+  check((await s.inspect()).revision===1,'Unexpected A revision');
+  await reject(()=>api.admitBound(A,epoch(),p,a),'Bound authority retired');negatives++;
+  await reject(()=>s.mutate('bound-before-001',{beforeCommit:()=>window.d1BoundLock()}),
+    'Bound authority retired');negatives++;
+  check(await fence()===null,'Retired mutation left lease');
+  p=await ticket();
+  const reopened=await api.admitBound(A,epoch(),p,a);
+  check((await reopened.inspect()).revision===1,'Retired mutation committed');
+  check((await reopened.mutate('bound-success-001')).revision===2,'Mutation missing');
+  await window.d1BoundLogin(B);
+  await reject(()=>reopened.inspect(),'Bound authority retired');negatives++;
+  check(await fence()===null,'Retired identity left fence');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,epoch(),bp,b);
+  check((await bs.inspect()).revision===1,'B contaminated');
+  await bs.retire();
+  await window.d1BoundLogin(A);
+  const ap=await ticket();
+  const as=await api.admitBound(A,epoch(),ap,a);
+  const report=await as.auditSnapshot();
+  check(report.revision===2&&report.tables.log_entries.length===2,'A checkpoint mismatch');
+  check(report.tables.log_entries.some(x=>x.client_uuid==='d1-i1-900001-op-bound-success-001'),'A row absent');
+  await as.retire();
+  check(await fence()===null,'Final lease still active');
+  return {negativeCases:negatives,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true};
+}"""
+
+
+def exercise_bound(browser_type,profile,locale,origin):
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+    try:
+        result=page.evaluate(I5_BOUND)
+        assert result=={"negativeCases":8,"revisionA":2,"revisionB":1,
+                       "leaseBeforeOpen":True,"retiredFenceCleared":True}
+        assert not blocked and not errors
+        return result
+    except Exception:
+        raise RuntimeError("D1 bound admission qualification failed") from None
+    finally:
+        ctx.close()
+
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -871,6 +964,7 @@ def run():
                             finally:
                                 ctx.close()
                             record["i5_possession"]=exercise_possession(browser_type,Path(root)/(locale+"-possession"),locale,origin)
+                            record["i5_bound"]=exercise_bound(browser_type,Path(root)/(locale+"-bound"),locale,origin)
                             record["result"] = "PASS"
                         except Exception as error:
                             record.update(result="FAIL", error=str(error)[:1500])
@@ -885,6 +979,7 @@ def run():
     print("D1_I3_ADMISSION_FENCE_PASS 2/2",flush=True)
     print("D1_I4_COPY_MIGRATION_PASS 2/2",flush=True)
     print("D1_I5_POSSESSION_PASS 2/2",flush=True)
+    print("D1_I5_BOUND_ADMISSION_PASS 2/2",flush=True)
 
 
 if __name__=="__main__":

@@ -1,6 +1,7 @@
 // D1-I3: isolated synthetic proof of key custody and durable admission fencing.
 // This is NOT a production auth authority or a migration of any patient vault.
 import {sealArchive, openArchive} from './d1_archive_candidate.mjs';
+import {requirePossessionSecret} from './d1_possession_candidate.mjs';
 
 const DB='iamina-d1-admission-probe-v1', STORE='state';
 const owners=new Set([900001,900002]);
@@ -124,12 +125,17 @@ async function digest(bytes){
 }
 const constructorPermit=Object.freeze({});
 class AdmissionSession {
-  #lease; #key; #retired=false; #busy=false;
-  constructor(permit,lease,key){
+  #lease; #key; #retired=false; #busy=false; #guard;
+  constructor(permit,lease,key,guard=null){
     require(permit===constructorPermit,'Admission required');
-    this.#lease=lease;this.#key=key;
+    this.#lease=lease;this.#key=key;this.#guard=guard;
   }
-  #local(){require(!this.#retired,'Session retired');}
+  #local(){
+    require(!this.#retired,'Session retired');
+    if(this.#guard&&this.#guard('session',this.#lease.owner,this.#lease.epoch)!==true){
+      this.#retired=true;this.#key=null;throw new Error('Bound authority retired');
+    }
+  }
   async #read(){
     this.#local();
     try{
@@ -158,7 +164,7 @@ class AdmissionSession {
     let bytes;
     try{
       bytes=await decrypt(r,this.#key,this.#lease.owner);this.#local();
-      const sha256=await digest(bytes);
+      const sha256=await digest(bytes);this.#local();
       const tables=JSON.parse(await window.d1FullInspect(bytes,this.#lease.owner));
       await this.#verifyFence();
       return {sha256,revision:r.revision,tables};
@@ -294,4 +300,69 @@ export async function importScopedArchive(owner,epoch,proof,phrase,manifest,tran
     });
     return new AdmissionSession(constructorPermit,lease,key);
   }finally{seed.fill(0);bytes?.fill(0);verified?.fill(0);}
+}
+
+
+// I5B test-only bridge. The authority callback is produced by the isolated
+// Dart probe from a real consumed AppLockService ticket, not syntheticProof.
+// JS within a compromised origin could forge callbacks: this is NOT a
+// production security boundary. Only existing synthetic checkpoints qualify.
+export async function admitBound(owner,epoch,authority,phrase,{beforeLease,afterLease}={}){
+  require(owners.has(owner)&&Number.isSafeInteger(epoch)&&epoch>0&&
+    typeof authority==='function','Bound authority required');
+  const check=phase=>require(authority(phase,owner,epoch)===true,'Bound authority retired');
+  check('claim');
+  requirePossessionSecret(phrase);
+  let bytes,session;
+  try{
+    check('pending');
+    const {record,baseline}=await transaction(owner,false,(r,f)=>{
+      check('pending');validRecord(r);validFence(f);return {record:r,baseline:f};
+    });
+    check('pending');
+    const key=await unwrapKey(record.envelope,phrase,owner);
+    check('pending');
+    bytes=await decrypt(record,key,owner);
+    check('pending');
+    const lease={owner,epoch,token:randomToken()};
+    if(beforeLease)await beforeLease();
+    check('pending');
+    await transaction(owner,true,(current,f,store)=>{
+      check('pending');
+      require(sameRecord(current,record),'Vault changed during admission');
+      require(sameFence(f,baseline),'Admission fence changed');
+      store.put(lease,'fence');
+    });
+    session=new AdmissionSession(constructorPermit,lease,key,authority);
+    if(afterLease)await afterLease();
+    check('pending');
+    // Durable lease exists BEFORE any Drift/SQLite opening in this path.
+    await transaction(owner,false,(r,f)=>{
+      check('pending');
+      require(fenceMatches(f,lease)&&sameRecord(r,record),'Admission fence retired');
+    });
+    check('pending');
+    await inspect(bytes,owner);
+    check('pending');
+    await transaction(owner,false,(r,f)=>{
+      check('pending');
+      require(fenceMatches(f,lease)&&sameRecord(r,record),'Admission fence retired');
+    });
+    check('activate');
+    // Verify the now-active guard and fence before exposing any operation.
+    await session.inspect();
+    const perform=async fn=>{
+      try{return await fn();}
+      catch(e){await session.retire();throw e;}
+    };
+    return Object.freeze({
+      inspect:()=>perform(()=>session.inspect()),
+      auditSnapshot:()=>perform(()=>session.auditSnapshot()),
+      mutate:(operation,hooks)=>perform(()=>session.mutate(operation,hooks)),
+      retire:()=>session.retire(),
+    });
+  }catch(e){
+    if(session)await session.retire();
+    throw e;
+  }finally{bytes?.fill(0);}
 }
