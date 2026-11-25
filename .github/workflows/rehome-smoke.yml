@@ -1265,6 +1265,16 @@ jobs:
       - name: D1 candidate archive cryptographic regression
         if: ${{ github.head_ref == 'phase1/d1-backup' }}
         run: node --test frontend/tool/d1_archive_candidate.test.mjs
+      - name: D1 real browser encrypted archive restart and SQLite integrity
+        if: ${{ github.head_ref == 'phase1/d1-backup' }}
+        timeout-minutes: 18
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/d1-browser-venv"
+          "$RUNNER_TEMP/d1-browser-venv/bin/python" -m pip install playwright==1.55.0
+          "$RUNNER_TEMP/d1-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
+          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_archive_browser_probe.py
+
       - name: D2 pinned Flutter SDK
         if: ${{ github.head_ref == 'phase1/d2-guest' }}
         run: |
