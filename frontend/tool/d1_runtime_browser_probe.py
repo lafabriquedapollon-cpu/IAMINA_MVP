@@ -25,7 +25,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-def open_context(browser_type, profile, locale, origin, extra_origin=None):
+def open_context(browser_type, profile, locale, origin, extra_origin=None, trace=None):
     context = browser_type.launch_persistent_context(
         str(profile), headless=True, locale=locale,
         viewport={"width":390,"height":844}, service_workers="block",
@@ -38,9 +38,17 @@ def open_context(browser_type, profile, locale, origin, extra_origin=None):
         else:
             blocked.append(r.request.url.split("?")[0])
             r.abort()
+            if trace is not None:
+                trace("blocked", r.request)
     context.route("**/*", route)
     page = context.pages[0] if context.pages else context.new_page()
-    page.on("pageerror", lambda error: errors.append(str(error)[:300]))
+    def page_error(error):
+        errors.append(str(error)[:300])
+        if trace is not None:
+            trace("pageerror", error)
+    page.on("pageerror", page_error)
+    if trace is not None:
+        page.on("console", lambda message: trace("console", message))
     page.goto(origin, wait_until="domcontentloaded")
     page.wait_for_function("typeof window.d1Snapshot === 'function' && typeof window.d1Inspect === 'function'", timeout=60000)
     return context, page, blocked, errors
@@ -2143,9 +2151,56 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
     from playwright.sync_api import expect
     proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
     proof.mkdir(parents=True,exist_ok=True)
-    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
-    stage="before"
+    import re
+    from urllib.parse import urlsplit
+    stage="before-navigation"
     frames=[]
+    def trace(kind, payload):
+        record={"engine":ENGINE,"locale":locale,"width":width,"stage":stage,"event":kind}
+        try:
+            if kind=="blocked":
+                u=urlsplit(payload.url)
+                record["resourceType"]=payload.resource_type
+                # Public, immutable font paths only; reject arbitrary URLs and queries.
+                if (u.hostname=="fonts.gstatic.com" and not u.query and not u.fragment
+                    and re.fullmatch(r"/s/[a-z0-9]{1,80}/v[0-9]{1,4}/[A-Za-z0-9_.-]{1,220}\.(?:woff2?|ttf|otf)",u.path)):
+                    record["fontPath"]=u.path
+                elif u.hostname in ("fonts.gstatic.com","fonts.googleapis.com"):
+                    record["fontHost"]=u.hostname
+                    record["pathDigest"]=hashlib.sha256(u.path.encode()).hexdigest()
+                else:
+                    record["category"]="other-blocked"
+            elif kind=="pageerror":
+                message=str(payload)
+                stack=getattr(payload,"stack","") or ""
+                record["messageDigest"]=hashlib.sha256(message.encode()).hexdigest()
+                record["errorName"]=getattr(payload,"name","") if getattr(payload,"name","") in (
+                    "Error","TypeError","ReferenceError","RangeError","SyntaxError","RuntimeError","AbortError",
+                    "InvalidStateError","SecurityError","NotSupportedError") else "other"
+                markers=("undefined is not an object","null is not an object","can't find variable",
+                    "not a function","out of bounds","memory access","out of memory","stack overflow",
+                    "wasm","webassembly","canvas","webgl","context lost","failed to fetch","networkerror",
+                    "load failed","null check","disposed","unexpected null","resizeobserver",
+                    "aborterror","invalidstateerror","securityerror","not supported")
+                record["markers"]=[m for m in markers if m in message.lower()]
+                record["frames"]=[{"file":a,"line":int(b),"column":int(c)}
+                    for a,b,c in re.findall(r"(main\.dart\.js|flutter_bootstrap\.js|canvaskit\.js|skwasm\.js):(\d+):(\d+)",stack)[:8]]
+            elif kind=="console":
+                message=payload.text
+                if not re.search(r"font|glyph",message,re.IGNORECASE):
+                    return
+                # Only numeric Unicode identifiers; no raw console text.
+                record["codepoints"]=re.findall(r"\bU\+[0-9A-Fa-f]{4,6}\b",message)[:32]
+                record["markers"]=[m for m in ("fallback","missing","glyph","failed","download")
+                    if m in message.lower()]
+                if not record["markers"] and not record["codepoints"]:
+                    return
+            print("D1_D5_UI_TRACE "+json.dumps(record,ensure_ascii=False),flush=True)
+        except Exception:
+            # Diagnostics must not change the qualification or network policy.
+            pass
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin,trace=trace)
+    stage="before"
     def shot(name):
         path=proof/f"conv-ui-{ENGINE}-{locale}-{width}-{name}.png"
         page.screenshot(path=str(path),animations="disabled",timeout=15000)
