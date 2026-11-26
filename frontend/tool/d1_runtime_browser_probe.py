@@ -1,0 +1,1956 @@
+"""D1-I1 actual schema v12, memory-only Drift, atomic encrypted IDB checkpoints.
+
+Synthetic isolated origins/profiles only. No patient identities or real credentials.
+"""
+import hashlib
+import http.server
+import json
+import os
+from pathlib import Path
+import tempfile
+import threading
+
+from playwright.sync_api import sync_playwright
+
+WEB = Path(os.environ["D1_RUNTIME_WEB"]).resolve()
+ENGINE = os.environ["D1_RUNTIME_ENGINE"]
+MARKER = "D1_I1_SYNTHETIC_NOT_PATIENT"
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(WEB), **kwargs)
+
+    def log_message(self, *_):
+        pass
+
+
+def open_context(browser_type, profile, locale, origin, extra_origin=None):
+    context = browser_type.launch_persistent_context(
+        str(profile), headless=True, locale=locale,
+        viewport={"width":390,"height":844}, service_workers="block",
+    )
+    blocked, errors = [], []
+    def route(r):
+        allowed = (origin,) if extra_origin is None else (origin, extra_origin)
+        if any(r.request.url.startswith(o + "/") for o in allowed) and "/api/" not in r.request.url:
+            r.continue_()
+        else:
+            blocked.append(r.request.url.split("?")[0])
+            r.abort()
+    context.route("**/*", route)
+    page = context.pages[0] if context.pages else context.new_page()
+    page.on("pageerror", lambda error: errors.append(str(error)[:300]))
+    page.goto(origin, wait_until="domcontentloaded")
+    page.wait_for_function("typeof window.d1Snapshot === 'function' && typeof window.d1Inspect === 'function'", timeout=60000)
+    return context, page, blocked, errors
+
+
+FIRST = r"""async () => {
+  const {readCheckpoint, commitCheckpoint} = await import('/d1_checkpoint_candidate.mjs');
+  const {openArchive} = await import('/d1_archive_candidate.mjs');
+  const A='amina_vault_v1_native_900001', B='amina_vault_v1_native_900002';
+  const s='synthetic probe key A 2026', t='synthetic probe key B 2026';
+  const check=(ok, msg)=>{if(!ok) throw new Error(msg);};
+  const reject=async fn=>{try{await fn();}catch{return true;}return false;};
+  const inspect=async (record, owner)=>JSON.parse(await window.d1Inspect(record.bytes,owner));
+  check(await readCheckpoint(A,s)===null,'A unexpectedly exists');
+  check(await readCheckpoint(B,t)===null,'B unexpectedly exists');
+  const firstA=await window.d1Snapshot(null,900001);
+  const firstB=await window.d1Snapshot(null,900002);
+  check((await commitCheckpoint(A,s,null,firstA)).revision===1,'A first ACK');
+  check((await commitCheckpoint(B,t,null,firstB)).revision===1,'B first ACK');
+  check(await reject(()=>commitCheckpoint(A,s,null,firstA)),'Overwrite on missing expected token');
+  const oldA=await readCheckpoint(A,s);
+  check((await inspect(oldA,900001)).rows===1,'A initial read');
+  check(await reject(()=>window.d1Inspect(oldA.bytes,900002)),'Wrong SQLite owner accepted');
+  check(await reject(()=>readCheckpoint(A,t)),'Wrong key accepted');
+  check(await reject(()=>openArchive(oldA.archive,s,B)),'Wrong archive scope accepted');
+  const modified=oldA.archive.slice(); modified[modified.length-1]^=1;
+  check(await reject(()=>commitCheckpoint(A,s,{revision:1,archive:modified},firstA)),'Tampered token accepted');
+  check(await reject(()=>commitCheckpoint(A,s,{revision:2,archive:oldA.archive},firstA)),'Revision mismatch accepted');
+  const next=await window.d1Snapshot(oldA.bytes,900001);
+  const outcomes=await Promise.allSettled([
+    commitCheckpoint(A,s,oldA,next), commitCheckpoint(A,s,oldA,next)
+  ]);
+  check(outcomes.filter(x=>x.status==='fulfilled').length===1 &&
+        outcomes.filter(x=>x.status==='rejected' && String(x.reason).includes('Checkpoint conflict')).length===1,
+        'CAS did not enforce one winner');
+  check(await reject(()=>commitCheckpoint(A,s,oldA,next)),'Stale writer accepted');
+  const finalA=await readCheckpoint(A,s), finalB=await readCheckpoint(B,t);
+  check(finalA.revision===2 && finalB.revision===1,'Owner revision isolation');
+  check((await inspect(finalA,900001)).rows===2 && (await inspect(finalB,900002)).rows===1,'Owner row isolation');
+  return {ackA:finalA.revision,ackB:finalB.revision,casWinners:1,negativeCases:7};
+}"""
+
+RESTORE = r"""async () => {
+  const {readCheckpoint} = await import('/d1_checkpoint_candidate.mjs');
+  const A='amina_vault_v1_native_900001', B='amina_vault_v1_native_900002';
+  const s='synthetic probe key A 2026', t='synthetic probe key B 2026';
+  const check=(ok,msg)=>{if(!ok) throw new Error(msg);};
+  const a=await readCheckpoint(A,s), b=await readCheckpoint(B,t);
+  check(a.revision===2 && b.revision===1,'Persisted revisions lost');
+  const ar=JSON.parse(await window.d1Inspect(a.bytes,900001));
+  const br=JSON.parse(await window.d1Inspect(b.bytes,900002));
+  const ar2=JSON.parse(await window.d1Inspect(a.bytes,900001));
+  check(JSON.stringify(ar)===JSON.stringify(ar2),'A-B-A not stable');
+  check(ar.rows===2 && br.rows===1 && ar.schema===12 && br.schema===12 &&
+        ar.integrity==='ok' && br.integrity==='ok' &&
+        JSON.stringify(ar.raw)==='[101.25,102.25]' && JSON.stringify(br.raw)==='[101.25]',
+        'Restored data mismatch');
+  check(JSON.stringify(ar.ids)==='["d1-i1-900001-1","d1-i1-900001-2"]' &&
+        JSON.stringify(br.ids)==='["d1-i1-900002-1"]','UUID loss');
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-runtime-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result); req.onerror=()=>reject(req.error);
+  });
+  let records;
+  try {
+    records=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('checkpoints','readonly');
+      const req=tx.objectStore('checkpoints').getAll();
+      tx.oncomplete=()=>resolve(req.result); tx.onabort=()=>reject(tx.error);
+    });
+  }finally{db.close();}
+  const marker=new TextEncoder().encode('D1_I1_SYNTHETIC_NOT_PATIENT');
+  const header=new TextEncoder().encode('SQLite format 3');
+  const contains=(haystack,needle)=>haystack.some((_,i)=>needle.every((v,j)=>haystack[i+j]===v));
+  check(records.length===2 && records.every(r=>Object.keys(r).sort().join(',')==='archive,revision' &&
+    r.archive instanceof Uint8Array && !contains(r.archive,marker) && !contains(r.archive,header)),
+    'Unexpected durable plaintext or record');
+  check(typeof indexedDB.databases==='function','Cannot enumerate durable browser databases');
+  const databases=(await indexedDB.databases()).map(d=>d.name).sort();
+  check(JSON.stringify(databases)==='["iamina-d1-runtime-probe-v1"]','Unexpected durable database');
+  check(localStorage.length===0 && sessionStorage.length===0,'Unexpected browser storage');
+  check((await caches.keys()).length===0,'Unexpected CacheStorage');
+  if(navigator.storage && typeof navigator.storage.getDirectory==='function'){
+    const root=await navigator.storage.getDirectory();
+    for await(const entry of root.values()) throw new Error('Unexpected OPFS file '+entry.name);
+  }
+  return {a:ar,b:br,aba:true,encryptedRecords:records.length,
+          durableDatabases:databases,opfsChecked:typeof navigator.storage?.getDirectory==='function'};
+}"""
+
+
+# I2 uses real separate documents sharing a persistent browser profile.
+# All gates are deterministic: no timing race or automatic conflict retry.
+I2_START = r"""async ({operation, gate, owner=900001}) => {
+  const {SyntheticMutationSession}=await import('/d1_durable_mutation_candidate.mjs');
+  const secret=owner===900001?'synthetic probe key A 2026':'synthetic probe key B 2026';
+  const session=new SyntheticMutationSession(owner,secret);
+  window.i2Session=session;
+  const state=window.i2State={stage:'starting',outcome:null,release:null,staged:false};
+  const hold=stage=>new Promise(resolve=>{state.stage=stage;state.release=resolve;});
+  const hooks={
+    afterPrepare:()=>gate==='prepare'?hold('prepared'):undefined,
+    onStaged:()=>{state.staged=true;if(gate==='abort-staged')session.retire();},
+    beforeAck:()=>gate==='ack'?hold('committed'):undefined,
+  };
+  // Return control to Playwright; the promise stays in this actual tab.
+  session.mutate(operation,hooks).then(
+    result=>{state.outcome={ok:true,...result};},
+    error=>{state.outcome={ok:false,error:String(error)};}
+  );
+  return true;
+}"""
+
+I2_READ = r"""async () => {
+  const {readCheckpoint}=await import('/d1_checkpoint_candidate.mjs');
+  const a=await readCheckpoint('amina_vault_v1_native_900001','synthetic probe key A 2026');
+  const b=await readCheckpoint('amina_vault_v1_native_900002','synthetic probe key B 2026');
+  const ar=JSON.parse(await window.d1Inspect(a.bytes,900001));
+  const br=JSON.parse(await window.d1Inspect(b.bytes,900002));
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-runtime-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);
+  });
+  let records;
+  try{
+    records=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('checkpoints','readonly');
+      const req=tx.objectStore('checkpoints').getAll();
+      tx.oncomplete=()=>resolve(req.result);tx.onabort=()=>reject(tx.error);
+    });
+  }finally{db.close();}
+  const marker=new TextEncoder().encode('D1_I1_SYNTHETIC_NOT_PATIENT');
+  const header=new TextEncoder().encode('SQLite format 3');
+  const contains=(haystack,needle)=>haystack.some((_,i)=>needle.every((v,j)=>haystack[i+j]===v));
+  if(records.length!==2 || !records.every(r=>Object.keys(r).sort().join(',')==='archive,revision' &&
+      r.archive instanceof Uint8Array && !contains(r.archive,marker) && !contains(r.archive,header)))
+    throw new Error('Unexpected durable plaintext or record');
+  if(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())!=='["iamina-d1-runtime-probe-v1"]' ||
+      localStorage.length || sessionStorage.length || (await caches.keys()).length)
+    throw new Error('Unexpected durable storage');
+  if(navigator.storage?.getDirectory){
+    const root=await navigator.storage.getDirectory();
+    for await(const entry of root.values())throw new Error('Unexpected OPFS file');
+  }
+  a.bytes.fill(0);b.bytes.fill(0);
+  return {a:ar,b:br,revA:a.revision,revB:b.revision,encryptedRecords:records.length};
+}"""
+
+
+def new_ready_page(ctx, origin, errors):
+    page = ctx.new_page()
+    page.on("pageerror", lambda error: errors.append(str(error)[:300]))
+    page.goto(origin, wait_until="domcontentloaded")
+    page.wait_for_function("typeof window.d1Mutate === 'function' && typeof window.d1Inspect === 'function'", timeout=60000)
+    return page
+
+
+def start(page, operation, gate="none"):
+    page.evaluate(I2_START, {"operation":operation,"gate":gate})
+
+
+def stage(page, expected):
+    page.wait_for_function("(s)=>window.i2State && window.i2State.stage===s", arg=expected, timeout=30000)
+
+
+def outcome(page):
+    page.wait_for_function("window.i2State && window.i2State.outcome!==null", timeout=30000)
+    return page.evaluate("window.i2State.outcome")
+
+
+def release(page):
+    page.evaluate("window.i2State.release()")
+
+
+def inspect_i2(page, revision, operations):
+    observed = page.evaluate(I2_READ)
+    expected = ["d1-i1-900001-1", "d1-i1-900001-2"] + ["d1-i1-900001-op-"+op for op in operations]
+    assert observed["revA"] == revision and observed["revB"] == 1, observed
+    assert observed["a"]["ids"] == sorted(expected), observed
+    assert observed["a"]["rows"] == len(expected), observed
+    assert observed["a"]["raw"] == [101.25+i for i in range(len(expected))], observed
+    assert observed["b"]["ids"] == ["d1-i1-900002-1"] and observed["b"]["raw"] == [101.25], observed
+    assert all(observed[owner]["schema"]==12 and observed[owner]["integrity"]=="ok" for owner in ("a","b")), observed
+    return observed
+
+
+def exercise_i2(ctx, page, origin, errors):
+    # Two tabs both prepare revision 2, then race two different operations.
+    second = new_ready_page(ctx, origin, errors)
+    start(page, "tab-one-001", "prepare")
+    start(second, "tab-two-001", "prepare")
+    stage(page, "prepared")
+    stage(second, "prepared")
+    assert page.evaluate("""async()=>{try{await window.i2Session.mutate('busy-test-001');return false;}
+        catch(e){return String(e).includes('Mutation already pending');}}""")
+    release(page)
+    release(second)
+    a, b = outcome(page), outcome(second)
+    assert sum(x["ok"] for x in (a,b))==1, (a,b)
+    winner, loser = (a,b) if a["ok"] else (b,a)
+    assert winner["revision"]==3 and not winner["replay"], winner
+    assert "Checkpoint conflict" in loser["error"], loser
+    winning_op = "tab-one-001" if a["ok"] else "tab-two-001"
+    losing_op = "tab-two-001" if a["ok"] else "tab-one-001"
+    inspect_i2(page,3,[winning_op])
+    start(second,losing_op)
+    assert outcome(second)=={"ok":True,"operation":losing_op,"revision":4,"replay":False}
+    both = [winning_op,losing_op]
+    inspect_i2(page,4,both)
+
+    # Session retirement after the IDB put is staged must abort the transaction.
+    start(second,"abort-staged-001","abort-staged")
+    aborted = outcome(second)
+    assert not aborted["ok"] and "Session retired" in aborted["error"], aborted
+    assert second.evaluate("window.i2State.staged") is True
+    assert second.evaluate("""async()=>{try{await window.i2Session.mutate('retired-001');return false;}
+        catch(e){return String(e).includes('Session retired');}}""")
+    inspect_i2(page,4,both)
+
+    # Retire while mutation is prepared: late completion cannot persist or ACK.
+    start(second,"retired-prepared-001","prepare")
+    stage(second,"prepared")
+    second.evaluate("window.i2Session.retire()")
+    release(second)
+    assert not outcome(second)["ok"]
+    inspect_i2(page,4,both)
+
+    # Close an actual document before dispatching its commit.
+    start(second,"closed-before-001","prepare")
+    stage(second,"prepared")
+    second.close()
+    inspect_i2(page,4,both)
+
+    # Commit completed, but application ACK is intentionally held; close tab.
+    second = new_ready_page(ctx,origin,errors)
+    start(second,"lost-ack-001","ack")
+    stage(second,"committed")
+    assert second.evaluate("window.i2State.outcome===null")
+    inspect_i2(page,5,both+["lost-ack-001"])
+    second.close()
+    second = new_ready_page(ctx,origin,errors)
+    start(second,"lost-ack-001")
+    assert outcome(second)=={"ok":True,"operation":"lost-ack-001","revision":5,"replay":True}
+    inspect_i2(page,5,both+["lost-ack-001"])
+
+    # A retired session cannot publish an already-durable late ACK.
+    start(second,"retired-after-001","ack")
+    stage(second,"committed")
+    second.evaluate("window.i2Session.retire()")
+    release(second)
+    late = outcome(second)
+    assert not late["ok"] and "Session retired" in late["error"], late
+    final_ops = both+["lost-ack-001","retired-after-001"]
+    final = inspect_i2(page,6,final_ops)
+    start(page,"retired-after-001")
+    assert outcome(page)=={"ok":True,"operation":"retired-after-001","revision":6,"replay":True}
+    second.close()
+    return {"raceWinner":winning_op,"raceLoser":losing_op,"casWinners":1,
+            "stagedAbort":True,"closedBeforeCommit":True,"lostAckReplay":True,
+            "retiredBeforeCommit":True,"retiredAfterCommitNoAck":True,
+            "operations":final_ops,"final":final}
+
+
+
+# I3 deliberately runs in a fresh profile, not on the I1/I2 storage.
+# The test authority is synthetic, with no actual account or app-lock proof.
+I3_INIT = r"""async () => {
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,pa='synthetic possession A 2026',pb='synthetic possession B 2026';
+  const proof=(owner,epoch,options={})=>api.syntheticProof(owner,
+    {identityVerified:true,unlocked:true,epoch,...options});
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,expected)=>{try{await fn();}catch(e){
+    if(expected&&!String(e).includes(expected))throw e;return;
+  }throw new Error('Expected rejection: '+expected);};
+  window.i3={api,A,B,pa,pb,proof,check,reject};
+  await reject(()=>api.admit(A,1,proof(A,1),pa),'Vault unavailable');
+  await reject(()=>api.enroll(A,1,proof(A,1,{identityVerified:false}),pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,1,proof(A,1,{unlocked:false}),pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,1,proof(B,1),pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,2,proof(A,1),pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,1,proof(A,1),'short'),'Possession secret required');
+  const once=proof(A,1);
+  const a=await api.enroll(A,1,once,pa);
+  check((await a.inspect()).revision===1,'First enrollment');
+  await reject(()=>api.admit(A,1,once,pa),'Admission proof rejected');
+  await reject(()=>api.enroll(A,1,proof(A,1),pa),'Existing vault cannot be overwritten');
+  await reject(()=>api.admit(A,1,proof(A,1),pb),'Archive authentication failed');
+  const b=await api.enroll(B,2,proof(B,2),pb);
+  await reject(()=>a.inspect(),'Admission fence retired');
+  check((await b.inspect()).owner===B,'B admission');
+  check(await a.retire()===false,'Stale A retired newer B');
+  check((await b.inspect()).revision===1,'B stale retire damage');
+  check(await b.retire()===true,'B revoke');
+  await reject(()=>b.inspect(),'Session retired');
+  window.i3.session=await api.admit(A,3,proof(A,3),pa);
+  check((await window.i3.session.inspect()).rows===1,'A re-admission');
+  return {negativeCases:9,ownerSwitch:true,staleRetireRejected:true};
+}"""
+
+I3_SETUP = r"""async () => {
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,pa='synthetic possession A 2026',pb='synthetic possession B 2026';
+  const proof=(owner,epoch)=>api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch});
+  window.i3={api,A,B,pa,pb,proof};
+}"""
+
+I3_START = r"""({operation,gate,epoch})=>{
+  const x=window.i3;
+  const state=window.i3State={stage:'starting',outcome:null,release:null};
+  const hold=stage=>new Promise(resolve=>{state.stage=stage;state.release=resolve;});
+  const settle=p=>p.then(result=>{state.outcome={ok:true,result};},
+    error=>{state.outcome={ok:false,error:String(error)};});
+  if(gate==='admission'){
+    settle(x.api.admit(x.A,epoch,x.proof(x.A,epoch),x.pa,
+      {beforeActivate:()=>hold('verified')}));
+  }else{
+    settle(x.session.mutate(operation,{
+      beforeCommit:()=>gate==='commit'?hold('prepared'):undefined,
+      beforeAck:()=>gate==='ack'?hold('committed'):undefined,
+    }));
+  }
+  return true;
+}"""
+
+I3_DISK = r"""async () => {
+  const db=await new Promise((resolve,reject)=>{
+    const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);
+  });
+  let records;
+  try{
+    records=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const a=store.get('owner:900001'),b=store.get('owner:900002'),f=store.get('fence'),k=store.getAllKeys();
+      tx.oncomplete=()=>resolve({a:a.result,b:b.result,f:f.result,keys:k.result});
+      tx.onabort=()=>reject(tx.error);
+    });
+  }finally{db.close();}
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const needles=['SQLite format 3','D1_I1_SYNTHETIC_NOT_PATIENT',
+    'synthetic possession A 2026','synthetic possession B 2026'].map(x=>new TextEncoder().encode(x));
+  const contains=(h,n)=>h.some((_,i)=>n.every((v,j)=>h[i+j]===v));
+  for(const r of [records.a,records.b]){
+    check(Object.keys(r).sort().join(',')==='archive,envelope,revision','Unexpected owner record fields');
+    for(const bytes of [r.archive,r.envelope]){
+      check(bytes instanceof Uint8Array&&bytes.length>52&&!needles.some(n=>contains(bytes,n)),
+        'Unexpected durable plaintext');
+    }
+  }
+  check(!records.a.envelope.every((v,i)=>v===records.b.envelope[i]),'Owner envelope collision');
+  check(JSON.stringify(records.keys.sort())==='["fence","owner:900001","owner:900002"]','Unexpected durable keys');
+  check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]'&&
+    !localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length,'Unexpected durable storage');
+  if(navigator.storage?.getDirectory){
+    const root=await navigator.storage.getDirectory();
+    for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+  }
+  return {revisionA:records.a.revision,revisionB:records.b.revision,
+    fenceOwner:records.f.owner,encryptedOwners:2};
+}"""
+
+I3_TAMPER = r"""async () => {
+  const {api,A,B,pa,pb,proof}=window.i3;
+  const db=await new Promise((resolve,reject)=>{
+    const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);
+  });
+  async function read(owner){
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),r=tx.objectStore('state').get('owner:'+owner);
+      tx.oncomplete=()=>resolve(r.result);tx.onabort=()=>reject(tx.error);
+    });
+  }
+  async function put(owner,value){
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readwrite',{durability:'strict'});
+      tx.objectStore('state').put(value,'owner:'+owner);
+      tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);
+    });
+  }
+  const original=await read(A), other=await read(B);
+  const rejected=async()=>{try{await api.admit(A,19,proof(A,19),pa);return false;}catch{return true;}};
+  let count=0;
+  try{
+    const corrupt=original.envelope.slice();corrupt[corrupt.length-1]^=1;
+    await put(A,{...original,envelope:corrupt});
+    if(!await rejected())throw new Error('Tampered envelope admitted');count++;
+    await put(A,{...original,envelope:other.envelope});
+    if(!await rejected())throw new Error('Cross-owner envelope admitted');count++;
+    await put(A,{revision:original.revision,archive:original.archive});
+    if(!await rejected())throw new Error('Missing envelope admitted');count++;
+    try{await api.enroll(A,19,proof(A,19),pa);throw new Error('Unexpected reset');}
+    catch(e){if(!String(e).includes('Existing vault cannot be overwritten'))throw e;}count++;
+    await put(A,{...original,revision:original.revision+1});
+    if(!await rejected())throw new Error('Revision tamper admitted');count++;
+  }finally{await put(A,original);db.close();}
+  return count;
+}"""
+
+
+def i3_start(page,operation,gate,epoch=0):
+    page.evaluate(I3_START,{"operation":operation,"gate":gate,"epoch":epoch})
+
+
+def i3_stage(page,expected):
+    page.wait_for_function("(s)=>window.i3State?.stage===s",arg=expected,timeout=30000)
+
+
+def i3_outcome(page):
+    page.wait_for_function("window.i3State?.outcome!=null",timeout=30000)
+    return page.evaluate("window.i3State.outcome")
+
+
+def i3_release(page):
+    page.evaluate("window.i3State.release()")
+
+
+def i3_admit(page,owner,epoch):
+    return page.evaluate("""async ({owner,epoch})=>{
+        const x=window.i3;
+        x.session=await x.api.admit(owner,epoch,x.proof(owner,epoch),owner===x.A?x.pa:x.pb);
+        return await x.session.inspect();
+    }""",{"owner":owner,"epoch":epoch})
+
+
+def exercise_i3(ctx,page,origin,errors):
+    record=page.evaluate(I3_INIT)
+    second=new_ready_page(ctx,origin,errors)
+    second.evaluate(I3_SETUP)
+    # An independently verified but delayed admission cannot outlive revocation.
+    i3_start(second,"unused","admission",4)
+    i3_stage(second,"verified")
+    assert page.evaluate("window.i3.session.retire()") is True
+    i3_release(second)
+    late=i3_outcome(second)
+    assert not late["ok"] and "Admission fence changed" in late["error"],late
+    assert i3_admit(page,900001,5)["revision"]==1
+
+    # Old tab already holds plaintext in memory and has sealed a next snapshot.
+    # B admission changes the durable fence, with no notification dependency.
+    i3_start(page,"stale-cross-owner-001","commit")
+    i3_stage(page,"prepared")
+    assert i3_admit(second,900002,6)["owner"]==900002
+    i3_release(page)
+    stale=i3_outcome(page)
+    assert not stale["ok"] and "Admission fence retired" in stale["error"],stale
+    assert page.evaluate("window.i3.session.retire()") is False
+    assert second.evaluate("window.i3.session.inspect()")["revision"]==1
+    a=i3_admit(page,900001,7)
+    assert a["revision"]==1 and a["rows"]==1,a
+
+    # Durable commit, then another tab admits the SAME owner before ACK.
+    i3_start(page,"fenced-ack-001","ack")
+    i3_stage(page,"committed")
+    a=i3_admit(second,900001,8)
+    assert a["revision"]==2 and a["rows"]==2,a
+    i3_release(page)
+    stale_ack=i3_outcome(page)
+    assert not stale_ack["ok"] and "Admission fence retired" in stale_ack["error"],stale_ack
+    i3_start(second,"fenced-ack-001","none")
+    replay=i3_outcome(second)
+    assert replay=={"ok":True,"result":{"revision":2,"replay":True,"operation":"fenced-ack-001"}},replay
+
+    # Lock from the current tab invalidates all old leases; explicit re-admission.
+    assert second.evaluate("window.i3.session.retire()") is True
+    assert page.evaluate(I3_DISK)=={"revisionA":2,"revisionB":1,"fenceOwner":None,"encryptedOwners":2}
+    assert page.evaluate(I3_TAMPER)==5
+    assert i3_admit(page,900001,20)["ids"]==["d1-i1-900001-1","d1-i1-900001-op-fenced-ack-001"]
+    assert page.evaluate("window.i3.session.retire()") is True
+    second.close()
+    record.update(delayedAdmissionRejected=True,crossOwnerStaleCommitRejected=True,
+                  sameOwnerLateAckRejected=True,replay=True,tamperCases=5,
+                  durable=page.evaluate(I3_DISK))
+    return record
+
+
+def restore_i3(page):
+    page.evaluate(I3_SETUP)
+    a=i3_admit(page,900001,21)
+    assert a["revision"]==2 and a["raw"]==[101.25,102.25] and a["schema"]==12 and a["integrity"]=="ok",a
+    b=i3_admit(page,900002,22)
+    assert b["revision"]==1 and b["raw"]==[101.25] and b["schema"]==12 and b["integrity"]=="ok",b
+    assert page.evaluate("window.i3.session.retire()") is True
+    return {"a":a,"b":b,"durable":page.evaluate(I3_DISK)}
+
+
+
+# I4: independent browser origins in one profile, explicit encrypted transfer.
+# The legacy fixture is a synthetic raw snapshot, not a real Drift worker store.
+I4_LEGACY = r"""async (action)=>{
+  const {sealArchive}=await import('/d1_archive_candidate.mjs');
+  const owner=900001,scope='amina_vault_v1_native_900001',secret='synthetic transfer secret 2026';
+  const hex=bytes=>Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
+  const digest=async bytes=>hex(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)));
+  // Same DB name and key as the new origin, intentionally different record.
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onupgradeneeded=()=>req.result.createObjectStore('state');
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);
+  });
+  async function read(){
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const r=store.get('owner:900001'),f=store.get('fence');
+      tx.oncomplete=()=>resolve({record:r.result??null,fence:f.result??null});
+      tx.onabort=()=>reject(tx.error);
+    });
+  }
+  async function put(bytes){
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readwrite',{durability:'strict'});
+      tx.objectStore('state').put({legacyBytes:bytes},'owner:900001');
+      tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);
+    });
+  }
+  try{
+    let state=await read();
+    if(action==='create'){
+      if(state.record!==null)throw new Error('Unexpected existing source');
+      await put(await window.d1LegacySnapshot(owner));
+      state=await read();
+    }
+    if(state.fence!==null || !(state.record?.legacyBytes instanceof Uint8Array) ||
+        Object.keys(state.record).join(',')!=='legacyBytes')
+      throw new Error('Unexpected source state or crossed origin');
+    if(action==='mutate'){
+      await put(await window.d1Mutate(state.record.legacyBytes,owner,'old-client-001'));
+      state=await read();
+    }
+    const bytes=state.record.legacyBytes;
+    const sha256=await digest(bytes);
+    const tables=JSON.parse(await window.d1FullInspect(bytes,owner));
+    if(action==='create'){
+      const archive=await sealArchive(bytes,secret,scope);
+      const invalid=new Uint8Array(128);
+      const invalidArchive=await sealArchive(invalid,secret,scope);
+      return {manifest:{kind:'scoped-v12',owner,sha256},transfer:Array.from(archive),
+        invalid:{sha256:await digest(invalid),transfer:Array.from(invalidArchive)},tables};
+    }
+    return {sha256,tables};
+  }finally{db.close();}
+}"""
+
+I4_IMPORT = r"""async ({manifest,transfer,invalid,tables})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const owner=900001,phrase='synthetic migrated possession 2026',secret='synthetic transfer secret 2026';
+  const proof=()=>api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch:1});
+  const archive=new Uint8Array(transfer);
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,expected)=>{try{await fn();}catch(e){
+    if(expected&&!String(e).includes(expected))throw e;return;
+  }throw new Error('Expected rejection: '+expected);};
+  const load=(m=manifest,a=archive,s=secret,hooks={})=>
+    api.importScopedArchive(owner,1,proof(),phrase,m,a,s,hooks);
+  await reject(()=>load({...manifest,kind:'unscoped-mixed'}),'Explicit scoped source provenance required');
+  await reject(()=>load({...manifest,owner:900002}),'Explicit scoped source provenance required');
+  await reject(()=>load({...manifest,sha256:'0'.repeat(64)}),'Source digest mismatch');
+  await reject(()=>load(manifest,archive,'synthetic wrong transfer secret'),'Archive authentication failed');
+  const tampered=archive.slice();tampered[tampered.length-1]^=1;
+  await reject(()=>load(manifest,tampered),'Archive authentication failed');
+  await reject(()=>load({...manifest,sha256:invalid.sha256},new Uint8Array(invalid.transfer)),null);
+  await reject(()=>load(manifest,archive,secret,{beforeActivate:()=>{throw new Error('Interrupted import');}}),'Interrupted import');
+  await reject(()=>api.admit(owner,1,proof(),phrase),'Vault unavailable');
+  const session=await load();
+  window.i4Session=session;
+  const observed=await session.auditSnapshot();
+  check(observed.revision===1&&observed.sha256===manifest.sha256&&
+    JSON.stringify(observed.tables)===JSON.stringify(tables),'Imported bytes/tables differ');
+  await reject(()=>load(),'Existing vault cannot be overwritten');
+  check((await session.auditSnapshot()).sha256===manifest.sha256,'Overwrite changed imported vault');
+  return {observed,negativeCases:9};
+}"""
+
+I4_DEST = r"""async ({expected,restore})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const owner=900001,phrase='synthetic migrated possession 2026';
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  if(restore){
+    const proof=api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch:2});
+    window.i4Session=await api.admit(owner,2,proof,phrase);
+  }
+  const observed=await window.i4Session.auditSnapshot();
+  check(observed.revision===1&&observed.sha256===expected,'Imported bytes changed');
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);
+  });
+  let stored;
+  try{
+    stored=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const r=store.get('owner:900001'),keys=store.getAllKeys();
+      tx.oncomplete=()=>resolve({record:r.result,keys:keys.result});tx.onabort=()=>reject(tx.error);
+    });
+  }finally{db.close();}
+  check(Object.keys(stored.record).sort().join(',')==='archive,envelope,revision' &&
+        JSON.stringify(stored.keys.sort())==='["fence","owner:900001"]','Unexpected destination state');
+  const needles=['SQLite format 3','D1_I1_SYNTHETIC_NOT_PATIENT','synthetic migrated possession 2026',
+    'synthetic transfer secret 2026'].map(x=>new TextEncoder().encode(x));
+  const contains=(h,n)=>h.some((_,i)=>n.every((v,j)=>h[i+j]===v));
+  for(const bytes of [stored.record.archive,stored.record.envelope])
+    check(bytes instanceof Uint8Array&&!needles.some(n=>contains(bytes,n)),'Destination plaintext');
+  check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]' &&
+        !localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length,'Unexpected destination storage');
+  if(navigator.storage?.getDirectory){
+    const root=await navigator.storage.getDirectory();
+    for await(const _ of root.values())throw new Error('Unexpected destination OPFS file');
+  }
+  return observed;
+}"""
+
+
+def exercise_i4(ctx,page,legacy_origin,errors):
+    source=new_ready_page(ctx,legacy_origin,errors)
+    assert source.evaluate("location.origin") != page.evaluate("location.origin")
+    exported=source.evaluate(I4_LEGACY,"create")
+    tables=exported["tables"]
+    assert len(tables)==6 and all(len(rows)==1 for rows in tables.values()),tables
+    assert tables["log_entries"][0]["sync_status"]=="pending" and tables["log_entries"][0]["sync_attempts"]==2
+    assert tables["patient_treatment_declarations_v1"][0]["sync_status"]=="pending"
+    assert tables["patient_treatment_declarations_v1"][0]["local_generation"]==3
+    assert tables["reminders"][0]["enabled"] in (0,False)
+    imported=page.evaluate(I4_IMPORT,exported)
+    assert imported["observed"]["tables"]==tables
+    expected=exported["manifest"]["sha256"]
+    unchanged=source.evaluate(I4_LEGACY,"read")
+    assert unchanged=={"sha256":expected,"tables":tables},unchanged
+    # An old document writes its own origin after cutover. It cannot update
+    # the new origin's IDB even though both use the identical store and key.
+    changed=source.evaluate(I4_LEGACY,"mutate")
+    assert changed["sha256"]!=expected and len(changed["tables"]["log_entries"])==2,changed
+    final=page.evaluate(I4_DEST,{"expected":expected,"restore":False})
+    assert final==imported["observed"],final
+    assert page.evaluate("window.i4Session.retire()") is True
+    source.close()
+    return {"sourceSha":expected,"oldClientChangedSha":changed["sha256"],
+            "sourcePreservedBeforeOldWrite":True,"oldOriginWriteIsolated":True,
+            "negativeCases":imported["negativeCases"],"imported":final}
+
+
+def restore_i4(ctx,page,legacy_origin,errors,record):
+    source=new_ready_page(ctx,legacy_origin,errors)
+    old=source.evaluate(I4_LEGACY,"read")
+    assert old["sha256"]==record["oldClientChangedSha"] and len(old["tables"]["log_entries"])==2,old
+    source.close()
+    new=page.evaluate(I4_DEST,{"expected":record["sourceSha"],"restore":True})
+    assert new==record["imported"],new
+    assert page.evaluate("window.i4Session.retire()") is True
+    return {"sourceSha":old["sha256"],"destinationSha":new["sha256"],
+            "sourceRows":len(old["tables"]["log_entries"]),"destinationRows":len(new["tables"]["log_entries"]),
+            "exactTablesPreserved":True}
+
+
+
+
+# I5B: random portable possession, independent of simulated identity proof.
+# Only the Python harness retains the generated secrets between browser restarts.
+# Never include secrets in JSON evidence, exception messages or screenshots.
+I5_POSSESSION = r"""async ({secrets,restore})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const key=await import('/d1_possession_candidate.mjs');
+  const A=900001,B=900002;
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,expected)=>{try{await fn();}catch(e){
+    check(String(e).includes(expected),'Unexpected rejection reason');return;
+  }throw new Error('Expected refusal');};
+  const proof=(owner,epoch)=>api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch});
+  const a=key.requirePossessionSecret(secrets[0]),b=key.requirePossessionSecret(secrets[1]);
+  check(a!==b,'Random secret collision');
+  let negatives=0;
+  for(const invalid of ['',a.slice(1),a+'0',a.toUpperCase().replace(/^./,'G'),a+'\n',null]){
+    await reject(()=>key.requirePossessionSecret(invalid),'Invalid possession secret');negatives++;
+  }
+  const epoch=restore?32:31;
+  if(!restore){
+    const sa=await api.enroll(A,epoch,proof(A,epoch),a);
+    await sa.mutate('possession-001');
+    await sa.retire();
+    const sb=await api.enroll(B,epoch,proof(B,epoch),b);
+    await sb.retire();
+  }
+  await reject(()=>api.admit(A,epoch,proof(A,epoch),b),'Archive authentication failed');negatives++;
+  await reject(()=>api.admit(B,epoch,proof(B,epoch),a),'Archive authentication failed');negatives++;
+  const bad=a.slice(0,63)+(a.endsWith('0')?'1':'0');
+  await reject(()=>api.admit(A,epoch,proof(A,epoch),bad),'Archive authentication failed');negatives++;
+  const ticket=proof(A,epoch);
+  const sa=await api.admit(A,epoch,ticket,a);
+  const ra=await sa.auditSnapshot();
+  await reject(()=>api.admit(A,epoch,ticket,a),'Admission proof rejected');negatives++;
+  check(await sa.retire(),'A retire failed');
+  const sb=await api.admit(B,epoch,proof(B,epoch),b);
+  const rb=await sb.auditSnapshot();
+  check(await sb.retire(),'B retire failed');
+  check(ra.revision===2&&rb.revision===1&&ra.sha256!==rb.sha256,'Owner/revision mismatch');
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{
+    const state=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const a=store.get('owner:900001'),b=store.get('owner:900002'),keys=store.getAllKeys();
+      tx.oncomplete=()=>resolve({a:a.result,b:b.result,keys:keys.result});
+      tx.onabort=()=>reject(new Error('Store read failed'));
+    });
+    const encode=x=>new TextEncoder().encode(x);
+    const raw=x=>Uint8Array.from(x.match(/../g),y=>parseInt(y,16));
+    const needles=[encode(a),encode(b),raw(a),raw(b),encode('SQLite format 3'),
+      encode('D1_I1_SYNTHETIC_NOT_PATIENT')];
+    const contains=(h,n)=>h.some((_,i)=>n.every((v,j)=>h[i+j]===v));
+    check(JSON.stringify(state.keys.sort())==='["fence","owner:900001","owner:900002"]','Unexpected durable keys');
+    for(const rec of [state.a,state.b]){
+      check(Object.keys(rec).sort().join(',')==='archive,envelope,revision','Unexpected record');
+      for(const bytes of [rec.archive,rec.envelope])
+        check(bytes instanceof Uint8Array&&!needles.some(n=>contains(bytes,n)),'Unexpected durable secret/plaintext');
+    }
+    check(!localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length,'Unexpected storage');
+    check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]','Unexpected database');
+    if(navigator.storage?.getDirectory){
+      const root=await navigator.storage.getDirectory();
+      for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+    }
+  }finally{db.close();}
+  return {a:ra,b:rb,negativeCases:negatives,plaintextCheck:true};
+}"""
+
+
+def exercise_possession(browser_type,profile,locale,origin):
+    secrets=None
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate("""async ()=>{
+              const k=await import('/d1_possession_candidate.mjs');
+              return [k.generatePossessionSecret(),k.generatePossessionSecret()];
+            }""")
+            assert len(secrets)==2 and all(len(s)==64 for s in secrets)
+            first=page.evaluate(I5_POSSESSION,{"secrets":secrets,"restore":False})
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_POSSESSION,{"secrets":secrets,"restore":True})
+            assert restored==first and first["negativeCases"]==10
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {"first":first,"restart":True}
+    except Exception:
+        # Never propagate Playwright arguments or arbitrary error strings.
+        raise RuntimeError("D1 possession qualification failed") from None
+    finally:
+        secrets=None
+
+
+
+# Actual Dart auth/app-lock services, simulated HTTP/authenticator/storage,
+# connected to the real synthetic encrypted Drift/IndexedDB runtime.
+I5_BOUND = r"""async ()=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const keys=await import('/d1_possession_candidate.mjs');
+  const A=900001,B=900002,a=keys.generatePossessionSecret(),b=keys.generatePossessionSecret();
+  const check=(v,m)=>{if(!v)throw new Error(m);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected bound refusal');return;
+  }throw new Error('Expected bound refusal');};
+  const proof=(o,e)=>api.syntheticProof(o,{identityVerified:true,unlocked:true,epoch:e});
+  // Bootstrap only the isolated fixtures using the previously qualified path.
+  const sa=await api.enroll(A,1,proof(A,1),a);
+  await sa.retire();
+  const sb=await api.enroll(B,1,proof(B,1),b);
+  await sb.retire();
+  const fence=async()=>{
+    const db=await new Promise((resolve,reject)=>{
+      const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+      r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(new Error('Store unavailable'));
+    });
+    try{return await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),r=tx.objectStore('state').get('fence');
+      tx.oncomplete=()=>resolve(r.result.owner);tx.onabort=()=>reject(new Error('Store failed'));
+    });}finally{db.close();}
+  };
+  await window.d1BoundLogin(A);
+  const epoch=()=>window.d1BoundEpoch();
+  const ticket=()=>window.d1BoundProof(A);
+  let negatives=0;
+  let p=await ticket();
+  await reject(()=>api.admitBound(A,epoch(),p,b),'Archive authentication failed');negatives++;
+  await reject(()=>api.admitBound(A,epoch(),p,a),'Bound authority retired');negatives++;
+  p=await ticket();
+  await reject(()=>api.admitBound(B,epoch(),p,b),'Bound authority retired');negatives++;
+  check(await fence()===null,'Invalid proof changed fence');
+  p=await ticket();
+  await reject(()=>api.admitBound(A,epoch(),p,a,{beforeLease:()=>window.d1BoundLock()}),
+    'Bound authority retired');negatives++;
+  check(await fence()===null,'Retired pending ticket changed fence');
+  p=await ticket();
+  await reject(()=>api.admitBound(A,epoch(),p,a,{afterLease:async()=>{
+    check(await fence()===A,'Lease missing before SQLite open');
+    window.d1BoundLock();
+  }}),'Bound authority retired');negatives++;
+  check(await fence()===null,'Retired activation left fence');
+  p=await ticket();
+  const s=await api.admitBound(A,epoch(),p,a,{afterLease:async()=>{
+    check(await fence()===A,'Missing durable activation');
+  }});
+  check((await s.inspect()).revision===1,'Unexpected A revision');
+  await reject(()=>api.admitBound(A,epoch(),p,a),'Bound authority retired');negatives++;
+  await reject(()=>s.mutate('bound-before-001',{beforeCommit:()=>window.d1BoundLock()}),
+    'Bound authority retired');negatives++;
+  check(await fence()===null,'Retired mutation left lease');
+  p=await ticket();
+  const reopened=await api.admitBound(A,epoch(),p,a);
+  check((await reopened.inspect()).revision===1,'Retired mutation committed');
+  check((await reopened.mutate('bound-success-001')).revision===2,'Mutation missing');
+  await window.d1BoundLogin(B);
+  // Observe durable retirement before attempting any operation on the old session.
+  for(let i=0;i<100&&await fence()!==null;i++)await new Promise(r=>setTimeout(r,20));
+  check(await fence()===null,'Idle identity retirement did not clear fence');
+  await reject(()=>reopened.inspect(),'Bound authority retired');negatives++;
+  check(await fence()===null,'Retired identity left fence');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,epoch(),bp,b);
+  check((await bs.inspect()).revision===1,'B contaminated');
+  await bs.retire();
+  await window.d1BoundLogin(A);
+  const ap=await ticket();
+  const as=await api.admitBound(A,epoch(),ap,a);
+  const report=await as.auditSnapshot();
+  check(report.revision===2&&report.tables.log_entries.length===2,'A checkpoint mismatch');
+  check(report.tables.log_entries.some(x=>x.client_uuid==='d1-i1-900001-op-bound-success-001'),'A row absent');
+  window.d1BoundLock();
+  for(let i=0;i<100&&await fence()!==null;i++)await new Promise(r=>setTimeout(r,20));
+  check(await fence()===null,'Idle lock retirement did not clear fence');
+  await reject(()=>as.inspect(),'Bound authority retired');
+  check(await as.retire()===true,'Retirement acknowledgement missing');
+  return {negativeCases:negatives+1,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true,idleRevocation:true};
+}"""
+
+
+def exercise_bound(browser_type,profile,locale,origin):
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+    try:
+        result=page.evaluate(I5_BOUND)
+        assert result=={"negativeCases":9,"revisionA":2,"revisionB":1,
+                       "leaseBeforeOpen":True,"retiredFenceCleared":True,"idleRevocation":True}
+        assert not blocked and not errors
+        return result
+    except Exception:
+        raise RuntimeError("D1 bound admission qualification failed") from None
+    finally:
+        ctx.close()
+
+
+
+# Independent documents share the strict IDB fence, not Dart auth state.
+# Harness retains only synthetic possession secrets outside the browser.
+I5_CROSS_BOOT = r"""async ()=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const keys=await import('/d1_possession_candidate.mjs');
+  const secrets=[keys.generatePossessionSecret(),keys.generatePossessionSecret()];
+  for(let i=0;i<2;i++){
+    const owner=900001+i;
+    const s=await api.enroll(owner,1,api.syntheticProof(owner,
+      {identityVerified:true,unlocked:true,epoch:1}),secrets[i]);
+    await s.retire();
+  }
+  return secrets;
+}"""
+I5_CROSS_OPEN = r"""async ({owner,secret})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  await window.d1BoundLogin(owner);
+  const p=await window.d1BoundProof(owner);
+  window.d1CrossSession=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  return (await window.d1CrossSession.inspect()).revision;
+}"""
+I5_CROSS_FENCE = r"""async ()=>{
+  const db=await new Promise((resolve,reject)=>{
+    const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{return await new Promise((resolve,reject)=>{
+    const tx=db.transaction('state','readonly'),r=tx.objectStore('state').get('fence');
+    tx.oncomplete=()=>resolve(r.result.owner);tx.onabort=()=>reject(new Error('Store failed'));
+  });}finally{db.close();}
+}"""
+
+
+def exercise_cross_revocation(browser_type,profile,locale,origin):
+    secrets=None
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            second=ctx.new_page()
+            second.on("pageerror",lambda error: errors.append(str(error)[:300]))
+            second.goto(origin,wait_until="domcontentloaded")
+            second.wait_for_function("typeof window.d1BoundProof === 'function'",timeout=60000)
+            assert second.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+            assert page.evaluate(I5_CROSS_FENCE)==900002
+            page.evaluate("window.d1BoundLock()")
+            # Await the stale tab's proactive CAS result; it must NOT erase B.
+            assert page.evaluate("window.d1CrossSession.retire()") is False
+            assert page.evaluate("""async()=>{try{await window.d1CrossSession.inspect();return false;}
+              catch(e){return String(e).includes('Bound authority retired');}}""")
+            assert second.evaluate(I5_CROSS_FENCE)==900002
+            assert second.evaluate("window.d1CrossSession.mutate('cross-success-001')")["revision"]==2
+            assert not blocked and not errors
+            # Deliberately close without retire. An orphan fence is allowed;
+            # it is not an authority, and no key is restored from it.
+        finally:
+            ctx.close()
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            assert page.evaluate(I5_CROSS_FENCE)==900002
+            assert page.evaluate("typeof window.d1CrossSession")=="undefined"
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            assert page.evaluate(I5_CROSS_FENCE)==900001
+            assert page.evaluate("window.d1CrossSession.retire()") is True
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==2
+            assert page.evaluate("window.d1CrossSession.retire()") is True
+            assert page.evaluate(I5_CROSS_FENCE) is None
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {"staleRetirePreservesB":True,"orphanReplacedAfterRestart":True,
+                "revisionA":1,"revisionB":2}
+    except Exception:
+        raise RuntimeError("D1 cross-document revocation qualification failed") from None
+    finally:
+        secrets=None
+
+
+# Fault injection at the native IDB boundary in an isolated browser profile.
+# Abort AFTER staging the fence tombstone, not just before calling retire().
+I5_REVOCATION_FAILURE = r"""async ()=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const key=await import('/d1_possession_candidate.mjs');
+  const A=900001,B=900002,a=key.generatePossessionSecret(),b=key.generatePossessionSecret();
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected failure reason');return;
+  }throw new Error('Expected refusal');};
+  const proof=(o)=>api.syntheticProof(o,{identityVerified:true,unlocked:true,epoch:1});
+  for(const [owner,secret] of [[A,a],[B,b]]){
+    const s=await api.enroll(owner,1,proof(owner),secret);await s.retire();
+  }
+  const read=async()=>{
+    const db=await new Promise((resolve,reject)=>{
+      const r=indexedDB.open('iamina-d1-admission-probe-v1',1);
+      r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(new Error('Store unavailable'));
+    });
+    try{return await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),s=tx.objectStore('state');
+      const f=s.get('fence'),a=s.get('owner:900001'),b=s.get('owner:900002');
+      tx.oncomplete=()=>resolve({f:f.result,a:a.result.revision,b:b.result.revision});
+      tx.onabort=()=>reject(new Error('Store failed'));
+    });}finally{db.close();}
+  };
+  const admit=async(owner,secret,hooks={})=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret,hooks);
+  };
+  const nativeOpen=IDBFactory.prototype.open,nativePut=IDBObjectStore.prototype.put;
+  let aborts=0,opens=0;
+  const denyOpen=()=>{IDBFactory.prototype.open=function(...args){
+    if(args[0]==='iamina-d1-admission-probe-v1'){opens++;throw new Error('Injected IDB open failure');}
+    return nativeOpen.apply(this,args);
+  };};
+  const abortRetire=()=>{IDBObjectStore.prototype.put=function(value,k){
+    const request=nativePut.call(this,value,k);
+    if(k==='fence'&&value.owner===null){aborts++;this.transaction.abort();}
+    return request;
+  };};
+  const restore=()=>{IDBFactory.prototype.open=nativeOpen;IDBObjectStore.prototype.put=nativePut;};
+  const waitFailed=async s=>{
+    for(let i=0;i<100&&s.revocationStatus()!=='failed';i++)await new Promise(r=>setTimeout(r,20));
+    check(s.revocationStatus()==='failed','Failure was not recorded');
+  };
+  try{
+    // Open failure: immediate refusal, durable fence unchanged, explicit retry.
+    let s=await admit(A,a);
+    const baseline=await s.auditSnapshot(),first=await read();
+    denyOpen();window.d1BoundLock();await waitFailed(s);
+    await reject(()=>s.retire(),'Durable revocation unconfirmed');
+    await reject(()=>s.inspect(),'Durable revocation unconfirmed');
+    check(opens>=3&&api.pendingBoundRevocations().failed===1,'Missing open failure evidence');
+    restore();
+    check(JSON.stringify(await read())===JSON.stringify(first),'Open failure changed durable state');
+    const retry=await api.retryPendingBoundRevocations();
+    check(retry.revoked===1&&retry.failed===0&&retry.superseded===0,'Retry did not clear original fence');
+    check(s.revocationStatus()==='revoked'&&(await read()).f.owner===null,'False retry ACK');
+    await reject(()=>s.inspect(),'Bound authority retired');
+    // Real transaction abort after put: no tombstone or checkpoint change.
+    s=await admit(A,a);
+    const beforeAbort=await read();
+    abortRetire();window.d1BoundLock();await waitFailed(s);restore();
+    check(aborts===1&&JSON.stringify(await read())===JSON.stringify(beforeAbort),'Aborted put changed state');
+    const newer=await admit(B,b);
+    const bBefore=await read();
+    const stale=await api.retryPendingBoundRevocations();
+    check(stale.superseded===1&&stale.revoked===0&&stale.failed===0,'Stale retry result wrong');
+    check(s.revocationStatus()==='superseded'&&JSON.stringify(await read())===JSON.stringify(bBefore),'Stale retry erased B');
+    await reject(()=>s.mutate('failed-retire-001'),'Bound authority retired');
+    check((await newer.inspect()).revision===1,'B corrupted');
+    await newer.retire();
+    // Activation fails after acquiring lease and no session handle is returned.
+    await reject(()=>admit(A,a,{afterLease:()=>{
+      abortRetire();window.d1BoundLock();
+    }}),'Durable revocation unconfirmed');
+    restore();
+    check(api.pendingBoundRevocations().failed===1&&(await read()).f.owner===A,'Lost orphan cleanup handle');
+    const orphan=await api.retryPendingBoundRevocations();
+    check(orphan.revoked===1&&orphan.failed===0&&(await read()).f.owner===null,'Orphan retry failed');
+    const fresh=await admit(A,a);
+    const actual=await fresh.auditSnapshot();
+    check(actual.sha256===baseline.sha256&&actual.revision===baseline.revision&&
+      JSON.stringify(actual.tables)===JSON.stringify(baseline.tables),'A bytes changed during failure');
+    await fresh.retire();
+    check(api.pendingBoundRevocations().failed===0&&api.pendingBoundRevocations().pending===0,'Registry not drained');
+    check((await read()).a===1&&(await read()).b===1&&(await read()).f.owner===null,'Final durable state wrong');
+    return {openFailure:true,abortedStagedPut:true,oldSessionRejected:true,
+      retryRevoked:true,staleRetryPreservesB:true,orphanRetry:true,exactSnapshot:true};
+  }finally{restore();}
+}"""
+
+
+def exercise_revocation_failure(browser_type,profile,locale,origin):
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+    try:
+        result=page.evaluate(I5_REVOCATION_FAILURE)
+        assert result=={"openFailure":True,"abortedStagedPut":True,
+                       "oldSessionRejected":True,"retryRevoked":True,
+                       "staleRetryPreservesB":True,"orphanRetry":True,"exactSnapshot":True}
+        assert not blocked and not errors
+        return result
+    except Exception:
+        raise RuntimeError("D1 durable revocation fault qualification failed") from None
+    finally:
+        ctx.close()
+
+
+
+# Broadcast hints are never admission authority. Independent documents
+# verify the committed fence even when the transport is disabled.
+I5_HINT_SEND = r"""async ()=>{
+  const ch=new BroadcastChannel('iamina-d1-admission-probe-fence-v1');
+  try{ch.postMessage({owner:900001,token:'forged',epoch:1});
+      ch.postMessage('fence-changed');}
+  finally{ch.close();}
+}"""
+I5_WAIT_SUPERSEDED = r"""async ()=>{
+  for(let i=0;i<160;i++){
+    const state=window.d1CrossSession.revocationStatus();
+    if(state==='superseded')return true;
+    if(state==='failed'||state==='revoked')return false;
+    await new Promise(r=>setTimeout(r,25));
+  }
+  return false;
+}"""
+I5_OLD_REFUSAL = r"""async ()=>{
+  try{await window.d1CrossSession.inspect();return false;}
+  catch(e){return String(e).includes('Bound authority retired');}
+}"""
+I5_PROBE_HINTS = r"""()=>{
+  window.d1Hints=[];
+  window.d1HintObserver=new BroadcastChannel('iamina-d1-admission-probe-fence-v1');
+  window.d1HintObserver.onmessage=e=>window.d1Hints.push(e.data);
+}"""
+
+
+def exercise_cross_hints(browser_type,profile,locale,origin):
+    secrets=None
+    stage="open-context"
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            stage="step-01"
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="step-02"
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            stage="step-03"
+            second=ctx.new_page()
+            second.on("pageerror",lambda error: errors.append(str(error)[:300]))
+            stage="step-04"
+            second.goto(origin,wait_until="domcontentloaded")
+            stage="step-05"
+            second.wait_for_function("typeof window.d1BoundProof === 'function'",timeout=60000)
+            stage="step-06"
+            page.evaluate(I5_PROBE_HINTS)
+            # False hint must not authorize or revoke a current lease.
+            stage="step-07"
+            second.evaluate(I5_HINT_SEND)
+            stage="step-08"
+            page.wait_for_function("window.d1Hints.length===2",polling=50,timeout=5000)
+            stage="step-09"
+            assert page.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            stage="step-10"
+            assert page.evaluate("window.d1CrossSession.revocationStatus()")=="active"
+            stage="step-11"
+            page.evaluate("window.d1Hints.length=0")
+            # Real A->B admission emits an anonymous hint only after commit.
+            stage="step-12"
+            assert second.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+            stage="step-13"
+            page.wait_for_function("window.d1Hints.length>=1",polling=50,timeout=5000)
+            stage="step-14"
+            assert page.evaluate("window.d1Hints.every(x=>x==='fence-changed')")
+            stage="step-15"
+            assert page.evaluate(I5_WAIT_SUPERSEDED)
+            stage="step-16"
+            assert page.evaluate(I5_OLD_REFUSAL)
+            stage="step-17"
+            assert page.evaluate(I5_CROSS_FENCE)==900002
+            # Late/duplicate signal from old A cannot revoke or resurrect B.
+            stage="step-18"
+            page.evaluate(I5_HINT_SEND)
+            stage="step-19"
+            assert second.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            stage="step-20"
+            assert second.evaluate("window.d1CrossSession.revocationStatus()")=="active"
+            # Same-owner replacement with sender transport disabled: the
+            # receiver must retire without a new operation or delivered hint.
+            stage="step-21"
+            page.evaluate("""()=>{window.d1SavedPost=BroadcastChannel.prototype.postMessage;
+              BroadcastChannel.prototype.postMessage=function(){throw new Error('Injected hint loss');};}""")
+            admitted=False
+            try:
+                stage="step-22"
+                assert page.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+                admitted=True
+            finally:
+                # Return a serializable boolean, not an unbound native method.
+                # Preserve step-22 if the admission itself failed.
+                if admitted:
+                    stage="step-23"
+                assert page.evaluate("""()=>{
+                  const saved=window.d1SavedPost;
+                  if(typeof saved!=='function')return false;
+                  BroadcastChannel.prototype.postMessage=saved;
+                  return BroadcastChannel.prototype.postMessage===saved;
+                }""")
+            stage="step-24"
+            assert second.evaluate(I5_WAIT_SUPERSEDED)
+            stage="step-25"
+            assert second.evaluate(I5_OLD_REFUSAL)
+            stage="step-26"
+            assert page.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            stage="step-27"
+            assert second.evaluate("window.d1CrossSession.retire()") is False
+            # No BroadcastChannel at all in receiver: per-operation/fallback
+            # durable fencing still works after another admission.
+            stage="step-28"
+            assert page.evaluate("window.d1CrossSession.retire()") is True
+            stage="step-29"
+            second.evaluate("window.BroadcastChannel=undefined")
+            stage="step-30"
+            assert second.evaluate(I5_CROSS_OPEN,{"owner":900001,"secret":secrets[0]})==1
+            stage="step-31"
+            assert page.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secrets[1]})==1
+            stage="step-32"
+            assert second.evaluate(I5_WAIT_SUPERSEDED)
+            stage="step-33"
+            assert second.evaluate(I5_OLD_REFUSAL)
+            stage="step-34"
+            assert page.evaluate("window.d1CrossSession.inspect()")["revision"]==1
+            stage="step-35"
+            assert page.evaluate("window.d1CrossSession.retire()") is True
+            stage="step-36"
+            assert page.evaluate(I5_CROSS_FENCE) is None
+            stage="step-37"
+            page.evaluate("window.d1HintObserver.close()")
+            stage="step-38"
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {"anonymousCommitHint":True,"falseHintIgnored":True,
+                "idleSuperseded":True,"lateHintSafe":True,
+                "lostHintFallback":True,"noChannelFallback":True,
+                "sameOwnerFenced":True,"noResurrection":True}
+    except Exception:
+        raise RuntimeError("D1 cross-document hint qualification failed at "+stage) from None
+    finally:
+        secrets=None
+
+
+
+# First real clinical-store operation, isolated from application providers.
+I5_CLINICAL = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002;
+  const check=(v,m)=>{if(!v)throw new Error(m);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected refusal');return;
+  }throw new Error('Expected refusal');};
+  const open=async(owner,secret)=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  };
+  const unchanged=(before,after)=>{
+    for(const table of Object.keys(before.tables)){
+      if(table!=='patient_treatment_declarations_v1')
+        check(JSON.stringify(before.tables[table])===JSON.stringify(after.tables[table]),'Other table changed');
+    }
+  };
+  let s=await open(A,a);
+  const initial=await s.auditSnapshot();
+  check(initial.revision===1&&(await s.readTreatment()).declaration===null,'Unexpected initial declaration');
+  await reject(()=>s.writeTreatment(1,'declared',[]),'Invalid declaration');
+  s=await open(A,a);
+  await reject(()=>s.writeTreatment(2,'declared',['oral_meds']),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.writeTreatment(1,'declared',['oral_meds'],{beforeCommit:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const noWrite=await s.auditSnapshot();
+  check(noWrite.sha256===initial.sha256&&noWrite.revision===1,'Precommit retirement changed bytes');
+  const ack=await s.writeTreatment(1,'declared',['oral_meds','lifestyle']);
+  check(ack.revision===2&&ack.declaration.owner===A&&ack.declaration.generation===1&&
+    ack.declaration.syncStatus==='pending'&&ack.declaration.provenance==='patient_declared','Invalid first ACK');
+  const first=await s.auditSnapshot();
+  unchanged(initial,first);
+  check(first.tables.patient_treatment_declarations_v1.length===1,'Declaration missing');
+  await reject(()=>s.writeTreatment(2,'unsure',[],{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const recovered=await s.readTreatment();
+  check(recovered.revision===3&&recovered.declaration.generation===2&&
+    recovered.declaration.state==='unsure'&&recovered.declaration.codes.length===0,'Lost ACK recovery mismatch');
+  unchanged(initial,await s.auditSnapshot());
+  await window.d1BoundLogin(B);
+  await reject(()=>s.readTreatment(),'Bound authority retired');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,window.d1BoundEpoch(),bp,b);
+  check((await bs.readTreatment()).declaration===null,'Cross-owner declaration leak');
+  const bAck=await bs.writeTreatment(1,'none_declared',[]);
+  check(bAck.revision===2&&bAck.declaration.owner===B&&bAck.declaration.generation===1,'B ACK mismatch');
+  await bs.retire();
+  s=await open(A,a);
+  check(JSON.stringify(await s.readTreatment())===JSON.stringify(recovered),'A recovery changed');
+  await s.retire();
+  return {invalidRefused:true,staleRefused:true,precommitUnchanged:true,
+    durableAck:true,lostAckRecovered:true,otherTablesUnchanged:true,ownerIsolation:true};
+}"""
+I5_CLINICAL_RESTART = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const result=[];
+  for(const [owner,secret] of [[900001,a],[900002,b]]){
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    const s=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+    result.push(await s.readTreatment());
+    await s.retire();
+  }
+  return result.map(x=>({revision:x.revision,owner:x.declaration.owner,
+    generation:x.declaration.generation,state:x.declaration.state}));
+}"""
+
+
+
+# Inspect the accessible origin's durable state independently of the admission
+# wrapper. This is an API-visible inventory, not a disk/memory forensic audit.
+I5_CLINICAL_STORAGE = r"""async ({a,b})=>{
+  const {openArchive}=await import('/d1_archive_candidate.mjs');
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const encode=x=>new TextEncoder().encode(x);
+  const raw=x=>Uint8Array.from(x.match(/../g),y=>parseInt(y,16));
+  const hex=x=>Array.from(x,v=>v.toString(16).padStart(2,'0')).join('');
+  const contains=(hay,needle)=>hay.some((_,i)=>needle.every((v,j)=>hay[i+j]===v));
+  const names=(await indexedDB.databases()).map(x=>x.name).sort();
+  check(JSON.stringify(names)==='["iamina-d1-admission-probe-v1"]','Unexpected durable DB');
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open(names[0],1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{
+    check(JSON.stringify(Array.from(db.objectStoreNames))==='["state"]','Unexpected store');
+    const values=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),store=tx.objectStore('state');
+      const keys=store.getAllKeys(),f=store.get('fence'),x=store.get('owner:900001'),y=store.get('owner:900002');
+      tx.oncomplete=()=>resolve({keys:keys.result,f:f.result,x:x.result,y:y.result});
+      tx.onabort=()=>reject(new Error('Store read failed'));
+    });
+    check(JSON.stringify(values.keys.sort())==='["fence","owner:900001","owner:900002"]','Unexpected durable keys');
+    check(values.f&&Object.keys(values.f).sort().join(',')==='epoch,owner,token'&&
+      values.f.owner===null&&values.f.epoch===null&&/^[0-9a-f]{64}$/.test(values.f.token),'Unexpected retired fence');
+    const needles=[encode(a),encode(b),raw(a),raw(b),encode('SQLite format 3'),
+      encode('D1_I1_SYNTHETIC_NOT_PATIENT'),encode('patient_treatment_declarations_v1'),
+      encode('patient_declared'),encode('none_declared'),encode('oral_meds'),
+      encode('iamina.fixture_900001'),encode('iamina.fixture_900002')];
+    for(const [owner,rec,secret,wrongSecret,rev,expected] of [
+      [900001,values.x,a,b,3,'unsure'],[900002,values.y,b,a,2,'none_declared']]){
+      check(rec&&Object.keys(rec).sort().join(',')==='archive,envelope,revision'&&rec.revision===rev,'Unexpected record');
+      for(const bytes of [rec.archive,rec.envelope]){
+        check(bytes instanceof Uint8Array&&bytes.length>=53&&
+          [73,65,77,73,78,65,1,0].every((v,i)=>bytes[i]===v),'Unexpected archive format');
+        check(!needles.some(n=>contains(bytes,n)),'Durable plaintext or secret');
+      }
+      const scope='amina_vault_v1_native_'+owner;
+      const wrongScope='amina_vault_v1_native_'+(owner===900001?900002:900001);
+      for(const [s,p] of [[wrongSecret,scope],[secret,wrongScope]]){
+        let denied=false;
+        try{const invalid=await openArchive(rec.envelope,s,p);invalid.fill(0);}
+        catch(e){denied=String(e).includes('Archive authentication failed');}
+        check(denied,'Wrong scope or secret accepted');
+      }
+      const envelope=await openArchive(rec.envelope,secret,scope);
+      let payload,sqlite;
+      try{
+        const tag=encode('IAMINA-D1-KEY-V1');
+        check(envelope.length===tag.length+32&&tag.every((v,i)=>envelope[i]===v),'Envelope contents wrong');
+        const key=envelope.subarray(tag.length);
+        const keyHex=hex(key);
+        for(const stored of [values.x,values.y])
+          for(const bytes of [stored.archive,stored.envelope])
+            check(!contains(bytes,key)&&!contains(bytes,encode(keyHex)),'Durable clear data key');
+        payload=await openArchive(rec.archive,keyHex,scope);
+        check(payload.length>=104&&new DataView(payload.buffer,payload.byteOffset,4).getUint32(0)===rev,'Encrypted revision mismatch');
+        sqlite=payload.slice(4);
+        const tables=JSON.parse(await window.d1FullInspect(sqlite,owner));
+        const decl=tables.patient_treatment_declarations_v1;
+        check(decl.length===1&&decl[0].user_id===owner&&decl[0].declaration_state===expected&&
+          decl[0].local_generation===(owner===900001?2:1)&&decl[0].sync_status==='pending','Decrypted declaration mismatch');
+      }finally{envelope.fill(0);payload?.fill(0);sqlite?.fill(0);}
+    }
+    check(!localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length,'Unexpected browser storage');
+    const opfsChecked=typeof navigator.storage?.getDirectory==='function';
+    if(opfsChecked){
+      const root=await navigator.storage.getDirectory();
+      for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+    }
+    return {inventoryExact:true,archiveFormat:true,noKnownPlaintext:true,
+      wrongScopeSecretRefused:true,independentDecrypt:true,otherStoresEmpty:true,opfsChecked};
+  }finally{db.close();}
+}"""
+
+
+def exercise_clinical_store(browser_type,profile,locale,origin):
+    secrets=None
+    stage="bootstrap"
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="clinical-operations"
+            result=page.evaluate(I5_CLINICAL,{"a":secrets[0],"b":secrets[1]})
+            assert result=={"invalidRefused":True,"staleRefused":True,
+                "precommitUnchanged":True,"durableAck":True,"lostAckRecovered":True,
+                "otherTablesUnchanged":True,"ownerIsolation":True}
+            stage="storage-before-restart"
+            before_storage=page.evaluate(I5_CLINICAL_STORAGE,{"a":secrets[0],"b":secrets[1]})
+            assert all(before_storage[k] is True for k in ("inventoryExact","archiveFormat","noKnownPlaintext","wrongScopeSecretRefused","independentDecrypt","otherStoresEmpty"))
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        stage="restart"
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_CLINICAL_RESTART,{"a":secrets[0],"b":secrets[1]})
+            assert restored==[{"revision":3,"owner":900001,"generation":2,"state":"unsure"},
+                {"revision":2,"owner":900002,"generation":1,"state":"none_declared"}]
+            stage="storage-after-restart"
+            after_storage=page.evaluate(I5_CLINICAL_STORAGE,{"a":secrets[0],"b":secrets[1]})
+            assert after_storage==before_storage
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {**result,"restart":True,"storageBefore":before_storage,"storageAfter":after_storage}
+    except Exception:
+        raise RuntimeError("D1 clinical store qualification failed at "+stage) from None
+    finally:
+        secrets=None
+
+
+
+I5_GLUCOSE = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,t=1795564800;
+  const u='ab123456-1234-4abc-8def-000000000001',v='ab123456-1234-4abc-8def-000000000002';
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected refusal');return;
+  }throw new Error('Expected refusal');};
+  const open=async(owner,secret)=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  };
+  let s=await open(A,a);
+  const initial=await s.auditSnapshot();
+  check((await s.readGlucose(u)).measurement===null,'Unexpected reading');
+  await reject(()=>s.insertGlucose(1,u,123.25,'mmol/L',t),'Invalid measurement');
+  s=await open(A,a);
+  await reject(()=>s.insertGlucose(1,u,0,'mg/dL',t),'Invalid measurement');
+  s=await open(A,a);
+  await reject(()=>s.insertGlucose(2,u,123.25,'mg/dL',t),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.insertGlucose(1,u,123.25,'mg/dL',t,{beforeCommit:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const before=await s.auditSnapshot();
+  check(before.sha256===initial.sha256&&before.revision===1,'Precommit changed snapshot');
+  const ack=await s.insertGlucose(1,u,123.25,'mg/dL',t);
+  check(ack.revision===2&&!ack.replay&&ack.measurement.mgDl===123.25&&
+    ack.measurement.loggedAtSeconds===t&&ack.measurement.syncStatus==='pending','ACK mismatch');
+  const first=await s.auditSnapshot();
+  const replay=await s.insertGlucose(1,u,123.25,'mg/dL',t);
+  check(replay.revision===2&&replay.replay&&(await s.auditSnapshot()).sha256===first.sha256,'Replay changed snapshot');
+  await reject(()=>s.insertGlucose(2,u,124.25,'mg/dL',t),'Measurement UUID conflict');
+  s=await open(A,a);
+  await reject(()=>s.insertGlucose(2,u,123.25,'mg/dL',t+1),'Measurement UUID conflict');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===first.sha256,'UUID conflict changed snapshot');
+  await reject(()=>s.insertGlucose(2,v,137.5,'mg/dL',t+60,{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const recovered=await s.insertGlucose(2,v,137.5,'mg/dL',t+60);
+  check(recovered.revision===3&&recovered.replay,'Lost ACK not replayed');
+  const end=await s.auditSnapshot();
+  check(end.tables.log_entries.length===initial.tables.log_entries.length+2,'Wrong log count');
+  for(const k of Object.keys(initial.tables)){
+    if(k!=='log_entries')check(JSON.stringify(initial.tables[k])===JSON.stringify(end.tables[k]),'Other table changed');
+  }
+  check(initial.tables.log_entries.every(old=>end.tables.log_entries.some(row=>JSON.stringify(row)===JSON.stringify(old))),'Existing log changed');
+  await window.d1BoundLogin(B);
+  await reject(()=>s.readGlucose(u),'Bound authority retired');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,window.d1BoundEpoch(),bp,b);
+  check((await bs.readGlucose(u)).measurement===null,'Cross-owner reading leak');
+  const other=await bs.insertGlucose(1,u,211.75,'mg/dL',t);
+  check(other.revision===2&&other.measurement.mgDl===211.75,'B same UUID failure');
+  await bs.retire();
+  s=await open(A,a);
+  check((await s.readGlucose(u)).measurement.mgDl===123.25&&
+    (await s.auditSnapshot()).sha256===end.sha256,'A changed by B');
+  await s.retire();
+  return {explicitUnit:true,invalidRefused:true,staleRefused:true,precommitUnchanged:true,
+    durableAck:true,exactReplay:true,uuidConflict:true,lostAckRecovered:true,
+    otherTablesUnchanged:true,sameUuidOwnerIsolation:true};
+}"""
+I5_GLUCOSE_RESTART = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const u='ab123456-1234-4abc-8def-000000000001',v='ab123456-1234-4abc-8def-000000000002';
+  const result=[];
+  for(const [owner,secret] of [[900001,a],[900002,b]]){
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    const s=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+    const x=await s.readGlucose(u),y=await s.readGlucose(v);
+    result.push({revision:x.revision,value:x.measurement.mgDl,second:y.measurement?.mgDl??null});
+    await s.retire();
+  }
+  const check=(ok)=>{if(!ok)throw new Error('Unexpected durable storage');};
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{
+    const records=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),st=tx.objectStore('state');
+      const x=st.get('owner:900001'),y=st.get('owner:900002'),keys=st.getAllKeys();
+      tx.oncomplete=()=>resolve({x:x.result,y:y.result,keys:keys.result});tx.onabort=reject;
+    });
+    const enc=x=>new TextEncoder().encode(x);
+    const raw=x=>Uint8Array.from(x.match(/../g),y=>parseInt(y,16));
+    const needles=[enc(u),enc(v),enc('D1_I5C_SYNTHETIC_GLUCOSE'),enc('SQLite format 3'),enc(a),enc(b),raw(a),raw(b)];
+    check(JSON.stringify(records.keys.sort())==='["fence","owner:900001","owner:900002"]');
+    for(const rec of [records.x,records.y]){
+      check(Object.keys(rec).sort().join(',')==='archive,envelope,revision');
+      for(const bytes of [rec.archive,rec.envelope])
+        check(bytes instanceof Uint8Array&&!needles.some(n=>bytes.some((_,i)=>n.every((x,j)=>bytes[i+j]===x))));
+    }
+    check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]');
+    check(!localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length);
+    if(navigator.storage?.getDirectory){
+      const root=await navigator.storage.getDirectory();
+      for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+    }
+  }finally{db.close();}
+  return result;
+}"""
+
+
+def exercise_glucose_store(browser_type,profile,locale,origin):
+    secrets=None
+    stage="bootstrap"
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="glucose-operations"
+            result=page.evaluate(I5_GLUCOSE,{"a":secrets[0],"b":secrets[1]})
+            assert result=={"explicitUnit":True,"invalidRefused":True,"staleRefused":True,
+                "precommitUnchanged":True,"durableAck":True,"exactReplay":True,
+                "uuidConflict":True,"lostAckRecovered":True,"otherTablesUnchanged":True,
+                "sameUuidOwnerIsolation":True}
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        stage="restart-storage"
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_GLUCOSE_RESTART,{"a":secrets[0],"b":secrets[1]})
+            assert restored==[{"revision":3,"value":123.25,"second":137.5},
+                {"revision":2,"value":211.75,"second":None}]
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {**result,"restart":True,"noKnownPlaintext":True}
+    except Exception:
+        raise RuntimeError("D1 glucose qualification failed at "+stage) from None
+    finally:
+        secrets=None
+
+
+I5_JOURNAL = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,t=1795564800;
+  const u='ac123456-1234-4abc-8def-000000000001',v='ac123456-1234-4abc-8def-000000000002';
+  const w='ac123456-1234-4abc-8def-000000000003',z='ac123456-1234-4abc-8def-000000000004';
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected refusal');return;
+  }throw new Error('Expected refusal');};
+  const open=async(owner,secret)=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  };
+  let s=await open(A,a);
+  const empty=await s.readJournal(1,t-1,t+100,2,0);
+  check(empty.rows.length===0&&empty.nextOffset===null,'Legacy row disclosed');
+  await s.insertGlucose(1,v,120.25,'mg/dL',t+30);
+  await s.insertGlucose(2,u,121.25,'mg/dL',t+30);
+  await s.insertGlucose(3,w,122.25,'mg/dL',t);
+  await s.insertGlucose(4,z,123.25,'mg/dL',t+100);
+  const before=await s.auditSnapshot();
+  const first=await s.readJournal(5,t,t+100,2,0);
+  const second=await s.readJournal(5,t,t+100,2,first.nextOffset);
+  check(first.revision===5&&first.nextOffset===2&&first.rows.map(x=>x.uuid).join(',')===[u,v].join(',')&&
+    first.rows[0].mgDl===121.25&&second.rows.length===1&&second.rows[0].uuid===w&&second.nextOffset===null,
+    'Pagination, tie or bounds mismatch');
+  const narrow=await s.readJournal(5,t+30,t+31,50,0);
+  check(narrow.rows.length===2&&narrow.rows.every(x=>x.loggedAtSeconds===t+30),'Range mismatch');
+  check((await s.readJournal(5,t,t+100,2,3)).rows.length===0,'Past end mismatch');
+  check((await s.auditSnapshot()).sha256===before.sha256,'Read mutated snapshot');
+  await reject(()=>s.readJournal(5,t,t+100,51,0),'Invalid journal range');
+  s=await open(A,a);
+  await reject(()=>s.readJournal(5,t,t,2,0),'Invalid journal range');
+  s=await open(A,a);
+  await reject(()=>s.readJournal(5,t,t+100,2,-1),'Invalid journal range');
+  s=await open(A,a);
+  await reject(()=>s.readJournal(4,t,t+100,2,0),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.readJournal(5,t,t+100,2,0,{beforeReturn:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===before.sha256,'Lock changed snapshot');
+  // A successful new insert within the same session changes the revision.
+  // The old page must be withheld, even if the owner and fence still match.
+  const q='ac123456-1234-4abc-8def-000000000005';
+  await reject(()=>s.readJournal(5,t,t+100,2,0,{
+    beforeReturn:()=>s.insertGlucose(5,q,125.25,'mg/dL',t+60)}),'Checkpoint conflict');
+  s=await open(A,a);
+  const after=await s.readJournal(6,t,t+100,50,0);
+  check(after.rows.map(x=>x.uuid).join(',')===[q,u,v,w].join(','),'Concurrent update missing');
+  const aSnapshot=await s.auditSnapshot();
+  await window.d1BoundLogin(B);
+  await reject(()=>s.readJournal(6,t,t+100,2,0),'Bound authority retired');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,window.d1BoundEpoch(),bp,b);
+  check((await bs.readJournal(1,t,t+100,50,0)).rows.length===0,'A rows visible in B');
+  await bs.insertGlucose(1,u,211.25,'mg/dL',t+30);
+  const bpage=await bs.readJournal(2,t,t+100,50,0);
+  check(bpage.rows.length===1&&bpage.rows[0].uuid===u&&bpage.rows[0].mgDl===211.25,'B page mismatch');
+  await bs.retire();
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===aSnapshot.sha256,'B changed A');
+  check(JSON.stringify(await s.readJournal(6,t,t+100,50,0))===JSON.stringify(after),'A page mismatch');
+  await s.retire();
+  return {legacyExcluded:true,stablePagination:true,rangeBoundaries:true,invalidRefused:true,
+    staleRefused:true,readOnly:true,lockDuringRead:true,concurrentRevisionRefused:true,ownerIsolation:true};
+}"""
+I5_JOURNAL_RESTART = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const results=[];
+  for(const [owner,secret,revision] of [[900001,a,6],[900002,b,2]]){
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    const s=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+    const page=await s.readJournal(revision,1795564800,1795564900,50,0);
+    results.push({revision:page.revision,values:page.rows.map(x=>x.mgDl),next:page.nextOffset});
+    await s.retire();
+  }
+  return results;
+}"""
+
+
+def exercise_journal(browser_type,profile,locale,origin):
+    secrets=None
+    stage="bootstrap"
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="journal-operations"
+            result=page.evaluate(I5_JOURNAL,{"a":secrets[0],"b":secrets[1]})
+            assert result=={"legacyExcluded":True,"stablePagination":True,"rangeBoundaries":True,
+                "invalidRefused":True,"staleRefused":True,"readOnly":True,"lockDuringRead":True,
+                "concurrentRevisionRefused":True,"ownerIsolation":True}
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        stage="restart"
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_JOURNAL_RESTART,{"a":secrets[0],"b":secrets[1]})
+            assert restored==[{"revision":6,"values":[125.25,121.25,120.25,122.25],"next":None},
+                {"revision":2,"values":[211.25],"next":None}]
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {**result,"restart":True}
+    except Exception:
+        raise RuntimeError("D1 journal qualification failed at "+stage) from None
+    finally:
+        secrets=None
+
+
+I5_JOURNAL_CHANGE = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,t=1795564800;
+  const u='ad123456-1234-4abc-8def-000000000001',v='ad123456-1234-4abc-8def-000000000002';
+  const check=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason),'Unexpected refusal');return;
+  }throw new Error('Expected refusal');};
+  const open=async(owner,secret)=>{
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    return api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+  };
+  let s=await open(A,a);
+  await s.insertGlucose(1,u,120.25,'mg/dL',t);
+  await s.insertGlucose(2,v,130.25,'mg/dL',t+60);
+  const initial=await s.auditSnapshot();
+  await reject(()=>s.editGlucose(3,u,0,'mg/dL',t),'Invalid measurement change');
+  s=await open(A,a);
+  await reject(()=>s.editGlucose(2,u,121.25,'mg/dL',t),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.editGlucose(3,u,121.25,'mg/dL',t,{beforeCommit:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===initial.sha256,'Edit precommit changed data');
+  const ack=await s.editGlucose(3,u,121.25,'mg/dL',t+10);
+  check(ack.revision===4&&!ack.replay&&!ack.deleted&&ack.measurement.mgDl===121.25&&
+    ack.measurement.loggedAtSeconds===t+10,'Edit ACK mismatch');
+  const edited=await s.auditSnapshot();
+  const originalRow=initial.tables.log_entries.find(x=>x.client_uuid===u);
+  const editedRow=edited.tables.log_entries.find(x=>x.client_uuid===u);
+  check(originalRow&&editedRow&&Object.keys(originalRow).every(k=>
+    ['blood_sugar','logged_at'].includes(k)||originalRow[k]===editedRow[k]),'Edit changed unrelated field');
+  const noOp=await s.editGlucose(4,u,121.25,'mg/dL',t+10);
+  check(noOp.revision===4&&noOp.replay&&(await s.auditSnapshot()).sha256===edited.sha256,'Edit no-op mutated data');
+  await reject(()=>s.editGlucose(4,u,122.25,'mg/dL',t+20,{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const recovered=await s.readGlucose(u);
+  check(recovered.revision===5&&recovered.measurement.mgDl===122.25,'Edit recovery mismatch');
+  await reject(()=>s.editGlucose(4,u,122.25,'mg/dL',t+20),'Checkpoint conflict');
+  s=await open(A,a);
+  const beforeDelete=await s.auditSnapshot();
+  await reject(()=>s.deleteGlucose(4,u),'Checkpoint conflict');
+  s=await open(A,a);
+  await reject(()=>s.deleteGlucose(5,u,{beforeCommit:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===beforeDelete.sha256,'Delete precommit changed data');
+  await reject(()=>s.deleteGlucose(5,u,{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
+  s=await open(A,a);
+  const del=await s.deleteGlucose(5,u);
+  check(del.revision===6&&del.replay&&del.deleted&&del.measurement===null,'Delete recovery mismatch');
+  const deleted=await s.auditSnapshot();
+  await reject(()=>s.deleteGlucose(7,u),'Checkpoint conflict');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===deleted.sha256,'Future revision changed bytes');
+  check(deleted.tables.d1_fixture_deleted_glucose.length===1&&
+    deleted.tables.d1_fixture_deleted_glucose[0].uuid===u,'Missing tombstone');
+  check((await s.readGlucose(u)).measurement===null,'Deleted measurement visible');
+  const page=await s.readJournal(6,t,t+100,50,0);
+  check(page.rows.length===1&&page.rows[0].uuid===v&&page.rows[0].mgDl===130.25,'Journal deletion mismatch');
+  await reject(()=>s.insertGlucose(6,u,120.25,'mg/dL',t),'Measurement UUID deleted');
+  s=await open(A,a);
+  await reject(()=>s.editGlucose(6,u,125.25,'mg/dL',t),'Measurement unavailable');
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===deleted.sha256,'Rejected mutation changed data');
+  // Ordinary acknowledged deletion is also exercised on a second row.
+  const normal=await s.deleteGlucose(6,v);
+  check(normal.revision===7&&normal.deleted&&!normal.replay,'Delete ACK mismatch');
+  const end=await s.auditSnapshot();
+  check(end.tables.d1_fixture_deleted_glucose.length===2&&end.tables.log_entries.length===initial.tables.log_entries.length-2,
+    'Unexpected deletion count');
+  for(const k of Object.keys(initial.tables)){
+    if(k!=='log_entries')check(JSON.stringify(initial.tables[k])===JSON.stringify(end.tables[k]),'Other table changed');
+  }
+  check(initial.tables.log_entries.filter(x=>x.client_uuid!==u&&x.client_uuid!==v).every(old=>
+    end.tables.log_entries.some(row=>JSON.stringify(row)===JSON.stringify(old))),'Unrelated log changed');
+  await window.d1BoundLogin(B);
+  await reject(()=>s.deleteGlucose(7,u),'Bound authority retired');
+  const bp=await window.d1BoundProof(B);
+  const bs=await api.admitBound(B,window.d1BoundEpoch(),bp,b);
+  await reject(()=>bs.deleteGlucose(1,u),'Measurement unavailable');
+  const b2=await open(B,b);
+  const added=await b2.insertGlucose(1,u,211.25,'mg/dL',t);
+  check(added.revision===2&&added.measurement.mgDl===211.25,'B UUID blocked by A tombstone');
+  await b2.retire();
+  s=await open(A,a);
+  check((await s.auditSnapshot()).sha256===end.sha256,'B changed A');
+  await s.retire();
+  return {invalidRefused:true,staleRefused:true,editPrecommitUnchanged:true,editAck:true,
+    editNoOp:true,editLostAck:true,deletePrecommitUnchanged:true,deleteLostAck:true,
+    deleteAck:true,noResurrection:true,otherTablesUnchanged:true,ownerIsolation:true,
+    futureRevisionRefused:true,editFieldsPreserved:true};
+}"""
+I5_JOURNAL_CHANGE_RESTART = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs'),t=1795564800;
+  const u='ad123456-1234-4abc-8def-000000000001',v='ad123456-1234-4abc-8def-000000000002';
+  const result=[];
+  for(const [owner,secret,revision] of [[900001,a,7],[900002,b,2]]){
+    await window.d1BoundLogin(owner);
+    const p=await window.d1BoundProof(owner);
+    const s=await api.admitBound(owner,window.d1BoundEpoch(),p,secret);
+    const page=await s.readJournal(revision,t,t+100,50,0);
+    const audit=await s.auditSnapshot();
+    if(owner===900001){
+      const repeat=await s.deleteGlucose(5,u);
+      if(!repeat.replay||!repeat.deleted||repeat.revision!==7)throw new Error('Deletion replay mismatch');
+      let rejected=false;
+      try{await s.insertGlucose(7,u,120.25,'mg/dL',t);}catch(e){rejected=String(e).includes('Measurement UUID deleted');}
+      if(!rejected)throw new Error('Restart resurrection');
+    }
+    result.push({revision:page.revision,values:page.rows.map(x=>x.mgDl),
+      tombstones:audit.tables.d1_fixture_deleted_glucose?.length??0});
+    await s.retire();
+  }
+  const db=await new Promise((resolve,reject)=>{
+    const req=indexedDB.open('iamina-d1-admission-probe-v1',1);
+    req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(new Error('Store unavailable'));
+  });
+  try{
+    const records=await new Promise((resolve,reject)=>{
+      const tx=db.transaction('state','readonly'),st=tx.objectStore('state');
+      const x=st.get('owner:900001'),y=st.get('owner:900002'),keys=st.getAllKeys();
+      tx.oncomplete=()=>resolve({x:x.result,y:y.result,keys:keys.result});tx.onabort=reject;
+    });
+    const check=ok=>{if(!ok)throw new Error('Unexpected durable storage');};
+    const enc=x=>new TextEncoder().encode(x);
+    const raw=x=>Uint8Array.from(x.match(/../g),y=>parseInt(y,16));
+    const needles=[enc(u),enc(v),enc('d1_fixture_deleted_glucose'),enc('SQLite format 3'),enc(a),enc(b),raw(a),raw(b)];
+    check(JSON.stringify(records.keys.sort())==='["fence","owner:900001","owner:900002"]');
+    for(const rec of [records.x,records.y]){
+      check(Object.keys(rec).sort().join(',')==='archive,envelope,revision');
+      for(const bytes of [rec.archive,rec.envelope])
+        check(bytes instanceof Uint8Array&&!needles.some(n=>bytes.some((_,i)=>n.every((x,j)=>bytes[i+j]===x))));
+    }
+    check(JSON.stringify((await indexedDB.databases()).map(x=>x.name).sort())==='["iamina-d1-admission-probe-v1"]');
+    check(!localStorage.length&&!sessionStorage.length&&!(await caches.keys()).length);
+    if(navigator.storage?.getDirectory){
+      const root=await navigator.storage.getDirectory();
+      for await(const _ of root.values())throw new Error('Unexpected OPFS file');
+    }
+  }finally{db.close();}
+  return result;
+}"""
+
+
+def exercise_journal_change(browser_type,profile,locale,origin):
+    secrets=None
+    stage="bootstrap"
+    try:
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            secrets=page.evaluate(I5_CROSS_BOOT)
+            stage="journal-change"
+            result=page.evaluate(I5_JOURNAL_CHANGE,{"a":secrets[0],"b":secrets[1]})
+            assert result=={"invalidRefused":True,"staleRefused":True,"editPrecommitUnchanged":True,
+                "editAck":True,"editNoOp":True,"editLostAck":True,"deletePrecommitUnchanged":True,
+                "deleteLostAck":True,"deleteAck":True,"noResurrection":True,
+                "otherTablesUnchanged":True,"ownerIsolation":True,
+                "futureRevisionRefused":True,"editFieldsPreserved":True}
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        stage="restart-storage"
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+        try:
+            restored=page.evaluate(I5_JOURNAL_CHANGE_RESTART,{"a":secrets[0],"b":secrets[1]})
+            assert restored==[{"revision":7,"values":[],"tombstones":2},
+                {"revision":2,"values":[211.25],"tombstones":0}]
+            assert not blocked and not errors
+        finally:
+            ctx.close()
+        return {**result,"restart":True,"noKnownPlaintext":True}
+    except Exception:
+        raise RuntimeError("D1 journal change qualification failed at "+stage) from None
+    finally:
+        secrets=None
+
+
+def run():
+    assert ENGINE in ("chromium", "webkit")
+    assert (WEB / "main.dart.js").stat().st_size > 1000
+    results = []
+    with tempfile.TemporaryDirectory(prefix="d1-runtime-") as root:
+        with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, \
+             http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as legacy_server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            threading.Thread(target=legacy_server.serve_forever, daemon=True).start()
+            origin = f"http://127.0.0.1:{server.server_port}"
+            legacy_origin = f"http://127.0.0.1:{legacy_server.server_port}"
+            try:
+                with sync_playwright() as pw:
+                    browser_type = getattr(pw, ENGINE)
+                    for locale in ("fr-FR", "ar-MA"):
+                        record = dict(source_sha=os.environ["EXPECTED_SHA"], engine=ENGINE, locale=locale,
+                                      sqlite3_wasm_sha256=hashlib.sha256((WEB/"sqlite3.wasm").read_bytes()).hexdigest(),
+                                      build_sha256=hashlib.sha256((WEB/"main.dart.js").read_bytes()).hexdigest())
+                        profile = Path(root)/locale
+                        try:
+                            ctx, page, blocked, errors = open_context(browser_type, profile, locale, origin)
+                            try:
+                                record["first"] = page.evaluate(FIRST)
+                                assert not blocked and not errors, (blocked,errors)
+                                # Real page reload, no application teardown checkpoint.
+                                page.reload(wait_until="domcontentloaded")
+                                page.wait_for_function("typeof window.d1Inspect === 'function'", timeout=60000)
+                                record["reload"] = page.evaluate(RESTORE)
+                                assert not blocked and not errors, (blocked,errors)
+                            finally:
+                                ctx.close()
+                            ctx, page, blocked, errors = open_context(browser_type, profile, locale, origin)
+                            try:
+                                record["restart"] = page.evaluate(RESTORE)
+                                assert not blocked and not errors, (blocked,errors)
+                                record["i2"] = exercise_i2(ctx,page,origin,errors)
+                                assert not blocked and not errors, (blocked,errors)
+                            finally:
+                                ctx.close()
+                            ctx,page,blocked,errors = open_context(browser_type,profile,locale,origin)
+                            try:
+                                record["i2_restart"] = inspect_i2(page,6,record["i2"]["operations"])
+                                assert not blocked and not errors, (blocked,errors)
+                            finally:
+                                ctx.close()
+                            i3_profile = Path(root)/(locale+"-admission")
+                            ctx,page,blocked,errors = open_context(browser_type,i3_profile,locale,origin)
+                            try:
+                                record["i3"] = exercise_i3(ctx,page,origin,errors)
+                                assert not blocked and not errors, (blocked,errors)
+                            finally:
+                                ctx.close()
+                            ctx,page,blocked,errors = open_context(browser_type,i3_profile,locale,origin)
+                            try:
+                                record["i3_restart"] = restore_i3(page)
+                                assert not blocked and not errors, (blocked,errors)
+                            finally:
+                                ctx.close()
+                            i4_profile=Path(root)/(locale+"-migration")
+                            ctx,page,blocked,errors=open_context(browser_type,i4_profile,locale,origin,legacy_origin)
+                            try:
+                                record["i4"]=exercise_i4(ctx,page,legacy_origin,errors)
+                                assert not blocked and not errors,(blocked,errors)
+                            finally:
+                                ctx.close()
+                            ctx,page,blocked,errors=open_context(browser_type,i4_profile,locale,origin,legacy_origin)
+                            try:
+                                record["i4_restart"]=restore_i4(ctx,page,legacy_origin,errors,record["i4"])
+                                assert not blocked and not errors,(blocked,errors)
+                            finally:
+                                ctx.close()
+                            record["i5_possession"]=exercise_possession(browser_type,Path(root)/(locale+"-possession"),locale,origin)
+                            record["i5_bound"]=exercise_bound(browser_type,Path(root)/(locale+"-bound"),locale,origin)
+                            record["i5_cross_revocation"]=exercise_cross_revocation(browser_type,Path(root)/(locale+"-cross-revoke"),locale,origin)
+                            record["i5_revocation_failure"]=exercise_revocation_failure(browser_type,Path(root)/(locale+"-revoke-fault"),locale,origin)
+                            record["i5_cross_hints"]=exercise_cross_hints(browser_type,Path(root)/(locale+"-cross-hints"),locale,origin)
+                            record["i5_clinical_store"]=exercise_clinical_store(browser_type,Path(root)/(locale+"-clinical-store"),locale,origin)
+                            record["i5_glucose_store"]=exercise_glucose_store(browser_type,Path(root)/(locale+"-glucose-store"),locale,origin)
+                            record["i5_journal"]=exercise_journal(browser_type,Path(root)/(locale+"-journal"),locale,origin)
+                            record["i5_journal_change"]=exercise_journal_change(browser_type,Path(root)/(locale+"-journal-change"),locale,origin)
+                            record["result"] = "PASS"
+                        except Exception as error:
+                            record.update(result="FAIL", error=str(error)[:1500])
+                        results.append(record)
+                        print("D1_RUNTIME " + json.dumps(record,ensure_ascii=False),flush=True)
+            finally:
+                server.shutdown()
+                legacy_server.shutdown()
+    assert len(results)==2 and all(x["result"]=="PASS" for x in results), "D1 actual Drift encrypted checkpoint failed"
+    print("D1_RUNTIME_PASS 2/2",flush=True)
+    print("D1_I2_DURABLE_MUTATION_PASS 2/2",flush=True)
+    print("D1_I3_ADMISSION_FENCE_PASS 2/2",flush=True)
+    print("D1_I4_COPY_MIGRATION_PASS 2/2",flush=True)
+    print("D1_I5_POSSESSION_PASS 2/2",flush=True)
+    print("D1_I5_BOUND_ADMISSION_PASS 2/2",flush=True)
+    print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
+    print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
+    print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)
+    print("D1_I5_CLINICAL_STORE_PASS 2/2",flush=True)
+    print("D1_I5_CLINICAL_STORAGE_PASS 2/2",flush=True)
+    print("D1_I5_GLUCOSE_STORE_PASS 2/2",flush=True)
+    print("D1_I5_JOURNAL_PASS 2/2",flush=True)
+    print("D1_I5_JOURNAL_CHANGE_PASS 2/2",flush=True)
+
+
+if __name__=="__main__":
+    run()
