@@ -1292,7 +1292,11 @@ jobs:
           esac
           echo "SOURCE_SHA=$EXPECTED_SHA"
       - name: D1 candidate archive cryptographic regression
-        run: node --test frontend/tool/d1_archive_candidate.test.mjs
+        run: |
+          node --test frontend/tool/d1_archive_candidate.test.mjs
+          if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then
+            node --test frontend/tool/d1_checkpoint_crypto.test.mjs
+          fi
       - name: D1 real browser encrypted archive restart and SQLite integrity
         timeout-minutes: 18
         run: |
@@ -1407,7 +1411,7 @@ jobs:
           set -euo pipefail
           cd frontend
           flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
-          cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs "$RUNNER_TEMP/d1-runtime-web/"
+          cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs "$RUNNER_TEMP/d1-runtime-web/"
           cd ..
           D1_RUNTIME_ENGINE=chromium D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain D2 candidate screenshots and exact SHA matrix
@@ -1597,7 +1601,7 @@ jobs:
           set -euo pipefail
           cd frontend
           flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
-          cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs "$RUNNER_TEMP/d1-runtime-web/"
+          cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs "$RUNNER_TEMP/d1-runtime-web/"
           cd ..
           D1_RUNTIME_ENGINE=webkit D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain macOS D2 evidence

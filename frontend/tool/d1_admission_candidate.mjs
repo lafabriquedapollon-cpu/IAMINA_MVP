@@ -1,11 +1,11 @@
 // D1-I3: isolated synthetic proof of key custody and durable admission fencing.
 // This is NOT a production auth authority or a migration of any patient vault.
-import {sealArchive, openArchive} from './d1_archive_candidate.mjs';
+import {openArchive} from './d1_archive_candidate.mjs';
+import {validRecord, sameRecord, wrapKey as wrapCheckpointKey, unwrapKey as unwrapCheckpointKey, encrypt as encryptCheckpoint, decrypt as decryptCheckpoint} from './d1_checkpoint_crypto.mjs';
 import {requirePossessionSecret} from './d1_possession_candidate.mjs';
 
 const DB='iamina-d1-admission-probe-v1', STORE='state';
 const owners=new Set([900001,900002]);
-const tag=new TextEncoder().encode('IAMINA-D1-KEY-V1');
 const proofs=new WeakMap();
 const scope=owner=>'amina_vault_v1_native_'+owner;
 const hex=bytes=>Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
@@ -70,13 +70,6 @@ async function transaction(owner,write,fn) {
     });
   }finally{db.close();}
 }
-function validRecord(r) {
-  require(r&&Number.isSafeInteger(r.revision)&&r.revision>=1&&r.revision<=0xffffffff&&
-    r.envelope instanceof Uint8Array&&r.archive instanceof Uint8Array,'Vault unavailable');
-}
-function sameRecord(a,b) {
-  return a&&b&&a.revision===b.revision&&equal(a.envelope,b.envelope)&&equal(a.archive,b.archive);
-}
 function fenceMatches(f,lease) {
   return f&&f.owner===lease.owner&&f.token===lease.token&&f.epoch===lease.epoch;
 }
@@ -88,35 +81,10 @@ function validFence(f) {
 function sameFence(a,b) {
   return a===null&&b===null || !!(a&&b&&a.owner===b.owner&&a.token===b.token&&a.epoch===b.epoch);
 }
-async function wrapKey(seed,phrase,owner) {
-  const payload=new Uint8Array(tag.length+seed.length);
-  payload.set(tag);payload.set(seed,tag.length);
-  try{return await sealArchive(payload,phrase,scope(owner));}
-  finally{payload.fill(0);}
-}
-async function unwrapKey(envelope,phrase,owner) {
-  const payload=await openArchive(envelope,phrase,scope(owner));
-  try{
-    require(payload.length===tag.length+32&&tag.every((x,i)=>x===payload[i]),'Key envelope rejected');
-    return hex(payload.subarray(tag.length));
-  }finally{payload.fill(0);}
-}
-async function encrypt(bytes,key,owner,revision) {
-  require(bytes instanceof Uint8Array&&bytes.length>=100&&bytes.length<=32*1024*1024-4,'Invalid snapshot');
-  const payload=new Uint8Array(bytes.length+4);
-  new DataView(payload.buffer).setUint32(0,revision);payload.set(bytes,4);
-  try{return await sealArchive(payload,key,scope(owner));}
-  finally{payload.fill(0);}
-}
-async function decrypt(record,key,owner) {
-  validRecord(record);
-  const payload=await openArchive(record.archive,key,scope(owner));
-  try{
-    require(payload.length>=104&&new DataView(payload.buffer,payload.byteOffset,4).getUint32(0)===record.revision,
-      'Checkpoint revision rejected');
-    return payload.slice(4);
-  }finally{payload.fill(0);}
-}
+const wrapKey=(seed,phrase,owner)=>wrapCheckpointKey(seed,phrase,scope(owner));
+const unwrapKey=(envelope,phrase,owner)=>unwrapCheckpointKey(envelope,phrase,scope(owner));
+const encrypt=(bytes,key,owner,revision)=>encryptCheckpoint(bytes,key,scope(owner),revision);
+const decrypt=(record,key,owner)=>decryptCheckpoint(record,key,scope(owner));
 async function inspect(bytes,owner) {
   return JSON.parse(await window.d1Inspect(bytes,owner));
 }
