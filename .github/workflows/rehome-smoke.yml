@@ -16,6 +16,11 @@ on:
 permissions:
   contents: read
 
+# Never let a superseded commit in one PR occupy another PR's slot.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   snapshot-source-checks:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main' }}
@@ -1207,7 +1212,7 @@ jobs:
   # Fail-closed scope selection. Only draft, cumulative non-product changes
   # may defer macOS; ready-for-review or explicit full qualification reruns it.
   phase1-web-scope:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/d2-guest' || github.head_ref == 'phase1/integration-web') }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -1235,7 +1240,7 @@ jobs:
 
   # Phase 1 Web candidate gates. Full qualification uses one exact SHA.
   phase1-d1-linux:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/integration-web') }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -1287,34 +1292,102 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           case "$PHASE_BRANCH" in
-            phase1/d1-backup|phase1/integration-web) ;;
+            phase1/d1-backup|phase1/integration-web|phase1/ci-opt1-benchmark) ;;
             *) exit 1 ;;
           esac
           echo "SOURCE_SHA=$EXPECTED_SHA"
       - name: D1 candidate archive cryptographic regression
         run: |
           node --test frontend/tool/d1_archive_candidate.test.mjs
-          if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
             node --test frontend/tool/d1_checkpoint_crypto.test.mjs
           fi
       - name: D1 real browser encrypted archive restart and SQLite integrity
         timeout-minutes: 18
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/d1-browser-venv"
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" -m pip install playwright==1.55.0
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_opfs_capability_probe.py
-          archive_status=0
-          portable_status=0
-          D1_LINUX_CAPABILITY_GATE=1 "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_archive_browser_probe.py || archive_status=$?
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_portable_browser_probe.py || portable_status=$?
-          echo "D1_TRANSPORT_STATUS opfs_idb=$archive_status portable=$portable_status"
-          test "$archive_status" -eq 0 && test "$portable_status" -eq 0
+          # Official Playwright image: browser binaries + OS dependencies,
+          # pinned to the 1.55.0 registry manifest, never apt on the runner.
+          image='mcr.microsoft.com/playwright/python@sha256:640d578aae63cfb632461d1b0aecb01414e4e020864ac3dd45a868dc0eff3078'
+          timeout 300s docker pull --platform linux/amd64 "$image"
+          docker image inspect "$image" --format '{{.Os}}/{{.Architecture}} {{json .RepoDigests}}'
+          timeout 600s docker run --rm --init --ipc=host --platform linux/amd64 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --workdir /work --env EXPECTED_SHA --env PYTHONDONTWRITEBYTECODE=1 \
+            --entrypoint /bin/bash "$image" -c '
+              set -euo pipefail
+              python -m pip install --disable-pip-version-check --timeout 30 --retries 2 playwright==1.55.0
+              python -c "import importlib.metadata as m; assert m.version(\"playwright\") == \"1.55.0\""
+              python frontend/tool/d1_opfs_capability_probe.py
+              archive_status=0
+              portable_status=0
+              D1_LINUX_CAPABILITY_GATE=1 python frontend/tool/d1_archive_browser_probe.py || archive_status=$?
+              python frontend/tool/d1_portable_browser_probe.py || portable_status=$?
+              echo "D1_TRANSPORT_STATUS opfs_idb=$archive_status portable=$portable_status"
+              test "$archive_status" -eq 0 && test "$portable_status" -eq 0
+            '
 
+
+  # One build per target, on Linux. Both browser engines verify the same bytes.
+  phase1-web-build:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+    outputs:
+      bundle_sha: ${{ steps.pack.outputs.bundle_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Attest exact source and pinned Flutter SDK
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = cc0734ac716fbb8b90f3f9db8020958b1553afa7
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Restore exact Pub dependency cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.pub-cache/hosted/pub.dev
+          key: iamina-pub-v1-${{ runner.os }}-${{ runner.arch }}-cc0734ac716fbb8b90f3f9db8020958b1553afa7-${{ hashFiles('frontend/pubspec.lock') }}
+      - name: Test artifact verification and refusal paths
+        run: python3 -m unittest discover -s scripts/tests -p test_ci_web_build_artifact.py -v
+      - name: Build each synthetic Web target once
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
+            flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D1_CUTOVER_CANDIDATE=true --dart-define=IAMINA_D2_GUEST_CANDIDATE=false --dart-define=IAMINA_REMOTE_ACCOUNT_SIGN_IN=true --dart-define=IAMINA_REMOTE_ACCOUNT_ENROLLMENT=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
+          else
+            flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D2_GUEST_CANDIDATE=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
+          fi
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
+            flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
+            cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs tool/d1_admission_store.mjs "$RUNNER_TEMP/d1-runtime-web/"
+          fi
+      - name: Package exact source and synthetic build digest
+        id: pack
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_web_build_artifact.py pack "$RUNNER_TEMP/bundle.tar.gz" "$EXPECTED_SHA" "$GITHUB_HEAD_REF" "$RUNNER_TEMP/d1-runtime-web"
+      - name: Retain same-run synthetic Web build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-web-build-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/bundle.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
   phase1-d2-linux:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || github.head_ref == 'phase1/integration-web') }}
+    needs: phase1-web-build
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -1366,7 +1439,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           case "$PHASE_BRANCH" in
-            phase1/d2-guest|phase1/integration-web) ;;
+            phase1/d2-guest|phase1/integration-web|phase1/ci-opt1-benchmark) ;;
             *) exit 1 ;;
           esac
           echo "SOURCE_SHA=$EXPECTED_SHA"
@@ -1376,6 +1449,11 @@ jobs:
           git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
           test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "cc0734ac716fbb8b90f3f9db8020958b1553afa7"
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Restore exact Pub dependency cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.pub-cache/hosted/pub.dev
+          key: iamina-pub-v1-${{ runner.os }}-${{ runner.arch }}-cc0734ac716fbb8b90f3f9db8020958b1553afa7-${{ hashFiles('frontend/pubspec.lock') }}
       - name: D2 isolated widget regressions
         working-directory: frontend
         run: |
@@ -1383,18 +1461,24 @@ jobs:
           flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.lock
           flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart test/features/navigation/d2_guest_entry_test.dart
-          if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
             flutter test --no-pub --reporter expanded test/services/app_lock_service_test.dart test/services/auth_service_local_first_test.dart test/services/auth_service_failure_observability_test.dart test/services/api_auth_epoch_boundary_test.dart
             flutter test --no-pub --reporter expanded --dart-define=IAMINA_REMOTE_ACCOUNT_ENROLLMENT=true test/services/d1_auth_transition_test.dart
             flutter test --no-pub --reporter expanded test/services/d1_vault_admission_proof_test.dart
             flutter test --no-pub --reporter expanded --dart-define=IAMINA_D1_CUTOVER_CANDIDATE=true test/services/d1_cutover_policy_test.dart
           fi
           flutter analyze --no-fatal-infos --no-pub
-          if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then
-            flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D1_CUTOVER_CANDIDATE=true --dart-define=IAMINA_D2_GUEST_CANDIDATE=false --dart-define=IAMINA_REMOTE_ACCOUNT_SIGN_IN=true --dart-define=IAMINA_REMOTE_ACCOUNT_ENROLLMENT=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
-          else
-            flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D2_GUEST_CANDIDATE=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
-          fi
+      - name: Download same-run exact SHA Web build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: phase1-web-build-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/ci-web-artifact
+      - name: Verify shared Web build digest and provenance
+        env:
+          EXPECTED_BUNDLE_SHA: ${{ needs.phase1-web-build.outputs.bundle_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_web_build_artifact.py unpack "$RUNNER_TEMP/ci-web-artifact/bundle.tar.gz" "$EXPECTED_SHA" "$GITHUB_HEAD_REF" "$EXPECTED_BUNDLE_SHA" "$RUNNER_TEMP/d1-runtime-web"
       - name: D2 Web Chromium mobile-first then desktop
         timeout-minutes: 15
         run: |
@@ -1402,17 +1486,13 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/d2-browser-venv"
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium
-          if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then export D1_CUTOVER_PROBE=1; fi
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then export D1_CUTOVER_PROBE=1; fi
           D2_BROWSER_TARGET=chromium "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
       - name: D1 actual Drift encrypted checkpoint — chromium
-        if: ${{ github.head_ref == 'phase1/integration-web' }}
+        if: ${{ (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark') }}
         timeout-minutes: 12
         run: |
           set -euo pipefail
-          cd frontend
-          flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
-          cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs tool/d1_admission_store.mjs "$RUNNER_TEMP/d1-runtime-web/"
-          cd ..
           D1_RUNTIME_ENGINE=chromium D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain D2 candidate screenshots and exact SHA matrix
         if: always()
@@ -1424,7 +1504,7 @@ jobs:
 
 
   phase1-d3-linux:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d3-intents' || github.head_ref == 'phase1/integration-web') }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d3-intents' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -1476,7 +1556,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           case "$PHASE_BRANCH" in
-            phase1/d3-intents|phase1/integration-web) ;;
+            phase1/d3-intents|phase1/integration-web|phase1/ci-opt1-benchmark) ;;
             *) exit 1 ;;
           esac
           echo "SOURCE_SHA=$EXPECTED_SHA"
@@ -1486,6 +1566,11 @@ jobs:
           git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter-d3"
           test "$(git -C "$RUNNER_TEMP/flutter-d3" rev-parse HEAD)" = "cc0734ac716fbb8b90f3f9db8020958b1553afa7"
           echo "$RUNNER_TEMP/flutter-d3/bin" >> "$GITHUB_PATH"
+      - name: Restore exact Pub dependency cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.pub-cache/hosted/pub.dev
+          key: iamina-pub-v1-${{ runner.os }}-${{ runner.arch }}-cc0734ac716fbb8b90f3f9db8020958b1553afa7-${{ hashFiles('frontend/pubspec.lock') }}
       - name: D3 isolated preference UI tests
         working-directory: frontend
         run: |
@@ -1509,7 +1594,7 @@ jobs:
           python manage.py migrate --noinput
           python manage.py makemigrations --check --dry-run
           python -m pytest -q core/tests/test_d3_feature_intents.py core/tests/test_d3_feature_intents_http.py core/tests/test_account_consent_identity_safety.py core/tests/test_ai_egress_boundary_gate.py
-          if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
             python -m pytest -q core/tests/test_d1_test_access.py
           fi
 
@@ -1517,7 +1602,7 @@ jobs:
   # independently attest supported restoration or exact fail-closed capability.
   phase1-d1-macos-storage:
     needs: phase1-web-scope
-    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/integration-web') && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
     runs-on: macos-15
     timeout-minutes: 20
     env:
@@ -1550,8 +1635,8 @@ jobs:
   # Linux WebKit port failures remain recorded; explicit diagnostic-all mode
   # reproduces them without substituting them for Safari-target evidence.
   phase1-d2-macos-webkit:
-    needs: phase1-web-scope
-    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || github.head_ref == 'phase1/integration-web') && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
+    needs: [phase1-web-scope, phase1-web-build]
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
     runs-on: macos-15
     timeout-minutes: 25
     env:
@@ -1562,29 +1647,29 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
-      - name: Attest source and pinned Flutter SDK
+      - name: Attest source and require successful shared build
+        env:
+          BUILD_RESULT: ${{ needs.phase1-web-build.result }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$BUILD_RESULT" = success
           echo "SOURCE_SHA=$EXPECTED_SHA"
           sw_vers
-          git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
-          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "cc0734ac716fbb8b90f3f9db8020958b1553afa7"
-          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
-      - name: Build identical D2 candidate flags
-        working-directory: frontend
-        run: |
-          set -euo pipefail
-          flutter pub get --enforce-lockfile
-          git diff --exit-code -- pubspec.lock
-          if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then
-            flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D1_CUTOVER_CANDIDATE=true --dart-define=IAMINA_D2_GUEST_CANDIDATE=false --dart-define=IAMINA_REMOTE_ACCOUNT_SIGN_IN=true --dart-define=IAMINA_REMOTE_ACCOUNT_ENROLLMENT=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
-          else
-            flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D2_GUEST_CANDIDATE=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
-          fi
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
+      - name: Download same-run exact SHA Web build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: phase1-web-build-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/ci-web-artifact
+      - name: Verify shared Web build digest and provenance
+        env:
+          EXPECTED_BUNDLE_SHA: ${{ needs.phase1-web-build.outputs.bundle_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_web_build_artifact.py unpack "$RUNNER_TEMP/ci-web-artifact/bundle.tar.gz" "$EXPECTED_SHA" "$GITHUB_HEAD_REF" "$EXPECTED_BUNDLE_SHA" "$RUNNER_TEMP/d1-runtime-web"
       - name: D2 Web WebKit mobile-first then desktop
         timeout-minutes: 10
         run: |
@@ -1592,17 +1677,13 @@ jobs:
           python -m venv "$RUNNER_TEMP/d2-browser-venv"
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install webkit
-          if [ "$GITHUB_HEAD_REF" = phase1/integration-web ]; then export D1_CUTOVER_PROBE=1; fi
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then export D1_CUTOVER_PROBE=1; fi
           "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
       - name: D1 actual Drift encrypted checkpoint — webkit
-        if: ${{ github.head_ref == 'phase1/integration-web' }}
+        if: ${{ (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark') }}
         timeout-minutes: 12
         run: |
           set -euo pipefail
-          cd frontend
-          flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
-          cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs tool/d1_admission_store.mjs "$RUNNER_TEMP/d1-runtime-web/"
-          cd ..
           D1_RUNTIME_ENGINE=webkit D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain macOS D2 evidence
         if: always()
