@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:amina/services/app_lock_authenticator.dart';
 import 'package:amina/services/app_lock_service.dart';
+import 'package:amina/services/d1_admission_guard_adapter.dart';
 import 'package:amina/services/auth_service.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -354,6 +355,34 @@ void main() {
     expect(replacement.claim(_a, epoch), isTrue);
     expect(replacement.activate(_a, epoch), isTrue);
     expect(replacement.checkSession(_a, epoch), isTrue);
+  });
+
+  test('adapter rejects unknown phases and routes one-shot guard through retirement', () async {
+    final f = _Fixture();
+    await f.start();
+    final epoch = AuthService.authEpoch;
+    final adapter = D1AdmissionGuardAdapter(f.lock.consumeVaultAdmissionProof(
+      await f.lock.issueVaultAdmissionProof(), owner: _a));
+    expect(adapter.dispatch('unknown', _a, epoch), isFalse);
+    expect(adapter.dispatch('session', _a, epoch), isFalse);
+    expect(adapter.dispatch('pending', _a, epoch), isFalse);
+    expect(adapter.dispatch('claim', _a, epoch), isTrue);
+    expect(adapter.dispatch('claim', _a, epoch), isFalse);
+    expect(adapter.dispatch('watch', _a, epoch), isFalse);
+    var retired = 0;
+    expect(adapter.dispatch('watch', _a, epoch, onRetired: () { retired++; }), isTrue);
+    expect(adapter.dispatch('watch', _a, epoch, onRetired: () { fail('second watcher'); }), isFalse);
+    expect(adapter.dispatch('pending', _b, epoch), isFalse);
+    expect(adapter.dispatch('pending', _a, epoch + 1), isFalse);
+    expect(adapter.dispatch('pending', _a, epoch), isTrue);
+    expect(adapter.dispatch('activate', _a, epoch), isTrue);
+    expect(adapter.dispatch('session', _a, epoch), isTrue);
+    f.lock.lock();
+    expect(retired, 1);
+    expect(adapter.dispatch('session', _a, epoch), isFalse);
+    expect(adapter.dispatch('activate', _a, epoch), isFalse);
+    f.lock.noteDetached();
+    expect(retired, 1);
   });
 
   test('identity change during platform assertion rejects issuance', () async {

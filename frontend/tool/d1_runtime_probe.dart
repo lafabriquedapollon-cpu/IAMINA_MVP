@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:amina/services/auth_service.dart';
 import 'package:amina/services/app_lock_service.dart';
+import 'package:amina/services/d1_admission_guard_adapter.dart';
 import 'package:amina/services/app_lock_authenticator.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -128,16 +129,14 @@ Future<JSFunction> _boundProof(int owner) async {
   final lock = _boundLock!;
   final ticket = await lock.issueVaultAdmissionProof();
   final guard = lock.consumeVaultAdmissionProof(ticket, owner: owner);
+  final adapter = D1AdmissionGuardAdapter(guard);
   return ((JSString phase, JSNumber id, JSNumber epoch, JSFunction? callback) {
-    final o = id.toDartInt, e = epoch.toDartInt;
-    return (switch (phase.toDart) {
-      'claim' => guard.claim(o, e),
-      'pending' => guard.checkPending(o, e),
-      'activate' => guard.activate(o, e),
-      'session' => guard.checkSession(o, e),
-      'watch' => callback != null && guard.watchRetirement(o, e, () { callback.callAsFunction(); }),
-      _ => false,
-    }).toJS;
+    final o = id.toDartDouble, e = epoch.toDartDouble;
+    bool valid(double n) => n.isFinite && n > 0 &&
+        n <= 9007199254740991 && n == n.truncateToDouble();
+    if (!valid(o) || !valid(e)) return false.toJS;
+    return adapter.dispatch(phase.toDart, o.toInt(), e.toInt(),
+        onRetired: callback == null ? null : () { callback.callAsFunction(); }).toJS;
   }).toJS;
 }
 

@@ -1,10 +1,11 @@
 // D1-I3: isolated synthetic proof of key custody and durable admission fencing.
 // This is NOT a production auth authority or a migration of any patient vault.
 import {openArchive} from './d1_archive_candidate.mjs';
+import {createAdmissionStore} from './d1_admission_store.mjs';
 import {validRecord, sameRecord, wrapKey as wrapCheckpointKey, unwrapKey as unwrapCheckpointKey, encrypt as encryptCheckpoint, decrypt as decryptCheckpoint} from './d1_checkpoint_crypto.mjs';
 import {requirePossessionSecret} from './d1_possession_candidate.mjs';
 
-const DB='iamina-d1-admission-probe-v1', STORE='state';
+const {transaction,readFence}=createAdmissionStore('iamina-d1-admission-probe-v1');
 const owners=new Set([900001,900002]);
 const proofs=new WeakMap();
 const scope=owner=>'amina_vault_v1_native_'+owner;
@@ -32,43 +33,6 @@ function consume(ticket,owner,epoch) {
 function checkPhrase(phrase) {
   require(typeof phrase==='string'&&Array.from(phrase).length>=16&&phrase.length<=1024,
     'Possession secret required');
-}
-async function connect() {
-  require(isSecureContext&&globalThis.indexedDB&&globalThis.crypto?.subtle,'Secure storage unavailable');
-  return new Promise((resolve,reject)=>{
-    const r=indexedDB.open(DB,1);
-    r.onupgradeneeded=()=>r.result.createObjectStore(STORE);
-    r.onsuccess=()=>{const db=r.result;db.onversionchange=()=>db.close();resolve(db);};
-    r.onerror=()=>reject(new Error('Admission store unavailable'));
-    r.onblocked=()=>reject(new Error('Admission store blocked'));
-  });
-}
-// Read owner and global fence in one transaction. Callback must be synchronous.
-// Writes and the fence check share one strict readwrite transaction.
-async function transaction(owner,write,fn) {
-  const db=await connect();
-  try{
-    return await new Promise((resolve,reject)=>{
-      const tx=write?db.transaction(STORE,'readwrite',{durability:'strict'}):
-        db.transaction(STORE,'readonly');
-      let result, failure;
-      tx.oncomplete=()=>resolve(result);
-      tx.onabort=()=>reject(failure||new Error('Admission transaction failed'));
-      if(write&&tx.durability!=='strict'){
-        failure=new Error('Strict durability unavailable');tx.abort();return;
-      }
-      const store=tx.objectStore(STORE);
-      const ownerReq=store.get('owner:'+owner), fenceReq=store.get('fence');
-      let ready=0;
-      const done=()=>{
-        if(++ready!==2)return;
-        try{
-          result=fn(ownerReq.result??null,fenceReq.result??null,store);
-        }catch(e){failure=e;tx.abort();}
-      };
-      ownerReq.onsuccess=done;fenceReq.onsuccess=done;
-    });
-  }finally{db.close();}
 }
 function fenceMatches(f,lease) {
   return f&&f.owner===lease.owner&&f.token===lease.token&&f.epoch===lease.epoch;
@@ -140,17 +104,6 @@ function notifyFenceChange(){
     channel.postMessage('fence-changed');
   }catch(_){/* optional optimization only */}
   finally{try{channel?.close();}catch(_){}}
-}
-async function readFence(){
-  const db=await connect();
-  try{
-    return await new Promise((resolve,reject)=>{
-      const tx=db.transaction(STORE,'readonly');
-      const request=tx.objectStore(STORE).get('fence');
-      tx.oncomplete=()=>resolve(request.result??null);
-      tx.onabort=()=>reject(new Error('Admission fence unavailable'));
-    });
-  }finally{db.close();}
 }
 function monitorBoundFence(lease,authority,revoke){
   let stopped=false,busy=false,channel,timer;
