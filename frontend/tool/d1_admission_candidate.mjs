@@ -322,6 +322,49 @@ class AdmissionSession {
       return {revision,replay:false,deleted:gone,measurement};
     }finally{bytes?.fill(0);next?.fill(0);this.#busy=false;}
   }
+  async readEvidence(uuid){
+    require(this.#guard,'Bound authority required');this.#local();
+    require(typeof uuid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid),'Invalid measurement UUID');
+    const r=await this.#read();
+    let bytes;
+    try{
+      bytes=await decrypt(r,this.#key,this.#lease.owner);this.#local();
+      const evidence=JSON.parse(await window.d1EvidenceRead(bytes,this.#lease.owner,uuid));
+      const current=await this.#read();this.#local();
+      require(sameRecord(current,r),'Checkpoint conflict');
+      return {revision:r.revision,evidence};
+    }finally{bytes?.fill(0);}
+  }
+  async insertEvidence(expectedRevision,uuid,original,unit,seconds){
+    require(this.#guard,'Bound authority required');this.#local();
+    require(Number.isSafeInteger(expectedRevision)&&expectedRevision>0&&
+      typeof uuid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)&&
+      Number.isFinite(original)&&original>0&&['mg/dL','mmol/L'].includes(unit)&&
+      Number.isSafeInteger(seconds)&&seconds>0&&seconds<=4102444800,'Invalid explicit measurement');
+    require(!this.#busy,'Mutation already pending');this.#busy=true;
+    let bytes,next;
+    const owner=this.#lease.owner,key=this.#key;
+    try{
+      const r=await this.#read();
+      require(r.revision===expectedRevision&&r.revision<0xffffffff,'Checkpoint conflict');
+      bytes=await decrypt(r,key,owner);this.#local();
+      next=await window.d1EvidenceInsert(bytes,owner,uuid,original,unit,seconds);this.#local();
+      const evidence=JSON.parse(await window.d1EvidenceRead(next,owner,uuid));this.#local();
+      require(evidence?.uuid===uuid&&evidence.originalValue===original&&evidence.originalUnit===unit&&
+        evidence.loggedAtSeconds===seconds&&Number.isFinite(evidence.mgDl)&&evidence.mgDl>0&&
+        evidence.provenance==='user_entered','Evidence invariant failed');
+      const revision=r.revision+1;
+      const archive=await encrypt(next,key,owner,revision);this.#local();
+      await transaction(owner,true,(current,f,store)=>{
+        this.#local();
+        require(fenceMatches(f,this.#lease),'Admission fence retired');
+        require(sameRecord(current,r),'Checkpoint conflict');
+        store.put({revision,envelope:r.envelope,archive},'owner:'+owner);
+      });
+      await this.#verifyFence();this.#local();
+      return {revision,evidence};
+    }finally{bytes?.fill(0);next?.fill(0);this.#busy=false;}
+  }
   async readTreatment(){
     require(this.#guard,'Bound authority required');
     const r=await this.#read();
@@ -578,6 +621,8 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
       insertGlucose:(revision,uuid,mgDl,unit,seconds,hooks)=>perform(()=>session.insertGlucose(revision,uuid,mgDl,unit,seconds,hooks)),
       editGlucose:(revision,uuid,mgDl,unit,seconds,hooks)=>perform(()=>session.changeGlucose(revision,uuid,'edit',mgDl,unit,seconds,hooks)),
       deleteGlucose:(revision,uuid,hooks)=>perform(()=>session.changeGlucose(revision,uuid,'delete',0,'mg/dL',0,hooks)),
+      readEvidence:uuid=>perform(()=>session.readEvidence(uuid)),
+      insertEvidence:(revision,uuid,original,unit,seconds)=>perform(()=>session.insertEvidence(revision,uuid,original,unit,seconds)),
       readTreatment:()=>perform(()=>session.readTreatment()),
       writeTreatment:(revision,state,codes,hooks)=>perform(()=>session.writeTreatment(revision,state,codes,hooks)),
       mutate:(operation,hooks)=>perform(()=>session.mutate(operation,hooks)),

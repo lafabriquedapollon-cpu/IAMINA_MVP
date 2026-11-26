@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createClinicalSession} from './d1_clinical_session_candidate.mjs';
 
-const names = ['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readTreatment','writeTreatment'];
+const names = ['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readEvidence','insertEvidence','readTreatment','writeTreatment'];
 function fixture() {
   let active = true;
   const calls = [];
@@ -26,7 +26,8 @@ test('frozen null-prototype facade exposes only clinical operations', async () =
     ['readJournal', 1, 100, 200, 2, 0], ['readGlucose','uuid'],
     ['insertGlucose', 1, 'uuid', 100, 'mg/dL', 100],
     ['editGlucose', 1, 'uuid', 120, 'mg/dL', 100],
-    ['deleteGlucose', 1, 'uuid'], ['readTreatment'],
+    ['deleteGlucose', 1, 'uuid'], ['readEvidence','uuid'],
+    ['insertEvidence', 1, 'uuid', 7.83, 'mmol/L', 100], ['readTreatment'],
     ['writeTreatment', 1, 'declared', ['insulin']],
   ];
   for (const [name, ...args] of vectors) {

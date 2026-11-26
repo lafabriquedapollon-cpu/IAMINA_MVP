@@ -5,6 +5,9 @@ import 'dart:js_interop';
 import 'dart:typed_data';
 
 import 'package:amina/data/drift/database.dart';
+import 'package:amina/core/domain/glucose_quantity_evidence.dart';
+import 'package:amina/core/domain/glucose_quantity_storage_envelope.dart';
+import 'package:amina/core/domain/glucose_display_projection.dart';
 import 'package:amina/data/drift/patient_vault_scope.dart';
 import 'package:amina/data/drift/patient_treatment_declaration_store.dart';
 import 'package:drift/drift.dart';
@@ -40,6 +43,10 @@ external set _journalPageFn(JSFunction function);
 external set _glucoseReadFn(JSFunction function);
 @JS('d1GlucoseInsert')
 external set _glucoseInsertFn(JSFunction function);
+@JS('d1EvidenceRead')
+external set _evidenceReadFn(JSFunction function);
+@JS('d1EvidenceInsert')
+external set _evidenceInsertFn(JSFunction function);
 @JS('d1TreatmentRead')
 external set _treatmentReadFn(JSFunction function);
 @JS('d1TreatmentChange')
@@ -144,6 +151,8 @@ const _filename = 'vault.sqlite';
 const _path = '/vault.sqlite';
 const _marker = 'D1_I1_SYNTHETIC_NOT_PATIENT';
 const _glucoseMarker = 'D1_I5C_SYNTHETIC_GLUCOSE';
+const _evidenceMarker = 'CONV_02_SYNTHETIC_EXPLICIT_GLUCOSE';
+const _evidenceTable = 'd1_d5_fixture_evidence_v1';
 final _fixtureUuid = RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$');
 const _owners = [900001, 900002];
 
@@ -203,7 +212,11 @@ class _MemoryVault {
           (row.mealDescription == _marker && row.clientUuid.startsWith('d1-i1-$owner-')) ||
           (row.mealDescription == _glucoseMarker && _fixtureUuid.hasMatch(row.clientUuid) &&
            row.source == 'manual' && row.bloodSugar.isFinite && row.bloodSugar > 0 &&
-           row.loggedAt != null && row.insulinUnits == null && row.syncStatus == 'pending')), 'Synthetic rows mismatch');
+           row.loggedAt != null && row.insulinUnits == null && row.syncStatus == 'pending') ||
+          (row.mealDescription == _evidenceMarker && _fixtureUuid.hasMatch(row.clientUuid) &&
+           row.source == 'manual' && row.bloodSugar.isFinite && row.bloodSugar > 0 &&
+           row.loggedAt != null && row.insulinUnits == null && row.syncStatus == 'd5_candidate_local')), 'Synthetic rows mismatch');
+    await _validateEvidenceRows(db, owner, rows);
     if (await _hasTombstones(db)) {
       final deleted = await db.customSelect('SELECT uuid FROM d1_fixture_deleted_glucose ORDER BY uuid').get();
       for (final entry in deleted) {
@@ -330,6 +343,9 @@ Future<String> _fullInspect(Uint8List bytes, int owner) async {
       tables[_tombstoneTable] = (await db.customSelect(
           'SELECT uuid FROM d1_fixture_deleted_glucose ORDER BY uuid').get())
           .map((r) => r.data).toList();
+    }
+    if (await _hasEvidence(db)) {
+      tables[_evidenceTable] = (await db.customSelect('SELECT * FROM $_evidenceTable ORDER BY client_uuid').get()).map((r) => r.data).toList();
     }
     _require(tables['patient_profiles']!.length == 1 &&
         tables['patient_profiles']!.single['user_id'] == owner,
@@ -584,6 +600,106 @@ Future<Uint8List> _insertGlucose(Uint8List input, int owner, String uuid,
   }
 }
 
+// D1/D5 isolated Web checkpoint adapter. This is not a production migration.
+// The encrypted D1 checkpoint owns the durable identity, revision and CAS.
+// Only explicit new readings get D5 evidence; old ports cannot edit them.
+Future<bool> _hasEvidence(AppDatabase db) async =>
+    (await db.customSelect("SELECT name FROM sqlite_master WHERE type='table' AND name='$_evidenceTable'").get()).isNotEmpty;
+
+GlucoseQuantityEvidence _decodeEvidence(QueryRow meta, LogEntryData row, int owner) {
+  _require(meta.read<int>('owner_id') == owner &&
+      meta.read<String>('client_uuid') == row.clientUuid &&
+      row.mealDescription == _evidenceMarker, 'Evidence association mismatch');
+  final raw = jsonDecode(meta.read<String>('envelope_json'));
+  _require(raw is Map<String, dynamic>, 'Invalid evidence envelope');
+  final evidence = GlucoseQuantityStorageEnvelope.decode(
+    expectedClientUuid: row.clientUuid,
+    envelope: Map<String, Object?>.from(raw as Map),
+  )!;
+  _require(evidence.canonicalMgDl == row.bloodSugar, 'Evidence canonical mismatch');
+  return evidence;
+}
+
+Future<void> _validateEvidenceRows(AppDatabase db, int owner, List<LogEntryData> rows) async {
+  final marked = {for (final row in rows.where((r) => r.mealDescription == _evidenceMarker)) row.clientUuid: row};
+  if (!await _hasEvidence(db)) {
+    _require(marked.isEmpty, 'Evidence metadata missing');
+    return;
+  }
+  final metadata = await db.customSelect('SELECT client_uuid, owner_id, envelope_json FROM $_evidenceTable').get();
+  _require(metadata.length == marked.length, 'Evidence cardinality mismatch');
+  final seen = <String>{};
+  for (final meta in metadata) {
+    final uuid = meta.read<String>('client_uuid');
+    final row = marked[uuid];
+    _require(row != null && seen.add(uuid) && !await _isDeleted(db, uuid), 'Evidence orphan or tombstone');
+    _decodeEvidence(meta, row!, owner);
+  }
+}
+
+Future<String> _readEvidence(Uint8List input, int owner, String uuid) async {
+  _require(_fixtureUuid.hasMatch(uuid), 'Invalid measurement UUID');
+  final vault = await _MemoryVault.open(owner, input);
+  try {
+    await vault.inspect();
+    final db = vault.db;
+    final row = await (db.select(db.logEntries)..where((r) => r.clientUuid.equals(uuid))).getSingleOrNull();
+    if (row == null || row.mealDescription != _evidenceMarker) return 'null';
+    final meta = await db.customSelect('SELECT client_uuid, owner_id, envelope_json FROM $_evidenceTable WHERE client_uuid = ?',
+      variables: [Variable<String>(uuid)]).getSingle();
+    final evidence = _decodeEvidence(meta, row, owner);
+    return jsonEncode({
+      'uuid': uuid, 'originalValue': evidence.originalRawValue,
+      'originalUnit': evidence.originalUnit!.ucumCode,
+      'mgDl': evidence.canonicalMgDl,
+      'loggedAtSeconds': row.loggedAt!.millisecondsSinceEpoch ~/ 1000,
+      'provenance': 'user_entered',
+      'displayMgDl': GlucoseDisplayProjection.fromEvidence(evidence, GlucoseSourceUnit.mgDl)?.numericText,
+      'displayMmolL': GlucoseDisplayProjection.fromEvidence(evidence, GlucoseSourceUnit.mmolL)?.numericText,
+    });
+  } finally {
+    try { await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
+Future<Uint8List> _insertEvidence(Uint8List input, int owner, String uuid,
+    double original, String unitCode, int seconds) async {
+  final unit = GlucoseSourceUnit.fromExplicitUcumCode(unitCode);
+  _require(_fixtureUuid.hasMatch(uuid) && unit != null &&
+      seconds > 0 && seconds <= 4102444800, 'Invalid explicit measurement');
+  final evidence = GlucoseQuantityEvidence.userEntry(originalValue: original, declaredUnit: unit!);
+  final envelope = GlucoseQuantityStorageEnvelope.encode(clientUuid: uuid, evidence: evidence);
+  final vault = await _MemoryVault.open(owner, input);
+  var closed = false;
+  try {
+    await vault.inspect();
+    final db = vault.db;
+    await db.transaction(() async {
+      _require(!await _isDeleted(db, uuid) &&
+          (await (db.select(db.logEntries)..where((r) => r.clientUuid.equals(uuid))).get()).isEmpty,
+          'Existing or deleted measurement identity');
+      await db.customStatement('CREATE TABLE IF NOT EXISTS $_evidenceTable (client_uuid TEXT NOT NULL PRIMARY KEY, owner_id INTEGER NOT NULL, envelope_json TEXT NOT NULL)');
+      final time = DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+      await db.into(db.logEntries).insert(LogEntriesCompanion.insert(
+        clientUuid: uuid, createdAt: time, loggedAt: Value(time),
+        bloodSugar: evidence.canonicalMgDl!, mealDescription: const Value(_evidenceMarker),
+        syncStatus: const Value('d5_candidate_local'),
+      ));
+      await db.customStatement('INSERT INTO $_evidenceTable (client_uuid, owner_id, envelope_json) VALUES (?, ?, ?)',
+        [uuid, owner, jsonEncode(envelope)]);
+    });
+    await vault.inspect();
+    await db.close();
+    closed = true;
+    _require(vault.fs.fileData.keys.every((key) => key == _path), 'Unexpected SQLite auxiliary file');
+    return Uint8List.fromList(vault.fs.fileData[_path]!);
+  } finally {
+    try { if (!closed) await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   _boundLoginFn = ((JSNumber owner) =>
@@ -617,6 +733,11 @@ void main() {
       JSNumber mgDl, JSNumber seconds) =>
       _insertGlucose(bytes.toDart, owner.toDartInt, uuid.toDart,
           mgDl.toDartDouble, seconds.toDartInt)
+          .then((value) => value.toJS).toJS).toJS;
+  _evidenceReadFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid) =>
+      _readEvidence(bytes.toDart, owner.toDartInt, uuid.toDart).then((value) => value.toJS).toJS).toJS;
+  _evidenceInsertFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid, JSNumber original, JSString unit, JSNumber seconds) =>
+      _insertEvidence(bytes.toDart, owner.toDartInt, uuid.toDart, original.toDartDouble, unit.toDart, seconds.toDartInt)
           .then((value) => value.toJS).toJS).toJS;
   _treatmentReadFn = ((JSUint8Array bytes, JSNumber owner) =>
       _readTreatment(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;

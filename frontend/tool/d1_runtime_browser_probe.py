@@ -880,7 +880,7 @@ I5_BOUND = r"""async ()=>{
   await reject(()=>as.inspect(),'Bound authority retired');
   check(await as.retire()===true,'Retirement acknowledgement missing');
   const clinical=await api.admitBoundClinical(A,epoch(),await ticket(),a);
-  const allowed=['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readTreatment','writeTreatment','retire'];
+  const allowed=['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readEvidence','insertEvidence','readTreatment','writeTreatment','retire'];
   check(Object.isFrozen(clinical)&&Object.getPrototypeOf(clinical)===null&&
     JSON.stringify(Object.keys(clinical))===JSON.stringify(allowed),'Unexpected clinical surface');
   const u='ac123456-1234-4abc-8def-000000000010',t=1795564800;
@@ -897,7 +897,30 @@ I5_BOUND = r"""async ()=>{
   check(bReading.revision===1&&bReading.measurement===null,'Clinical owner isolation failed');
   await reject(()=>clinical.readGlucose(u),'Bound authority retired');
   await clinicalB.retire();
-  return {negativeCases:negatives+1,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true,idleRevocation:true,clinicalPort:true,clinicalRevisionA:3};
+  await window.d1BoundLogin(A);
+  let e=await api.admitBoundClinical(A,epoch(),await ticket(),a);
+  const v='ac123456-1234-4abc-8def-000000000011';
+  check((await e.readEvidence(u)).evidence===null,'Legacy unit inferred');
+  const added=await e.insertEvidence(3,v,7.83,'mmol/L',t+1);
+  const ev=added.evidence;
+  check(added.revision===4&&ev.originalValue===7.83&&ev.originalUnit==='mmol/L'&&
+    Math.abs(ev.mgDl-141.0620697)<1e-9&&ev.displayMgDl==='141'&&ev.displayMmolL==='7.8','D5 conversion mismatch');
+  await e.retire();
+  e=await api.admitBoundClinical(A,epoch(),await ticket(),a);
+  check(JSON.stringify((await e.readEvidence(v)).evidence)===JSON.stringify(ev),'Evidence reopen mismatch');
+  await reject(()=>e.insertEvidence(4,v,8,'mmol/L',t+1),'Existing or deleted measurement identity');
+  e=await api.admitBoundClinical(A,epoch(),await ticket(),a);
+  check((await e.readEvidence(v)).revision===4,'Duplicate changed revision');
+  await reject(()=>e.deleteGlucose(4,v),'Unexpected measurement row');
+  e=await api.admitBoundClinical(A,epoch(),await ticket(),a);
+  check((await e.readEvidence(v)).evidence.originalValue===7.83,'Old port changed evidence');
+  const pending=e.readEvidence(v);window.d1BoundLock();
+  await reject(()=>pending,'Bound authority retired');
+  await window.d1BoundLogin(B);
+  const other=await api.admitBoundClinical(B,epoch(),await window.d1BoundProof(B),b);
+  check((await other.readEvidence(v)).evidence===null,'Evidence owner leak');
+  await other.retire();
+  return {negativeCases:negatives+1,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true,idleRevocation:true,clinicalPort:true,clinicalRevisionA:3,explicitEvidence:true,evidenceRevision:4};
 }"""
 
 
@@ -907,7 +930,7 @@ def exercise_bound(browser_type,profile,locale,origin):
         result=page.evaluate(I5_BOUND)
         assert result=={"negativeCases":9,"revisionA":2,"revisionB":1,
                        "leaseBeforeOpen":True,"retiredFenceCleared":True,"idleRevocation":True,
-                       "clinicalPort":True,"clinicalRevisionA":3}
+                       "clinicalPort":True,"clinicalRevisionA":3,"explicitEvidence":True,"evidenceRevision":4}
         assert not blocked and not errors
         return result
     except Exception:
@@ -1962,6 +1985,7 @@ def run():
     print("D1_I5_POSSESSION_PASS 2/2",flush=True)
     print("D1_I5_BOUND_ADMISSION_PASS 2/2",flush=True)
     print("D1_I5D_CLINICAL_PORT_PASS 2/2",flush=True)
+    print("D1_D5_EXPLICIT_EVIDENCE_PASS 2/2",flush=True)
     print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
     print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
     print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)
