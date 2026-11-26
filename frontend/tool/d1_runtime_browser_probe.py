@@ -801,12 +801,11 @@ def exercise_possession(browser_type,profile,locale,origin):
 
 # Actual Dart auth/app-lock services, simulated HTTP/authenticator/storage,
 # connected to the real synthetic encrypted Drift/IndexedDB runtime.
-I5_BOUND = r"""async ()=>{
+I5_BOUND = r"""async ({a,b})=>{
   const stage=x=>{window.__d1BoundStage=x;};
   stage("bootstrap");
   const api=await import('/d1_admission_candidate.mjs');
-  const keys=await import('/d1_possession_candidate.mjs');
-  const A=900001,B=900002,a=keys.generatePossessionSecret(),b=keys.generatePossessionSecret();
+  const A=900001,B=900002;
   const check=(v,m)=>{if(!v)throw new Error(m);};
   const reject=async(fn,reason)=>{try{await fn();}catch(e){
     check(String(e).includes(reason),'Unexpected bound refusal');return;
@@ -979,15 +978,65 @@ I5_BOUND = r"""async ()=>{
 }"""
 
 
+I5_BOUND_RESTART = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,u='ac123456-1234-4abc-8def-000000000010',v='ac123456-1234-4abc-8def-000000000011';
+  const check=(ok)=>{if(!ok)throw Error('Restart invariant failed');};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason));return;
+  }throw Error('Expected restart refusal');};
+  const open=async(owner,secret,raw=false)=>{
+    const proof=await window.d1BoundProof(owner);
+    return raw?api.admitBound(owner,window.d1BoundEpoch(),proof,secret):
+      api.admitBoundClinical(owner,window.d1BoundEpoch(),proof,secret);
+  };
+  await window.d1BoundLogin(A);
+  let s=await open(A,a,true);
+  const audit=await s.auditSnapshot();
+  const tables=audit.tables;
+  check(audit.revision===6&&tables.log_entries.length===3&&
+    !tables.log_entries.some(row=>row.client_uuid===v)&&
+    tables.log_entries.some(row=>row.client_uuid===u&&row.blood_sugar===131.25)&&
+    tables.d1_d5_fixture_evidence_v1.length===0);
+  const tomb=tables.d1_d5_fixture_deleted_v1;
+  const receipt=tables.d1_d5_fixture_receipt_v1;
+  check(tomb.length===1&&Object.keys(tomb[0]).length===2&&tomb[0].client_uuid===v&&tomb[0].owner_id===A);
+  check(receipt.length===1&&Object.keys(receipt[0]).length===5&&receipt[0].singleton===1&&
+    receipt[0].owner_id===A&&receipt[0].client_uuid===v&&receipt[0].action==='delete'&&receipt[0].base_revision===5);
+  await s.retire();
+  s=await open(A,a);
+  const gone=await s.readEvidence(v);
+  check(gone.revision===6&&gone.evidence===null);
+  const replay=await s.deleteEvidence(5,v);
+  check(replay.revision===6&&replay.replay===true&&replay.evidence===null);
+  await reject(()=>s.insertEvidence(6,v,145,'mg/dL',1795564802),'Existing or deleted measurement identity');
+  s=await open(A,a);
+  check((await s.readEvidence(v)).revision===6);
+  await s.retire();
+  await window.d1BoundLogin(B);
+  s=await open(B,b,true);
+  const other=await s.auditSnapshot();
+  check(other.revision===1&&other.tables.log_entries.length===1&&
+    !('d1_d5_fixture_deleted_v1' in other.tables)&&!('d1_d5_fixture_receipt_v1' in other.tables));
+  await s.retire();
+  return {revisionA:6,revisionB:1,tombstone:true,receipt:true,noResurrection:true,replay:true,legacyPreserved:true};
+}"""
+
+
 def exercise_bound(browser_type,profile,locale,origin):
     ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
     try:
-        result=page.evaluate(I5_BOUND)
+        # Fresh random fixture secrets held only in this harness invocation.
+        # Do not include them in result records or exception diagnostics.
+        secrets=page.evaluate("""async ()=>{
+          const k=await import('/d1_possession_candidate.mjs');
+          return {a:k.generatePossessionSecret(),b:k.generatePossessionSecret()};
+        }""")
+        result=page.evaluate(I5_BOUND,secrets)
         assert result=={"negativeCases":9,"revisionA":2,"revisionB":1,
                        "leaseBeforeOpen":True,"retiredFenceCleared":True,"idleRevocation":True,
                        "clinicalPort":True,"clinicalRevisionA":3,"explicitEvidence":True,"evidenceRevision":4,"evidenceMutationRevision":6}
         assert not blocked and not errors
-        return result
     except Exception:
         # Only fixed synthetic stage codes; never print exception contents,
         # evidence, credentials, keys or raw browser messages.
@@ -1004,6 +1053,21 @@ def exercise_bound(browser_type,profile,locale,origin):
             pass
         raise RuntimeError("D1 bound admission qualification failed stage=" + stage) from None
     finally:
+        ctx.close()
+    # Reopen the same on-disk profile with a fresh browser process, not merely
+    # a new tab or a new session in the previous document.
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+    try:
+        restart=page.evaluate(I5_BOUND_RESTART,secrets)
+        assert restart=={"revisionA":6,"revisionB":1,"tombstone":True,"receipt":True,
+                         "noResurrection":True,"replay":True,"legacyPreserved":True}
+        assert not blocked and not errors
+        result["restart"]=restart
+        return result
+    except Exception:
+        raise RuntimeError("D1 evidence mutation restart qualification failed") from None
+    finally:
+        secrets.clear()
         ctx.close()
 
 
@@ -2055,6 +2119,7 @@ def run():
     print("D1_I5D_CLINICAL_PORT_PASS 2/2",flush=True)
     print("D1_D5_EXPLICIT_EVIDENCE_PASS 2/2",flush=True)
     print("D1_D5_EVIDENCE_MUTATION_PASS 2/2",flush=True)
+    print("D1_D5_EVIDENCE_RESTART_PASS 2/2",flush=True)
     print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
     print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
     print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)
