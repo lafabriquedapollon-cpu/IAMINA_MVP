@@ -2178,8 +2178,37 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         target.scroll_into_view_if_needed(timeout=10000)
         rect=target.bounding_box(timeout=10000)
         assert rect and rect["width"]>0 and rect["height"]>0
-        # Click the rendered control using its actual accessibility bounds.
-        page.mouse.click(rect["x"]+rect["width"]/2,rect["y"]+rect["height"]/2)
+        # Text entry was proven on R1; preserve its real pointer/focus path.
+        if identifier == "evidence-value":
+            page.mouse.click(rect["x"]+rect["width"]/2,rect["y"]+rect["height"]/2)
+        else:
+            # Use Playwright actionability/hit testing rather than an unchecked
+            # pointer at the semantic wrapper's center. Never force or dispatch.
+            target.click(timeout=10000)
+    def diagnostic():
+        result={}
+        for identifier in ("evidence-value","evidence-save","evidence-mmoll","evidence-input-error"):
+            node=page.locator(f'[flt-semantics-identifier="{identifier}"]')
+            info={"count":node.count()}
+            if info["count"] == 1:
+                info.update({"visible":node.is_visible(),"bounds":node.bounding_box(timeout=1000)})
+                info["semantics"]=node.evaluate("""el=>{
+                    const r=el.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+                    let hit=document.elementFromPoint(x,y);
+                    while(hit?.shadowRoot?.elementFromPoint){
+                        const inner=hit.shadowRoot.elementFromPoint(x,y);
+                        if(!inner||inner===hit)break;
+                        hit=inner;
+                    }
+                    return {role:el.getAttribute('role'),pointerEvents:getComputedStyle(el).pointerEvents,
+                        hitTag:hit?.tagName??null,hitRole:hit?.getAttribute('role')??null,
+                        hitIdentifier:hit?.getAttribute('flt-semantics-identifier')??null};
+                }""")
+            result[identifier]=info
+        result["refusalTextCount"]=text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.").count()
+        result["emptyJournalCount"]=text("Aucune mesure explicite","لا توجد قياسات صريحة").count()
+        result["nativeFocusCount"]=page.locator("input:focus, textarea:focus").count()
+        return result
     def enter(value):
         tap("evidence-value")
         # Flutter Web's native text editing element may be inside a shadow root.
@@ -2205,10 +2234,16 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
         stage="insert-native-input"
         enter("7.83")
-        stage="insert-reject-no-unit"
+        stage="insert-no-unit-click"
+        print("D1_D5_UI_DIAG "+json.dumps({"engine":ENGINE,"locale":locale,"width":width,
+            "stage":"before-no-unit-click","state":diagnostic()},ensure_ascii=False),flush=True)
         tap("evidence-save")
+        stage="insert-no-unit-refusal-visible"
         expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_be_visible(timeout=10000)
+        stage="insert-no-unit-journal-empty"
         expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible()
+        print("D1_D5_UI_DIAG "+json.dumps({"engine":ENGINE,"locale":locale,"width":width,
+            "stage":"after-no-unit-refusal","state":diagnostic()},ensure_ascii=False),flush=True)
         stage="insert-unit"
         tap("evidence-mmoll")
         expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_have_count(0,timeout=10000)
@@ -2248,7 +2283,17 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         assert not blocked and not errors
         return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
                 "viewport":[width,height],"frames":frames,"result":"PASS"}
-    except Exception:
+    except Exception as failure:
+        # Diagnostic metadata is limited to the synthetic form's known controls;
+        # never emit raw exception messages, arbitrary DOM text or secrets.
+        try:
+            print("D1_D5_UI_DIAG "+json.dumps({"engine":ENGINE,"locale":locale,"width":width,
+                "stage":stage,"exceptionType":type(failure).__name__,"state":diagnostic()},
+                ensure_ascii=False),flush=True)
+        except Exception as diagnostic_failure:
+            print("D1_D5_UI_DIAG "+json.dumps({"engine":ENGINE,"locale":locale,"width":width,
+                "stage":stage,"exceptionType":type(failure).__name__,
+                "diagnosticExceptionType":type(diagnostic_failure).__name__}),flush=True)
         # All data in this isolated profile is synthetic. Preserve an actual
         # failure frame without printing browser exceptions or secrets.
         try:
