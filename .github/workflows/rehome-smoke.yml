@@ -1461,6 +1461,9 @@ jobs:
           flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.lock
           flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart test/features/navigation/d2_guest_entry_test.dart
+          if [[ "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
+            flutter test --no-pub --reporter expanded test/d1_evidence_ui_candidate_test.dart
+          fi
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             flutter test --no-pub --reporter expanded test/services/app_lock_service_test.dart test/services/auth_service_local_first_test.dart test/services/auth_service_failure_observability_test.dart test/services/api_auth_epoch_boundary_test.dart
             flutter test --no-pub --reporter expanded --dart-define=IAMINA_REMOTE_ACCOUNT_ENROLLMENT=true test/services/d1_auth_transition_test.dart

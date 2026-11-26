@@ -2168,6 +2168,26 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         target=text(fr,arabic)
         expect(target).to_be_visible(timeout=20000)
         target.click(timeout=20000)
+    def control(identifier):
+        target=page.locator(f'[flt-semantics-identifier="{identifier}"]')
+        expect(target).to_have_count(1,timeout=15000)
+        expect(target).to_be_visible(timeout=15000)
+        return target
+    def tap(identifier):
+        target=control(identifier)
+        target.scroll_into_view_if_needed(timeout=10000)
+        rect=target.bounding_box(timeout=10000)
+        assert rect and rect["width"]>0 and rect["height"]>0
+        # Click the rendered control using its actual accessibility bounds.
+        page.mouse.click(rect["x"]+rect["width"]/2,rect["y"]+rect["height"]/2)
+    def enter(value):
+        tap("evidence-value")
+        # Flutter Web's native text editing element may be inside a shadow root.
+        # The locator pierces open roots and checks actual focused input.
+        native=page.locator("input:focus, textarea:focus")
+        expect(native).to_have_count(1,timeout=10000)
+        native.fill(value,timeout=10000)
+        expect(native).to_have_value(value,timeout=10000)
     try:
         page.set_viewport_size({"width":width,"height":height})
         semantics()
@@ -2183,24 +2203,28 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         stage="open"
         click("Ouvrir profil A","فتح الملف A")
         expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
-        stage="insert"
-        field=page.get_by_role("textbox").first
-        field.click(timeout=20000)
-        page.keyboard.insert_text("7.83")
-        click("Enregistrer","حفظ")
-        expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_be_visible()
-        page.get_by_text("mmol/L",exact=True).first.click()
-        click("Enregistrer","حفظ")
+        stage="insert-native-input"
+        enter("7.83")
+        stage="insert-reject-no-unit"
+        tap("evidence-save")
+        expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_be_visible(timeout=10000)
+        expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible()
+        stage="insert-unit"
+        tap("evidence-mmoll")
+        expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_have_count(0,timeout=10000)
+        stage="insert-commit"
+        tap("evidence-save")
         expect(page.get_by_text("7.83 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        stage="insert-projection"
         expect(page.get_by_text("141 mg/dL · 7.8 mmol/L",exact=True)).to_be_visible(timeout=20000)
         page.wait_for_timeout(350)
         shot("after-form-journal")
-        stage="edit"
+        stage="edit-open"
         click("Modifier","تعديل")
-        field.click(timeout=20000)
-        page.keyboard.press("Meta+a" if ENGINE=="webkit" else "Control+a")
-        page.keyboard.insert_text("8.2")
-        click("Enregistrer","حفظ")
+        stage="edit-native-input"
+        enter("8.2")
+        stage="edit-commit"
+        tap("evidence-save")
         expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
         stage="lock"
         page.evaluate("window.d1BoundLock()")
@@ -2225,6 +2249,13 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
                 "viewport":[width,height],"frames":frames,"result":"PASS"}
     except Exception:
+        # All data in this isolated profile is synthetic. Preserve an actual
+        # failure frame without printing browser exceptions or secrets.
+        try:
+            page.screenshot(path=str(proof/f"conv-ui-{ENGINE}-{locale}-{width}-failure-{stage}.png"),
+                            animations="disabled",timeout=10000)
+        except Exception:
+            pass
         raise RuntimeError("D1 D5 UI qualification failed stage="+stage+" viewport="+str(width)) from None
     finally:
         ctx.close()

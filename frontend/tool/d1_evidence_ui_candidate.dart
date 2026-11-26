@@ -123,20 +123,27 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                   Text(_editing == null ? tr('Ajouter une mesure', 'إضافة قياس') : tr('Modifier la mesure', 'تعديل القياس'),
                     style: Theme.of(context).textTheme.titleLarge),
                   const SizedBox(height: 12),
-                  TextField(controller: _value, enabled: !_busy,
+                  Semantics(identifier: 'evidence-value', child: TextField(
+                    key: const Key('evidence-value'), controller: _value, enabled: !_busy,
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     decoration: InputDecoration(labelText: tr('Valeur glycémique', 'قيمة السكر'),
-                      border: const OutlineInputBorder())),
+                      border: const OutlineInputBorder()))),
                   const SizedBox(height: 12),
                   Text(tr('Unité de saisie (obligatoire)', 'وحدة الإدخال (إلزامية)')),
                   Wrap(spacing: 8, children: [
                     for (final unit in ['mg/dL','mmol/L'])
-                      ChoiceChip(label: Text(unit), selected: _unit == unit,
-                        onSelected: _busy ? null : (selected) => setState(() => _unit = selected ? unit : null)),
+                      Semantics(identifier: unit == 'mg/dL' ? 'evidence-mgdl' : 'evidence-mmoll',
+                        child: ChoiceChip(key: ValueKey(unit), label: Text(unit), selected: _unit == unit,
+                          onSelected: _busy ? null : (selected) => setState(() {
+                            _unit = selected ? unit : null; _error = false;
+                          }))),
                   ]),
                   const SizedBox(height: 12),
-                  FilledButton(onPressed: _busy ? null : _save,
-                    child: Text(tr('Enregistrer', 'حفظ'))),
+                  Semantics(identifier: 'evidence-save', child: FilledButton(
+                    key: const Key('evidence-save'), onPressed: _busy ? null : _save,
+                    child: Text(tr('Enregistrer', 'حفظ')))),
+                  if (_error) Semantics(identifier: 'evidence-input-error', liveRegion: true,
+                    child: Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.'))),
                   if (_editing != null) TextButton(onPressed: _busy ? null : () => setState(() {
                     _editing = null; _unit = null; _value.clear();
                   }), child: Text(tr('Annuler', 'إلغاء'))),
@@ -176,7 +183,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                 ]),
               )),
             ],
-            if (_error) Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.')),
+            if (_owner == null && _error) Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.')),
             if (_busy) const LinearProgressIndicator(),
           ]),
         ))),
