@@ -1,5 +1,6 @@
 // CONV-02c.2: isolated synthetic qualification UI, never imported by lib/main.dart.
 import 'package:flutter/material.dart';
+import 'package:amina/core/theme/app_theme.dart' show kOfflineFontFallbacks;
 
 typedef EvidenceUiCall = Future<Map<String, dynamic>> Function(
     String action, Map<String, Object?> args);
@@ -18,6 +19,7 @@ class EvidenceUiCandidate extends StatefulWidget {
 
 class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
   final _value = TextEditingController();
+  final _valueFocus = FocusNode();
   int _generation = 0;
   int? _owner, _revision;
   String? _unit, _editing, _confirmDelete;
@@ -33,6 +35,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
 
   void _clear() {
     _generation++;
+    _valueFocus.unfocus();
     _value.clear();
     if (mounted) {
       setState(() {
@@ -86,12 +89,33 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
   void dispose() {
     widget.revoke.removeListener(_clear);
     _generation++;
+    _valueFocus.dispose();
     _value.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Bind the bundled families to both localized geometry and color styles.
+    // The synthetic screen must render without requesting CDN fallbacks.
+    final base = Theme.of(context);
+    final family = widget.arabic ? 'NotoSansArabic' : 'Inter';
+    TextTheme local(TextTheme theme) => theme.apply(
+      fontFamily: family, fontFamilyFallback: kOfflineFontFallbacks,
+    );
+    final typography = base.typography;
+    return Theme(data: base.copyWith(
+      textTheme: local(base.textTheme),
+      primaryTextTheme: local(base.primaryTextTheme),
+      typography: typography.copyWith(
+        black: local(typography.black), white: local(typography.white),
+        englishLike: local(typography.englishLike), dense: local(typography.dense),
+        tall: local(typography.tall),
+      ),
+    ), child: Builder(builder: _buildContent));
+  }
+
+  Widget _buildContent(BuildContext context) {
     return Directionality(
       textDirection: widget.arabic ? TextDirection.rtl : TextDirection.ltr,
       child: Scaffold(
@@ -125,6 +149,9 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                   const SizedBox(height: 12),
                   Semantics(identifier: 'evidence-value', child: TextField(
                     key: const Key('evidence-value'), controller: _value, enabled: !_busy,
+                    focusNode: _valueFocus, textDirection: TextDirection.ltr,
+                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                      fontFamily: 'Inter', fontFamilyFallback: kOfflineFontFallbacks),
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     decoration: InputDecoration(labelText: tr('Valeur glycémique', 'قيمة السكر'),
                       border: const OutlineInputBorder()))),
@@ -161,10 +188,13 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                   Text('${row['displayMgDl']} mg/dL · ${row['displayMmolL']} mmol/L',
                     textDirection: TextDirection.ltr),
                   Wrap(children: [
-                    TextButton(onPressed: _busy ? null : () => setState(() {
-                      _confirmDelete = null; _editing = row['uuid'] as String; _unit = row['originalUnit'] as String;
-                      _value.text = row['originalValue'].toString();
-                    }), child: Text(tr('Modifier', 'تعديل'))),
+                    TextButton(onPressed: _busy ? null : () {
+                      setState(() {
+                        _confirmDelete = null; _editing = row['uuid'] as String; _unit = row['originalUnit'] as String;
+                        _value.text = row['originalValue'].toString();
+                      });
+                      _valueFocus.requestFocus();
+                    }, child: Text(tr('Modifier', 'تعديل'))),
                     TextButton(onPressed: _busy ? null : () => setState(() {
                       _confirmDelete = row['uuid'] as String;
                     }), child: Text(tr('Supprimer', 'حذف'))),
