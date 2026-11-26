@@ -3,6 +3,10 @@
 import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:typed_data';
+import 'd1_evidence_ui_candidate.dart';
+import 'package:amina/core/theme/amina_visual_language.dart';
+import 'package:amina/core/theme/app_theme.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'package:amina/data/drift/database.dart';
 import 'package:amina/core/domain/glucose_quantity_evidence.dart';
@@ -22,6 +26,9 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:sqlite3/wasm.dart';
+
+@JS('d1MountEvidenceUi')
+external set _mountEvidenceUiFn(JSFunction function);
 
 @JS('d1Snapshot')
 external set _snapshotFn(JSFunction function);
@@ -902,6 +909,24 @@ void main() {
       _fullInspect(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
   _inspectFn = ((JSUint8Array bytes, JSNumber owner) =>
       _inspect(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
+  _mountEvidenceUiFn = ((JSFunction operation, JSFunction lock, JSFunction subscribe, JSBoolean arabic) {
+    final revoke = ValueNotifier<int>(0);
+    subscribe.callAsFunction(null, (() { revoke.value++; }).toJS);
+    Future<Map<String, dynamic>> call(String action, Map<String, Object?> args) async {
+      final promise = operation.callAsFunction(null, action.toJS, jsonEncode(args).toJS) as JSPromise<JSString>;
+      final result = await promise.toDart;
+      return Map<String, dynamic>.from(jsonDecode(result.toDart) as Map);
+    }
+    runApp(MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: AminaVisualLanguage.harmonize(AminaTheme.light),
+      locale: Locale(arabic.toDart ? 'ar' : 'fr'),
+      supportedLocales: const [Locale('fr'), Locale('ar')],
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
+      home: EvidenceUiCandidate(call: call, revoke: revoke,
+        lock: () { lock.callAsFunction(); }, arabic: arabic.toDart),
+    ));
+  }).toJS;
   runApp(const MaterialApp(home: Scaffold(
     body: Center(child: Text('D1-I1 synthetic Drift checkpoint probe')),
   )));

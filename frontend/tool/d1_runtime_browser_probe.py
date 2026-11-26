@@ -2087,6 +2087,142 @@ def exercise_journal_change(browser_type,profile,locale,origin):
         secrets=None
 
 
+UI_MOUNT = r"""async (arabic)=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const {generatePossessionSecret}=await import('/d1_possession_candidate.mjs');
+  const secrets=new Map();
+  for(const owner of [900001,900002]){
+    const secret=generatePossessionSecret();secrets.set(owner,secret);
+    const bootstrap=await api.enroll(owner,1,api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch:1}),secret);
+    await bootstrap.retire();
+  }
+  let active=null, owner=null, generation=0, retired=()=>{};
+  const t=1795564800, sentinel='ac123456-1234-4abc-8def-000000000099';
+  const clear=()=>{generation++;active=null;owner=null;retired();};
+  const lock=()=>{clear();window.d1BoundLock();};
+  const check=(g)=>{if(g!==generation)throw Error('UI authority retired');};
+  const call=async(action,json)=>{
+    const args=JSON.parse(json);
+    let g=generation;
+    try{
+      if(action==='open'){
+        if(active||![900001,900002].includes(args.owner))throw Error('Invalid fixture');
+        const target=args.owner;
+        await window.d1BoundLogin(target);check(g);
+        const proof=await window.d1BoundProof(target);check(g);
+        const authority=(phase,id,epoch,callback)=>proof(phase,id,epoch,phase==='watch'?()=>{
+          // Clear all visible state before forwarding the durable retirement.
+          if(g===generation)clear();
+          callback();
+        }:callback);
+        const session=await api.admitBoundClinical(target,window.d1BoundEpoch(),authority,secrets.get(target));
+        if(g!==generation){await session.retire();throw Error('UI authority retired');}
+        active=session;owner=target;
+      }else{
+        if(!active||!Number.isSafeInteger(args.revision))throw Error('UI authority required');
+        if(action==='insert')await active.insertEvidence(args.revision,crypto.randomUUID(),args.value,args.unit,t);
+        else if(action==='edit')await active.editEvidence(args.revision,args.uuid,args.value,args.unit,t);
+        else if(action==='delete')await active.deleteEvidence(args.revision,args.uuid);
+        else throw Error('Unsupported UI action');
+      }
+      check(g);
+      const revision=(await active.readEvidence(sentinel)).revision;check(g);
+      const journal=await active.readEvidenceJournal(revision,t,t+86400,50,0);check(g);
+      if(journal.nextOffset!==null)throw Error('Fixture capacity exceeded');
+      return JSON.stringify({owner,revision,rows:journal.rows});
+    }catch(_){
+      if(g===generation)lock();
+      throw Error('UI operation refused');
+    }
+  };
+  window.d1MountEvidenceUi(call,lock,cb=>{retired=cb;},arabic);
+}"""
+
+
+def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
+    from PIL import Image
+    from playwright.sync_api import expect
+    proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
+    proof.mkdir(parents=True,exist_ok=True)
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+    stage="before"
+    frames=[]
+    def shot(name):
+        path=proof/f"conv-ui-{ENGINE}-{locale}-{width}-{name}.png"
+        page.screenshot(path=str(path),animations="disabled",timeout=15000)
+        with Image.open(path) as im:
+            rgb=im.convert("RGB")
+            assert rgb.size==(width,height)
+            assert len(rgb.getcolors(width*height) or [])>50
+        frames.append({"name":name,"sha256":hashlib.sha256(path.read_bytes()).hexdigest(),"file":path.name})
+    def semantics():
+        page.wait_for_selector("flutter-view, flt-glass-pane",timeout=60000)
+        placeholder=page.locator("flt-semantics-placeholder")
+        if placeholder.count():
+            placeholder.evaluate("(el)=>el.click()")
+    ar=locale=="ar-MA"
+    def label(fr,arabic):
+        return arabic if ar else fr
+    def text(fr,arabic):
+        return page.get_by_text(label(fr,arabic),exact=True).first
+    def click(fr,arabic):
+        target=text(fr,arabic)
+        expect(target).to_be_visible(timeout=20000)
+        target.click(timeout=20000)
+    try:
+        page.set_viewport_size({"width":width,"height":height})
+        semantics()
+        expect(page.get_by_text("D1-I1 synthetic Drift checkpoint probe",exact=True)).to_be_visible(timeout=20000)
+        page.wait_for_timeout(350)
+        shot("before-probe")
+        stage="mount"
+        page.evaluate(UI_MOUNT,ar)
+        semantics()
+        expect(text("Coffre verrouillé","المخزن مقفل")).to_be_visible(timeout=20000)
+        page.wait_for_timeout(350)
+        shot("after-locked")
+        stage="open"
+        click("Ouvrir profil A","فتح الملف A")
+        expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
+        stage="insert"
+        field=page.get_by_role("textbox").first
+        field.fill("7.83")
+        click("Enregistrer","حفظ")
+        expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_be_visible()
+        page.get_by_text("mmol/L",exact=True).first.click()
+        click("Enregistrer","حفظ")
+        expect(page.get_by_text("7.83 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        expect(page.get_by_text("141 mg/dL · 7.8 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        page.wait_for_timeout(350)
+        shot("after-form-journal")
+        stage="edit"
+        click("Modifier","تعديل")
+        field.fill("8.2")
+        click("Enregistrer","حفظ")
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        stage="lock"
+        page.evaluate("window.d1BoundLock()")
+        expect(text("Coffre verrouillé","المخزن مقفل")).to_be_visible(timeout=20000)
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_have_count(0)
+        stage="other-owner"
+        click("Ouvrir profil B","فتح الملف B")
+        expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
+        click("Verrouiller","قفل")
+        click("Ouvrir profil A","فتح الملف A")
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        stage="delete"
+        click("Supprimer","حذف")
+        expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
+        click("Verrouiller","قفل")
+        assert not blocked and not errors
+        return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                "viewport":[width,height],"frames":frames,"result":"PASS"}
+    except Exception:
+        raise RuntimeError("D1 D5 UI qualification failed stage="+stage+" viewport="+str(width)) from None
+    finally:
+        ctx.close()
+
+
 def run():
     assert ENGINE in ("chromium", "webkit")
     assert (WEB / "main.dart.js").stat().st_size > 1000
@@ -2101,6 +2237,16 @@ def run():
             try:
                 with sync_playwright() as pw:
                     browser_type = getattr(pw, ENGINE)
+                    if os.environ.get("PHASE_BRANCH",os.environ.get("GITHUB_HEAD_REF"))=="phase2/d1-d5-convergence":
+                        ui_records=[]
+                        for width,height in ((390,844),(430,932),(1280,860)):
+                            for locale in ("fr-FR","ar-MA"):
+                                ui_records.append(exercise_evidence_ui(browser_type,
+                                    Path(root)/f"ui-{locale}-{width}",locale,origin,width,height))
+                        assert len(ui_records)==6
+                        proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
+                        (proof/f"conv-ui-{ENGINE}-matrix.json").write_text(json.dumps(ui_records))
+                        print("D1_D5_EVIDENCE_UI_PASS 6/6",flush=True)
                     for locale in ("fr-FR", "ar-MA"):
                         record = dict(source_sha=os.environ["EXPECTED_SHA"], engine=ENGINE, locale=locale,
                                       sqlite3_wasm_sha256=hashlib.sha256((WEB/"sqlite3.wasm").read_bytes()).hexdigest(),
