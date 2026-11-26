@@ -7,7 +7,7 @@ import 'glucose_quantity_evidence.dart';
 final class GlucoseQuantityStorageEnvelope {
   const GlucoseQuantityStorageEnvelope._();
 
-  static const int schemaVersion = 1;
+  static const String schemaVersion = 'v1';
   static const String conversionPolicy = 'glucose-molar-mass-v1';
   static const String _declared = 'user_entered';
   static const Set<String> _keys = {
@@ -28,7 +28,7 @@ final class GlucoseQuantityStorageEnvelope {
     return Map<String, Object>.unmodifiable({
       'version': schemaVersion,
       'client_uuid': clientUuid,
-      'original_value': evidence.originalRawValue.toString(),
+      'original_value': _numericToken(evidence.originalRawValue),
       'original_unit': evidence.originalUnit!.ucumCode,
       'provenance': _declared,
       'conversion_policy': conversionPolicy,
@@ -49,7 +49,6 @@ final class GlucoseQuantityStorageEnvelope {
     if (envelope == null) return null;
     if (envelope.length != _keys.length ||
         !envelope.keys.every(_keys.contains) ||
-        envelope['version'] is! int ||
         envelope['version'] != schemaVersion ||
         envelope['client_uuid'] != expectedClientUuid ||
         envelope['provenance'] != _declared ||
@@ -64,7 +63,7 @@ final class GlucoseQuantityStorageEnvelope {
     final unit = GlucoseSourceUnit.fromExplicitUcumCode(unitCode);
     final value = double.tryParse(raw);
     if (unit == null || value == null || !value.isFinite ||
-        value <= 0 || value.toString() != raw) {
+        value <= 0 || _numericToken(value) != raw) {
       throw const FormatException('Invalid or noncanonical glucose evidence');
     }
     try {
@@ -75,6 +74,11 @@ final class GlucoseQuantityStorageEnvelope {
       throw const FormatException('Unrepresentable glucose evidence');
     }
   }
+
+  // Dart JS and VM may stringify integral doubles differently. Normalize
+  // the insignificant trailing .0 before comparing the persisted token.
+  static String _numericToken(double value) =>
+      value.toString().replaceFirst(RegExp(r'\.0(?=e|$)'), '');
 
   static bool _validIdentity(String id) =>
       id.isNotEmpty && id.length <= 128 && id.trim() == id &&

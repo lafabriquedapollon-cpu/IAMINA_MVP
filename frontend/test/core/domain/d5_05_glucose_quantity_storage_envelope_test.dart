@@ -20,7 +20,7 @@ void main() {
 
   test('fixed versioned envelope, original data only', () {
     expect(envelope, {
-      'version': 1, 'client_uuid': id, 'original_value': '7.83',
+      'version': 'v1', 'client_uuid': id, 'original_value': '7.83',
       'original_unit': 'mmol/L', 'provenance': 'user_entered',
       'conversion_policy': 'glucose-molar-mass-v1',
     });
@@ -30,6 +30,7 @@ void main() {
   for (final (value, unit) in [
     (7.83, GlucoseSourceUnit.mmolL),
     (90.98, GlucoseSourceUnit.mgDl),
+    (90.0, GlucoseSourceUnit.mgDl),
     (0.25, GlucoseSourceUnit.mmolL),
     (1e-7, GlucoseSourceUnit.mgDl),
     (1e100, GlucoseSourceUnit.mgDl),
@@ -88,7 +89,7 @@ void main() {
 
   test('invalid versions, policy, provenance and unit fail closed', () {
     for (final (key, value) in <(String, Object?)>[
-      ('version', 2), ('version', 1.0), ('version', '1'),
+      ('version', 'v2'), ('version', 1), ('version', 1.0), ('version', '1'),
       ('conversion_policy', 'legacy'), ('provenance', 'device_verified'),
       ('provenance', 'legacy_unknown'), ('original_unit', 'mg/dl'),
       ('original_unit', 'MMOL/L'), ('original_unit', null),
@@ -102,7 +103,7 @@ void main() {
   test('raw field requires a positive finite canonical round-trip string', () {
     for (final raw in <Object?>[
       null, 7.83, '', ' 7.83', '7.830', '+7.83', 'NaN', 'Infinity',
-      '-1.0', '0.0', '-0.0', '1e999', '1e-999', '0' * 33,
+      '-1.0', '0.0', '-0.0', '90.0', '1e999', '1e-999', '0' * 33,
     ]) {
       expect(() => read({...envelope, 'original_value': raw}),
           throwsFormatException, reason: '$raw');
