@@ -3,9 +3,22 @@
 // No DB, keys, full audit, generic mutation, or injection hooks are exposed.
 export function createClinicalSession(operations, isActive) {
   let retired = false;
-  const retire = async () => {
+  let retirement = null;
+  const retire = () => {
+    // Local authority is lost synchronously, even if durable CAS fails.
     retired = true;
-    return operations.retire();
+    if (retirement === null) {
+      try {
+        retirement = Promise.resolve(operations.retire());
+      } catch (error) {
+        retirement = Promise.reject(error);
+      }
+      retirement = retirement.catch(error => {
+        retirement = null;
+        throw error;
+      });
+    }
+    return retirement;
   };
   const check = () => {
     if (retired || isActive() !== true) {

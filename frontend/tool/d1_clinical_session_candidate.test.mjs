@@ -74,3 +74,39 @@ test('failure to retire durably cannot re-enable the local handle', async () => 
   await assert.rejects(session.readTreatment(), /Durable revocation unconfirmed/);
   assert.deepEqual(f.calls, []);
 });
+
+test('concurrent and repeated retire calls share one durable acknowledgement', async () => {
+  const f = fixture();
+  let resolve, attempts = 0;
+  f.ops.retire = () => {
+    attempts++;
+    return new Promise(r => {resolve = r;});
+  };
+  const session = createClinicalSession(f.ops, f.active);
+  const a = session.retire();
+  const b = session.retire();
+  const rejected = assert.rejects(session.readTreatment(), /Bound authority retired/);
+  assert.equal(a, b);
+  assert.equal(attempts, 1);
+  resolve(true);
+  assert.equal(await a, true);
+  await rejected;
+  assert.equal(await session.retire(), true);
+  assert.equal(attempts, 1);
+  assert.deepEqual(f.calls, []);
+});
+
+test('failed durable retirement can retry without reopening any clinical port', async () => {
+  const f = fixture();
+  let attempts = 0;
+  f.ops.retire = () => {
+    if (++attempts === 1) throw Error('Durable revocation unconfirmed');
+    return Promise.resolve(true);
+  };
+  const session = createClinicalSession(f.ops, f.active);
+  await assert.rejects(session.retire(), /Durable revocation unconfirmed/);
+  assert.equal(await session.retire(), true);
+  await assert.rejects(session.readGlucose('uuid'), /Bound authority retired/);
+  assert.equal(attempts, 2);
+  assert.deepEqual(f.calls, []);
+});
