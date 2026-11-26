@@ -1239,5 +1239,6 @@ jobs:
           flutter test --no-pub --reporter expanded test/core/domain/d5_01_glucose_independent_oracle_test.dart test/core/domain/glucose_quantity_evidence_test.dart
           flutter test --no-pub --reporter expanded test/core/domain/d5_05_glucose_display_projection_test.dart
           flutter test --no-pub --reporter expanded test/core/domain/d5_05_glucose_quantity_storage_envelope_test.dart
+          flutter test --no-pub --reporter expanded test/data/drift/d5_06_glucose_quantity_candidate_store_test.dart
           flutter test --no-pub --reporter expanded test/data/drift/d5_02_dashboard_temporal_oracle_test.dart
           flutter test --no-pub --reporter expanded test/features/d5_03_dashboard_aggregate_oracle_test.dart test/features/dashboard_trend_contract_test.dart
