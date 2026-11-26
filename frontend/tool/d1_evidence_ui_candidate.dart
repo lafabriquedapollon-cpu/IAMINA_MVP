@@ -117,7 +117,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
             ] else ...[
               Text(_owner == 900001 ? tr('Profil A', 'الملف A') : tr('Profil B', 'الملف B')),
               const SizedBox(height: 12),
-              Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
+              Card(semanticContainer: false, child: Padding(padding: const EdgeInsets.all(16), child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(_editing == null ? tr('Ajouter une mesure', 'إضافة قياس') : tr('Modifier la mesure', 'تعديل القياس'),
@@ -153,7 +153,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
               Text(tr('Mesures enregistrées', 'القياسات المسجلة'),
                 style: Theme.of(context).textTheme.titleLarge),
               if (_rows.isEmpty) Text(tr('Aucune mesure explicite', 'لا توجد قياسات صريحة')),
-              for (final row in _rows) Card(child: Padding(padding: const EdgeInsets.all(12),
+              for (final row in _rows) Card(semanticContainer: false, child: Padding(padding: const EdgeInsets.all(12),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text('${row['originalValue']} ${row['originalUnit']}',
                     textDirection: TextDirection.ltr,
