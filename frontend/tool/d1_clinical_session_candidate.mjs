@@ -47,6 +47,8 @@ export function createClinicalSession(operations, isActive) {
     deleteGlucose: (...args) => perform('deleteGlucose', 2, args),
     readEvidence: (...args) => perform('readEvidence', 1, args),
     insertEvidence: (...args) => perform('insertEvidence', 5, args),
+    editEvidence: (...args) => perform('editEvidence', 5, args),
+    deleteEvidence: (...args) => perform('deleteEvidence', 2, args),
     readTreatment: (...args) => perform('readTreatment', 0, args),
     writeTreatment: (...args) => perform('writeTreatment', 3, args),
     retire,

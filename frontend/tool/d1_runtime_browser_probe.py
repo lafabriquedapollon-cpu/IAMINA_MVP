@@ -885,7 +885,7 @@ I5_BOUND = r"""async ()=>{
   stage("legacy-clinical");
   const clinicalTicket=await ticket();
   const clinical=await api.admitBoundClinical(A,epoch(),clinicalTicket,a);
-  const allowed=['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readEvidence','insertEvidence','readTreatment','writeTreatment','retire'];
+  const allowed=['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readEvidence','insertEvidence','editEvidence','deleteEvidence','readTreatment','writeTreatment','retire'];
   check(Object.isFrozen(clinical)&&Object.getPrototypeOf(clinical)===null&&
     JSON.stringify(Object.keys(clinical))===JSON.stringify(allowed),'Unexpected clinical surface');
   const u='ac123456-1234-4abc-8def-000000000010',t=1795564800;
@@ -936,8 +936,46 @@ I5_BOUND = r"""async ()=>{
   const other=await api.admitBoundClinical(B,epoch(),await window.d1BoundProof(B),b);
   check((await other.readEvidence(v)).evidence===null,'Evidence owner leak');
   await other.retire();
+  stage("evidence-mutations");
+  await window.d1BoundLogin(A);
+  const open=async()=>{const proof=await ticket();return api.admitBoundClinical(A,epoch(),proof,a);};
+  e=await open();
+  const replay=await e.insertEvidence(3,v,7.83,'mmol/L',t+1);
+  check(replay.replay===true&&replay.revision===4,'Insert replay failed');
+  const edit=await e.editEvidence(4,v,145,'mg/dL',t+2);
+  check(edit.revision===5&&edit.replay===false&&edit.evidence.originalUnit==='mg/dL'&&
+    edit.evidence.originalValue===145&&edit.evidence.displayMgDl==='145','Evidence edit failed');
+  await e.retire();
+  e=await open();
+  check((await e.editEvidence(4,v,145,'mg/dL',t+2)).replay===true,'Edit replay failed');
+  await reject(()=>e.editEvidence(4,v,146,'mg/dL',t+2),'Checkpoint conflict');
+  e=await open();
+  check((await e.readEvidence(v)).evidence.originalValue===145,'Stale edit changed row');
+  const lostProof=await ticket();
+  const raw=await api.admitBound(A,epoch(),lostProof,a);
+  await reject(()=>raw.deleteEvidence(5,v,{beforeCommit:()=>window.d1BoundLock()}),'Bound authority retired');
+  e=await open();
+  check((await e.readEvidence(v)).revision===5,'Retired delete committed');
+  const ackProof=await ticket();
+  const ack=await api.admitBound(A,epoch(),ackProof,a);
+  await reject(()=>ack.deleteEvidence(5,v,{beforeAck:()=>window.d1BoundLock()}),'Bound authority retired');
+  e=await open();
+  const gone=await e.readEvidence(v);
+  check(gone.revision===6&&gone.evidence===null,'Lost acknowledgement deletion missing');
+  check((await e.deleteEvidence(5,v)).replay===true,'Delete replay failed');
+  await reject(()=>e.insertEvidence(6,v,145,'mg/dL',t+2),'Existing or deleted measurement identity');
+  e=await open();
+  await reject(()=>e.deleteGlucose(6,v),'Explicit evidence requires dedicated port');
+  e=await open();
+  check((await e.readEvidence(v)).revision===6,'Rejected mutation changed revision');
+  await e.retire();
+  await window.d1BoundLogin(B);
+  const proofB=await window.d1BoundProof(B);
+  const b2=await api.admitBoundClinical(B,epoch(),proofB,b);
+  check((await b2.readEvidence(v)).revision===1,'B revision changed');
+  await b2.retire();
   stage("complete");
-  return {negativeCases:negatives+1,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true,idleRevocation:true,clinicalPort:true,clinicalRevisionA:3,explicitEvidence:true,evidenceRevision:4};
+  return {negativeCases:negatives+1,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true,idleRevocation:true,clinicalPort:true,clinicalRevisionA:3,explicitEvidence:true,evidenceRevision:4,evidenceMutationRevision:6};
 }"""
 
 
@@ -947,7 +985,7 @@ def exercise_bound(browser_type,profile,locale,origin):
         result=page.evaluate(I5_BOUND)
         assert result=={"negativeCases":9,"revisionA":2,"revisionB":1,
                        "leaseBeforeOpen":True,"retiredFenceCleared":True,"idleRevocation":True,
-                       "clinicalPort":True,"clinicalRevisionA":3,"explicitEvidence":True,"evidenceRevision":4}
+                       "clinicalPort":True,"clinicalRevisionA":3,"explicitEvidence":True,"evidenceRevision":4,"evidenceMutationRevision":6}
         assert not blocked and not errors
         return result
     except Exception:
@@ -960,7 +998,7 @@ def exercise_bound(browser_type,profile,locale,origin):
                              "evidence-admission", "evidence-legacy", "evidence-insert",
                              "evidence-projection", "evidence-reopen", "evidence-duplicate",
                              "evidence-old-port", "evidence-lock", "evidence-owner-isolation",
-                             "complete"}:
+                             "evidence-mutations", "complete"}:
                 stage = candidate
         except Exception:
             pass
@@ -2016,6 +2054,7 @@ def run():
     print("D1_I5_BOUND_ADMISSION_PASS 2/2",flush=True)
     print("D1_I5D_CLINICAL_PORT_PASS 2/2",flush=True)
     print("D1_D5_EXPLICIT_EVIDENCE_PASS 2/2",flush=True)
+    print("D1_D5_EVIDENCE_MUTATION_PASS 2/2",flush=True)
     print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
     print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
     print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)

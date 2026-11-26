@@ -45,8 +45,10 @@ external set _glucoseReadFn(JSFunction function);
 external set _glucoseInsertFn(JSFunction function);
 @JS('d1EvidenceRead')
 external set _evidenceReadFn(JSFunction function);
-@JS('d1EvidenceInsert')
-external set _evidenceInsertFn(JSFunction function);
+@JS('d1EvidenceChange')
+external set _evidenceChangeFn(JSFunction function);
+@JS('d1EvidenceState')
+external set _evidenceStateFn(JSFunction function);
 @JS('d1TreatmentRead')
 external set _treatmentReadFn(JSFunction function);
 @JS('d1TreatmentChange')
@@ -153,6 +155,8 @@ const _marker = 'D1_I1_SYNTHETIC_NOT_PATIENT';
 const _glucoseMarker = 'D1_I5C_SYNTHETIC_GLUCOSE';
 const _evidenceMarker = 'CONV_02_SYNTHETIC_EXPLICIT_GLUCOSE';
 const _evidenceTable = 'd1_d5_fixture_evidence_v1';
+const _evidenceDeletedTable = 'd1_d5_fixture_deleted_v1';
+const _evidenceReceiptTable = 'd1_d5_fixture_receipt_v1';
 final _fixtureUuid = RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$');
 const _owners = [900001, 900002];
 
@@ -217,6 +221,7 @@ class _MemoryVault {
            row.source == 'manual' && row.bloodSugar.isFinite && row.bloodSugar > 0 &&
            row.loggedAt != null && row.insulinUnits == null && row.syncStatus == 'd5_candidate_local')), 'Synthetic rows mismatch');
     await _validateEvidenceRows(db, owner, rows);
+    await _validateEvidenceMutationState(db, owner, rows);
     if (await _hasTombstones(db)) {
       final deleted = await db.customSelect('SELECT uuid FROM d1_fixture_deleted_glucose ORDER BY uuid').get();
       for (final entry in deleted) {
@@ -347,6 +352,11 @@ Future<String> _fullInspect(Uint8List bytes, int owner) async {
     if (await _hasEvidence(db)) {
       tables[_evidenceTable] = (await db.customSelect('SELECT * FROM $_evidenceTable ORDER BY client_uuid').get()).map((r) => r.data).toList();
     }
+    for (final table in [_evidenceDeletedTable, _evidenceReceiptTable]) {
+      if (await _hasFixtureTable(db, table)) {
+        tables[table] = (await db.customSelect('SELECT * FROM $table ORDER BY 1').get()).map((r) => r.data).toList();
+      }
+    }
     _require(tables['patient_profiles']!.length == 1 &&
         tables['patient_profiles']!.single['user_id'] == owner,
         'Profile owner mismatch');
@@ -468,6 +478,7 @@ Future<bool> _hasTombstones(AppDatabase db) async =>
 
 Future<bool> _isDeleted(AppDatabase db, String uuid) async {
   _require(_fixtureUuid.hasMatch(uuid), 'Invalid measurement UUID');
+  if (await _evidenceDeleted(db, uuid)) return true;
   if (!await _hasTombstones(db)) return false;
   final rows = await db.customSelect(
       'SELECT uuid FROM d1_fixture_deleted_glucose WHERE uuid = ?',
@@ -663,31 +674,123 @@ Future<String> _readEvidence(Uint8List input, int owner, String uuid) async {
   }
 }
 
-Future<Uint8List> _insertEvidence(Uint8List input, int owner, String uuid,
-    double original, String unitCode, int seconds) async {
+Future<bool> _hasFixtureTable(AppDatabase db, String table) async =>
+    (await db.customSelect("SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+      variables: [Variable<String>(table)]).get()).isNotEmpty;
+
+Future<bool> _evidenceDeleted(AppDatabase db, String uuid) async {
+  if (!await _hasFixtureTable(db, _evidenceDeletedTable)) return false;
+  final rows = await db.customSelect('SELECT client_uuid FROM $_evidenceDeletedTable WHERE client_uuid = ?',
+      variables: [Variable<String>(uuid)]).get();
+  _require(rows.length <= 1, 'Duplicate evidence tombstone');
+  return rows.isNotEmpty;
+}
+
+Future<Map<String, Object?>?> _evidenceReceipt(AppDatabase db, int owner) async {
+  if (!await _hasFixtureTable(db, _evidenceReceiptTable)) return null;
+  final rows = await db.customSelect('SELECT * FROM $_evidenceReceiptTable').get();
+  _require(rows.length == 1, 'Evidence receipt cardinality');
+  final row = rows.single;
+  final action = row.read<String>('action');
+  final uuid = row.read<String>('client_uuid');
+  final revision = row.read<int>('base_revision');
+  _require(row.read<int>('singleton') == 1 && row.read<int>('owner_id') == owner &&
+      _fixtureUuid.hasMatch(uuid) && ['insert','edit','delete'].contains(action) &&
+      revision > 0 && revision < 0xffffffff, 'Invalid evidence receipt');
+  return {'action':action,'uuid':uuid,'baseRevision':revision};
+}
+
+Future<void> _validateEvidenceMutationState(AppDatabase db, int owner, List<LogEntryData> rows) async {
+  final live = {for (final row in rows) row.clientUuid: row};
+  if (await _hasFixtureTable(db, _evidenceDeletedTable)) {
+    final deleted = await db.customSelect('SELECT * FROM $_evidenceDeletedTable').get();
+    final seen = <String>{};
+    for (final row in deleted) {
+      final uuid = row.read<String>('client_uuid');
+      _require(_fixtureUuid.hasMatch(uuid) && row.read<int>('owner_id') == owner &&
+          seen.add(uuid) && !live.containsKey(uuid), 'Invalid evidence tombstone');
+    }
+  }
+  final receipt = await _evidenceReceipt(db, owner);
+  if (receipt != null) {
+    final uuid = receipt['uuid'] as String;
+    _require(receipt['action'] == 'delete'
+        ? await _evidenceDeleted(db, uuid)
+        : live[uuid]?.mealDescription == _evidenceMarker, 'Evidence receipt mismatch');
+  }
+}
+
+Future<String> _evidenceState(Uint8List input, int owner, String uuid) async {
+  _require(_fixtureUuid.hasMatch(uuid), 'Invalid measurement UUID');
+  final vault = await _MemoryVault.open(owner, input);
+  try {
+    await vault.inspect();
+    final db = vault.db;
+    final row = await (db.select(db.logEntries)..where((r) => r.clientUuid.equals(uuid))).getSingleOrNull();
+    final deleted = await _evidenceDeleted(db, uuid);
+    return jsonEncode({
+      'state': deleted ? 'deleted' : row == null ? (await _isDeleted(db, uuid) ? 'legacy_deleted' : 'missing') :
+          row.mealDescription == _evidenceMarker ? 'explicit' : 'legacy',
+      'receipt': await _evidenceReceipt(db, owner),
+    });
+  } finally {
+    try { await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
+// All mutation state is included in the encrypted checkpoint CAS. A receipt
+// contains no glucose value, unit or timestamp; only the last evidence operation.
+Future<Uint8List> _changeEvidence(Uint8List input, int owner, String uuid,
+    String action, int revision, double original, String unitCode, int seconds) async {
   final unit = GlucoseSourceUnit.fromExplicitUcumCode(unitCode);
-  _require(_fixtureUuid.hasMatch(uuid) && unit != null &&
-      seconds > 0 && seconds <= 4102444800, 'Invalid explicit measurement');
-  final evidence = GlucoseQuantityEvidence.userEntry(originalValue: original, declaredUnit: unit!);
-  final envelope = GlucoseQuantityStorageEnvelope.encode(clientUuid: uuid, evidence: evidence);
+  _require(_fixtureUuid.hasMatch(uuid) && revision > 0 && revision < 0xffffffff &&
+      (action == 'delete' || (['insert','edit'].contains(action) && unit != null &&
+        seconds > 0 && seconds <= 4102444800)), 'Invalid evidence mutation');
+  final evidence = action == 'delete' ? null :
+      GlucoseQuantityEvidence.userEntry(originalValue: original, declaredUnit: unit!);
+  final envelope = evidence == null ? null :
+      GlucoseQuantityStorageEnvelope.encode(clientUuid: uuid, evidence: evidence);
   final vault = await _MemoryVault.open(owner, input);
   var closed = false;
   try {
     await vault.inspect();
     final db = vault.db;
     await db.transaction(() async {
-      _require(!await _isDeleted(db, uuid) &&
-          (await (db.select(db.logEntries)..where((r) => r.clientUuid.equals(uuid))).get()).isEmpty,
-          'Existing or deleted measurement identity');
-      await db.customStatement('CREATE TABLE IF NOT EXISTS $_evidenceTable (client_uuid TEXT NOT NULL PRIMARY KEY, owner_id INTEGER NOT NULL, envelope_json TEXT NOT NULL)');
-      final time = DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
-      await db.into(db.logEntries).insert(LogEntriesCompanion.insert(
-        clientUuid: uuid, createdAt: time, loggedAt: Value(time),
-        bloodSugar: evidence.canonicalMgDl!, mealDescription: const Value(_evidenceMarker),
-        syncStatus: const Value('d5_candidate_local'),
-      ));
-      await db.customStatement('INSERT INTO $_evidenceTable (client_uuid, owner_id, envelope_json) VALUES (?, ?, ?)',
-        [uuid, owner, jsonEncode(envelope)]);
+      final row = await (db.select(db.logEntries)..where((r) => r.clientUuid.equals(uuid))).getSingleOrNull();
+      _require(!await _isDeleted(db, uuid), 'Existing or deleted measurement identity');
+      if (action == 'insert') {
+        _require(row == null, 'Existing or deleted measurement identity');
+        await db.customStatement('CREATE TABLE IF NOT EXISTS $_evidenceTable (client_uuid TEXT NOT NULL PRIMARY KEY, owner_id INTEGER NOT NULL, envelope_json TEXT NOT NULL)');
+        final time = DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+        await db.into(db.logEntries).insert(LogEntriesCompanion.insert(
+          clientUuid: uuid, createdAt: time, loggedAt: Value(time),
+          bloodSugar: evidence!.canonicalMgDl!, mealDescription: const Value(_evidenceMarker),
+          syncStatus: const Value('d5_candidate_local'),
+        ));
+        await db.customStatement('INSERT INTO $_evidenceTable (client_uuid, owner_id, envelope_json) VALUES (?, ?, ?)',
+          [uuid, owner, jsonEncode(envelope)]);
+      } else {
+        _require(row != null && row.mealDescription == _evidenceMarker, 'Explicit evidence unavailable');
+        final id = row!.id;
+        if (action == 'delete') {
+          await db.customStatement('CREATE TABLE IF NOT EXISTS $_evidenceDeletedTable (client_uuid TEXT NOT NULL PRIMARY KEY, owner_id INTEGER NOT NULL)');
+          await db.customStatement('INSERT INTO $_evidenceDeletedTable (client_uuid, owner_id) VALUES (?, ?)', [uuid, owner]);
+          await db.customStatement('DELETE FROM $_evidenceTable WHERE client_uuid = ? AND owner_id = ?', [uuid, owner]);
+          await db.deleteLog(id);
+        } else {
+          final time = DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+          await db.updateLog(id, LogEntriesCompanion(
+            bloodSugar: Value(evidence!.canonicalMgDl!), loggedAt: Value(time),
+          ));
+          await db.customStatement('UPDATE $_evidenceTable SET envelope_json = ? WHERE client_uuid = ? AND owner_id = ?',
+            [jsonEncode(envelope), uuid, owner]);
+          final after = await (db.select(db.logEntries)..where((r) => r.clientUuid.equals(uuid))).getSingle();
+          _require(after.id == id && after.createdAt == row.createdAt, 'Evidence identity changed');
+        }
+      }
+      await db.customStatement('CREATE TABLE IF NOT EXISTS $_evidenceReceiptTable (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), owner_id INTEGER NOT NULL, client_uuid TEXT NOT NULL, action TEXT NOT NULL, base_revision INTEGER NOT NULL)');
+      await db.customStatement('INSERT OR REPLACE INTO $_evidenceReceiptTable (singleton, owner_id, client_uuid, action, base_revision) VALUES (1, ?, ?, ?, ?)', [owner, uuid, action, revision]);
     });
     await vault.inspect();
     await db.close();
@@ -736,8 +839,10 @@ void main() {
           .then((value) => value.toJS).toJS).toJS;
   _evidenceReadFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid) =>
       _readEvidence(bytes.toDart, owner.toDartInt, uuid.toDart).then((value) => value.toJS).toJS).toJS;
-  _evidenceInsertFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid, JSNumber original, JSString unit, JSNumber seconds) =>
-      _insertEvidence(bytes.toDart, owner.toDartInt, uuid.toDart, original.toDartDouble, unit.toDart, seconds.toDartInt)
+  _evidenceStateFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid) =>
+      _evidenceState(bytes.toDart, owner.toDartInt, uuid.toDart).then((value) => value.toJS).toJS).toJS;
+  _evidenceChangeFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid, JSString action, JSNumber revision, JSNumber original, JSString unit, JSNumber seconds) =>
+      _changeEvidence(bytes.toDart, owner.toDartInt, uuid.toDart, action.toDart, revision.toDartInt, original.toDartDouble, unit.toDart, seconds.toDartInt)
           .then((value) => value.toJS).toJS).toJS;
   _treatmentReadFn = ((JSUint8Array bytes, JSNumber owner) =>
       _readTreatment(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;

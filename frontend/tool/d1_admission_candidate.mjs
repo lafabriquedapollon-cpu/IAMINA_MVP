@@ -282,8 +282,8 @@ class AdmissionSession {
     try{
       const r=await this.#read();
       bytes=await decrypt(r,key,owner);this.#local();
-      const explicit=JSON.parse(await window.d1EvidenceRead(bytes,owner,uuid));this.#local();
-      require(explicit===null,'Explicit evidence requires dedicated port');
+      const explicit=JSON.parse(await window.d1EvidenceState(bytes,owner,uuid));this.#local();
+      require(!['explicit','deleted'].includes(explicit.state),'Explicit evidence requires dedicated port');
       const deleted=await window.d1GlucoseDeleted(bytes,owner,uuid);this.#local();
       const existing=JSON.parse(await window.d1GlucoseRead(bytes,owner,uuid));this.#local();
       if(action==='delete'&&deleted===true){
@@ -337,38 +337,53 @@ class AdmissionSession {
       return {revision:r.revision,evidence};
     }finally{bytes?.fill(0);}
   }
-  async insertEvidence(expectedRevision,uuid,original,unit,seconds){
+  async changeEvidence(expectedRevision,uuid,action,original,unit,seconds,{beforeCommit,beforeAck}={}){
     require(this.#guard,'Bound authority required');this.#local();
     require(Number.isSafeInteger(expectedRevision)&&expectedRevision>0&&
       typeof uuid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)&&
-      Number.isFinite(original)&&original>0&&['mg/dL','mmol/L'].includes(unit)&&
-      Number.isSafeInteger(seconds)&&seconds>0&&seconds<=4102444800,'Invalid explicit measurement');
+      (action==='delete'||(['insert','edit'].includes(action)&&Number.isFinite(original)&&original>0&&
+      ['mg/dL','mmol/L'].includes(unit)&&Number.isSafeInteger(seconds)&&seconds>0&&seconds<=4102444800)),
+      'Invalid explicit measurement');
     require(!this.#busy,'Mutation already pending');this.#busy=true;
     let bytes,next;
     const owner=this.#lease.owner,key=this.#key;
+    const matches=m=>action==='delete'?m===null:
+      m?.uuid===uuid&&m.originalValue===original&&m.originalUnit===unit&&m.loggedAtSeconds===seconds&&
+      Number.isFinite(m.mgDl)&&m.mgDl>0&&m.provenance==='user_entered';
+    const receiptMatches=r=>r?.uuid===uuid&&r.action===action&&r.baseRevision===expectedRevision;
     try{
       const r=await this.#read();
-      require(r.revision===expectedRevision&&r.revision<0xffffffff,'Checkpoint conflict');
       bytes=await decrypt(r,key,owner);this.#local();
-      // Stable rejection at the JS port; Dart still enforces all UUID and
-      // metadata invariants in its transaction.
+      const status=JSON.parse(await window.d1EvidenceState(bytes,owner,uuid));this.#local();
       const existing=JSON.parse(await window.d1EvidenceRead(bytes,owner,uuid));this.#local();
-      require(existing===null,'Existing or deleted measurement identity');
-      next=await window.d1EvidenceInsert(bytes,owner,uuid,original,unit,seconds);this.#local();
+      if(r.revision===expectedRevision+1&&receiptMatches(status.receipt)&&
+          status.state===(action==='delete'?'deleted':'explicit')&&matches(existing)){
+        const current=await this.#read();this.#local();
+        require(sameRecord(current,r),'Checkpoint conflict');
+        return {revision:r.revision,replay:true,evidence:existing};
+      }
+      require(r.revision===expectedRevision&&r.revision<0xffffffff,'Checkpoint conflict');
+      require(action==='insert'?status.state==='missing':status.state==='explicit',
+        action==='insert'?'Existing or deleted measurement identity':'Explicit evidence unavailable');
+      next=await window.d1EvidenceChange(bytes,owner,uuid,action,expectedRevision,original,unit,seconds);this.#local();
+      const after=JSON.parse(await window.d1EvidenceState(next,owner,uuid));this.#local();
       const evidence=JSON.parse(await window.d1EvidenceRead(next,owner,uuid));this.#local();
-      require(evidence?.uuid===uuid&&evidence.originalValue===original&&evidence.originalUnit===unit&&
-        evidence.loggedAtSeconds===seconds&&Number.isFinite(evidence.mgDl)&&evidence.mgDl>0&&
-        evidence.provenance==='user_entered','Evidence invariant failed');
+      require(after.state===(action==='delete'?'deleted':'explicit')&&receiptMatches(after.receipt)&&matches(evidence),
+        'Evidence invariant failed');
       const revision=r.revision+1;
       const archive=await encrypt(next,key,owner,revision);this.#local();
+      if(beforeCommit)await beforeCommit();
+      this.#local();
       await transaction(owner,true,(current,f,store)=>{
         this.#local();
         require(fenceMatches(f,this.#lease),'Admission fence retired');
         require(sameRecord(current,r),'Checkpoint conflict');
         store.put({revision,envelope:r.envelope,archive},'owner:'+owner);
       });
-      await this.#verifyFence();this.#local();
-      return {revision,evidence};
+      if(beforeAck)await beforeAck();
+      const current=await this.#read();this.#local();
+      require(sameRecord(current,{revision,envelope:r.envelope,archive}),'Checkpoint conflict');
+      return {revision,replay:false,evidence};
     }finally{bytes?.fill(0);next?.fill(0);this.#busy=false;}
   }
   async readTreatment(){
@@ -628,7 +643,9 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
       editGlucose:(revision,uuid,mgDl,unit,seconds,hooks)=>perform(()=>session.changeGlucose(revision,uuid,'edit',mgDl,unit,seconds,hooks)),
       deleteGlucose:(revision,uuid,hooks)=>perform(()=>session.changeGlucose(revision,uuid,'delete',0,'mg/dL',0,hooks)),
       readEvidence:uuid=>perform(()=>session.readEvidence(uuid)),
-      insertEvidence:(revision,uuid,original,unit,seconds)=>perform(()=>session.insertEvidence(revision,uuid,original,unit,seconds)),
+      insertEvidence:(revision,uuid,original,unit,seconds,hooks)=>perform(()=>session.changeEvidence(revision,uuid,'insert',original,unit,seconds,hooks)),
+      editEvidence:(revision,uuid,original,unit,seconds,hooks)=>perform(()=>session.changeEvidence(revision,uuid,'edit',original,unit,seconds,hooks)),
+      deleteEvidence:(revision,uuid,hooks)=>perform(()=>session.changeEvidence(revision,uuid,'delete',0,'mg/dL',0,hooks)),
       readTreatment:()=>perform(()=>session.readTreatment()),
       writeTreatment:(revision,state,codes,hooks)=>perform(()=>session.writeTreatment(revision,state,codes,hooks)),
       mutate:(operation,hooks)=>perform(()=>session.mutate(operation,hooks)),

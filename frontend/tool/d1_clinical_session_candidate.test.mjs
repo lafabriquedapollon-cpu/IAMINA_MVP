@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createClinicalSession} from './d1_clinical_session_candidate.mjs';
 
-const names = ['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readEvidence','insertEvidence','readTreatment','writeTreatment'];
+const names = ['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readEvidence','insertEvidence','editEvidence','deleteEvidence','readTreatment','writeTreatment'];
 function fixture() {
   let active = true;
   const calls = [];
@@ -27,7 +27,8 @@ test('frozen null-prototype facade exposes only clinical operations', async () =
     ['insertGlucose', 1, 'uuid', 100, 'mg/dL', 100],
     ['editGlucose', 1, 'uuid', 120, 'mg/dL', 100],
     ['deleteGlucose', 1, 'uuid'], ['readEvidence','uuid'],
-    ['insertEvidence', 1, 'uuid', 7.83, 'mmol/L', 100], ['readTreatment'],
+    ['insertEvidence', 1, 'uuid', 7.83, 'mmol/L', 100],
+    ['editEvidence', 2, 'uuid', 145, 'mg/dL', 101], ['deleteEvidence', 3, 'uuid'], ['readTreatment'],
     ['writeTreatment', 1, 'declared', ['insulin']],
   ];
   for (const [name, ...args] of vectors) {
