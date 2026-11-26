@@ -2208,6 +2208,29 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         result["refusalTextCount"]=text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.").count()
         result["emptyJournalCount"]=text("Aucune mesure explicite","لا توجد قياسات صريحة").count()
         result["nativeFocusCount"]=page.locator("input:focus, textarea:focus").count()
+        result["lockedCount"]=text("Coffre verrouillé","المخزن مقفل").count()
+        result["blockedCount"]=len(blocked)
+        result["pageErrorCount"]=len(errors)
+        # Fixed allowlist categories only: no raw URL, query, error or identifier.
+        from urllib.parse import urlsplit
+        def blocked_kind(url):
+            u=urlsplit(url)
+            if u.hostname in ("fonts.gstatic.com","fonts.googleapis.com"):
+                return "external-font"
+            if u.hostname in ("127.0.0.1","localhost"):
+                return "local-api" if "/api/" in u.path else "local-other"
+            return "other-external"
+        def error_kind(error):
+            for needle, category in (
+                ("ResizeObserver","resize-observer"),("Unexpected null","unexpected-null"),
+                ("Null check operator","null-check"),("disposed","disposed"),
+                ("StateError","state-error"),("TypeError","type-error"),
+                ("Failed to fetch","fetch-failure"),("Script error","script-error")):
+                if needle.lower() in error.lower():
+                    return category
+            return "unclassified"
+        result["blockedKinds"]=sorted(set(blocked_kind(u) for u in blocked))
+        result["pageErrorKinds"]=sorted(set(error_kind(e) for e in errors))
         return result
     def enter(value):
         tap("evidence-value")
@@ -2271,16 +2294,27 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         click("Verrouiller","قفل")
         click("Ouvrir profil A","فتح الملف A")
         expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
-        stage="delete"
+        stage="delete-open"
         click("Supprimer","حذف")
         expect(text("Confirmer la suppression","تأكيد الحذف")).to_be_visible()
+        stage="delete-cancel"
         click("Conserver","احتفاظ")
         expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible()
+        stage="delete-confirm"
         click("Supprimer","حذف")
         click("Confirmer la suppression","تأكيد الحذف")
+        stage="delete-journal-empty"
         expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_have_count(0)
+        shot("after-delete")
+        stage="final-lock"
         click("Verrouiller","قفل")
-        assert not blocked and not errors
+        expect(text("Coffre verrouillé","المخزن مقفل")).to_be_visible(timeout=20000)
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_have_count(0)
+        stage="final-egress"
+        assert not blocked
+        stage="final-pageerror"
+        assert not errors
         return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
                 "viewport":[width,height],"frames":frames,"result":"PASS"}
     except Exception as failure:
