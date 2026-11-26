@@ -1,0 +1,96 @@
+{
+  "source": "https://webbook.nist.gov/cgi/cbook.cgi?ID=50-99-7",
+  "molarMassGramPerMol": "180.1559",
+  "cases": [
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "1",
+      "mgDl": "18.01559",
+      "mmolL": "1"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "5",
+      "mgDl": "90.07795",
+      "mmolL": "5"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "7",
+      "mgDl": "126.10913",
+      "mmolL": "7"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "10",
+      "mgDl": "180.15590",
+      "mmolL": "10"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "7.83",
+      "mgDl": "141.0620697",
+      "mmolL": "7.83"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "0.25",
+      "mgDl": "4.5038975",
+      "mmolL": "0.25"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "90",
+      "mgDl": "90",
+      "mmolL": "4.995673191940980"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "126",
+      "mgDl": "126",
+      "mmolL": "6.993942468717372"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "180",
+      "mgDl": "180",
+      "mmolL": "9.991346383881960"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "90.98",
+      "mgDl": "90.98",
+      "mmolL": "5.050070522253226"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "18.01559",
+      "mgDl": "18.01559",
+      "mmolL": "1"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "90.07795",
+      "mgDl": "90.07795",
+      "mmolL": "5"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "126.10913",
+      "mgDl": "126.10913",
+      "mmolL": "7"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "180.1559",
+      "mgDl": "180.1559",
+      "mmolL": "10"
+    }
+  ],
+  "legacyDivergence": {
+    "rawMgDl": "90.98",
+    "stagedDisplay": "5.1",
+    "legacyDisplay": "5.0",
+    "status": "UNRESOLVED_POLICY"
+  }
+}

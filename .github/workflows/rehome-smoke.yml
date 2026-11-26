@@ -3,7 +3,7 @@ name: IAMINA Rehome Smoke
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    branches: [main]
+    branches: [main, migration/iamina-snapshot-20261123]
     paths:
       - '.github/workflows/rehome-smoke.yml'
       - 'backend/**'
@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   snapshot-source-checks:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -1202,3 +1203,36 @@ jobs:
             diabetes/tests/test_d7_profile_http_isolation.py \
             core/tests/test_ai_egress_boundary_gate.py
 
+  phase2-d5-oracles:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && github.head_ref == 'phase2/d5-01-oracles' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Attest source and run independent Decimal oracle
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          python3 scripts/d5_01_verify_oracles.py
+      - name: Install pinned Flutter SDK
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter-sdk"
+          test "$(git -C "$RUNNER_TEMP/flutter-sdk" rev-parse HEAD)" = cc0734ac716fbb8b90f3f9db8020958b1553afa7
+          echo "$RUNNER_TEMP/flutter-sdk/bin" >> "$GITHUB_PATH"
+      - name: Test actual staged Dart contract and legacy formatter
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          flutter --version
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+          flutter test --no-pub --reporter expanded test/core/domain/d5_01_glucose_independent_oracle_test.dart test/core/domain/glucose_quantity_evidence_test.dart
