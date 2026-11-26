@@ -168,8 +168,15 @@ void main() {
           ));
           await tester.pumpAndSettle();
           final card = find.byType(DashboardTrendSelectionCard);
-          expect(find.descendant(of: card, matching: find.text(label)), findsOneWidget,
+          final sourceLabel = find.descendant(of: card, matching: find.text(label));
+          expect(sourceLabel, findsOneWidget,
               reason: '${locale.languageCode} / $width / $source');
+          final cardBounds = tester.getRect(card);
+          final labelBounds = tester.getRect(sourceLabel);
+          expect(labelBounds.left, greaterThanOrEqualTo(cardBounds.left));
+          expect(labelBounds.right, lessThanOrEqualTo(cardBounds.right));
+          expect(labelBounds.top, greaterThanOrEqualTo(cardBounds.top));
+          expect(labelBounds.bottom, lessThanOrEqualTo(cardBounds.bottom));
           expect(Directionality.of(tester.element(card)),
               locale.languageCode == 'ar' ? TextDirection.rtl : TextDirection.ltr);
           expect(log.source, source);
