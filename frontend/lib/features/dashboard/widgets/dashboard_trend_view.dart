@@ -519,7 +519,12 @@ class DashboardTrendSelectionCard extends StatelessWidget {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(children: [Expanded(child: value), source]),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [value, source],
+                ),
                 const SizedBox(height: 10),
                 date,
                 const SizedBox(height: 10),
@@ -536,7 +541,7 @@ class DashboardTrendSelectionCard extends StatelessWidget {
               _VerticalDivider(),
               Expanded(flex: 3, child: contextTags),
               _VerticalDivider(),
-              source,
+              Flexible(flex: 2, child: source),
             ],
           );
         },
@@ -601,8 +606,10 @@ class _SelectionValue extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.end,
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         Text(
           value,
@@ -614,7 +621,6 @@ class _SelectionValue extends StatelessWidget {
             color: AminaVisualLanguage.primaryText(context),
           ),
         ),
-        const SizedBox(width: 6),
         Padding(
           padding: const EdgeInsets.only(bottom: 2),
           child: Text(
@@ -722,13 +728,15 @@ class _SourcePill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
       decoration: BoxDecoration(
-        color: AminaVisualLanguage.mintSurface,
+        color: AminaVisualLanguage.controlSurface(context),
+        border: Border.all(color: AminaVisualLanguage.controlBorder(context)),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         label,
-        style: const TextStyle(
-          color: AminaVisualLanguage.actionGreen,
+        softWrap: true,
+        style: TextStyle(
+          color: AminaVisualLanguage.secondary(context),
           fontSize: 10.2,
           fontWeight: FontWeight.w800,
         ),

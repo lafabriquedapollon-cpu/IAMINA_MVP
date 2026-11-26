@@ -1,0 +1,120 @@
+{
+  "status": "CANDIDATE_NOT_RUNTIME",
+  "rounding": "ROUND_HALF_UP",
+  "cases": [
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "90.9787294",
+      "displayUnit": "mmol/L",
+      "display": "5.0"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "90.9787295",
+      "displayUnit": "mmol/L",
+      "display": "5.1"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "90.9787296",
+      "displayUnit": "mmol/L",
+      "display": "5.1"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "90.98",
+      "displayUnit": "mmol/L",
+      "display": "5.1"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "100.499999",
+      "displayUnit": "mg/dL",
+      "display": "100"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "100.5",
+      "displayUnit": "mg/dL",
+      "display": "101"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "100.500001",
+      "displayUnit": "mg/dL",
+      "display": "101"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "5.049999",
+      "displayUnit": "mmol/L",
+      "display": "5.0"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "5.05",
+      "displayUnit": "mmol/L",
+      "display": "5.1"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "5.050001",
+      "displayUnit": "mmol/L",
+      "display": "5.1"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "7.83",
+      "displayUnit": "mg/dL",
+      "display": "141"
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "10",
+      "displayUnit": "mg/dL",
+      "display": "180"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "0.9007794",
+      "displayUnit": "mmol/L",
+      "display": null
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "0.9007795",
+      "displayUnit": "mmol/L",
+      "display": "0.1"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "0.9007796",
+      "displayUnit": "mmol/L",
+      "display": "0.1"
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "0.49",
+      "displayUnit": "mg/dL",
+      "display": null
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "0.049",
+      "displayUnit": "mmol/L",
+      "display": null
+    },
+    {
+      "sourceUnit": "mmol/L",
+      "raw": "1e-7",
+      "displayUnit": "mg/dL",
+      "display": null
+    },
+    {
+      "sourceUnit": "mg/dL",
+      "raw": "1e3",
+      "displayUnit": "mg/dL",
+      "display": "1000"
+    }
+  ]
+}
