@@ -282,6 +282,8 @@ class AdmissionSession {
     try{
       const r=await this.#read();
       bytes=await decrypt(r,key,owner);this.#local();
+      const explicit=JSON.parse(await window.d1EvidenceRead(bytes,owner,uuid));this.#local();
+      require(explicit===null,'Explicit evidence requires dedicated port');
       const deleted=await window.d1GlucoseDeleted(bytes,owner,uuid);this.#local();
       const existing=JSON.parse(await window.d1GlucoseRead(bytes,owner,uuid));this.#local();
       if(action==='delete'&&deleted===true){
@@ -348,6 +350,10 @@ class AdmissionSession {
       const r=await this.#read();
       require(r.revision===expectedRevision&&r.revision<0xffffffff,'Checkpoint conflict');
       bytes=await decrypt(r,key,owner);this.#local();
+      // Stable rejection at the JS port; Dart still enforces all UUID and
+      // metadata invariants in its transaction.
+      const existing=JSON.parse(await window.d1EvidenceRead(bytes,owner,uuid));this.#local();
+      require(existing===null,'Existing or deleted measurement identity');
       next=await window.d1EvidenceInsert(bytes,owner,uuid,original,unit,seconds);this.#local();
       const evidence=JSON.parse(await window.d1EvidenceRead(next,owner,uuid));this.#local();
       require(evidence?.uuid===uuid&&evidence.originalValue===original&&evidence.originalUnit===unit&&

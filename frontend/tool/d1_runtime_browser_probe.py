@@ -802,6 +802,8 @@ def exercise_possession(browser_type,profile,locale,origin):
 # Actual Dart auth/app-lock services, simulated HTTP/authenticator/storage,
 # connected to the real synthetic encrypted Drift/IndexedDB runtime.
 I5_BOUND = r"""async ()=>{
+  const stage=x=>{window.__d1BoundStage=x;};
+  stage("bootstrap");
   const api=await import('/d1_admission_candidate.mjs');
   const keys=await import('/d1_possession_candidate.mjs');
   const A=900001,B=900002,a=keys.generatePossessionSecret(),b=keys.generatePossessionSecret();
@@ -825,6 +827,7 @@ I5_BOUND = r"""async ()=>{
       tx.oncomplete=()=>resolve(r.result.owner);tx.onabort=()=>reject(new Error('Store failed'));
     });}finally{db.close();}
   };
+  stage("bound-admission");
   await window.d1BoundLogin(A);
   const epoch=()=>window.d1BoundEpoch();
   const ticket=()=>window.d1BoundProof(A);
@@ -879,7 +882,9 @@ I5_BOUND = r"""async ()=>{
   check(await fence()===null,'Idle lock retirement did not clear fence');
   await reject(()=>as.inspect(),'Bound authority retired');
   check(await as.retire()===true,'Retirement acknowledgement missing');
-  const clinical=await api.admitBoundClinical(A,epoch(),await ticket(),a);
+  stage("legacy-clinical");
+  const clinicalTicket=await ticket();
+  const clinical=await api.admitBoundClinical(A,epoch(),clinicalTicket,a);
   const allowed=['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readEvidence','insertEvidence','readTreatment','writeTreatment','retire'];
   check(Object.isFrozen(clinical)&&Object.getPrototypeOf(clinical)===null&&
     JSON.stringify(Object.keys(clinical))===JSON.stringify(allowed),'Unexpected clinical surface');
@@ -897,29 +902,41 @@ I5_BOUND = r"""async ()=>{
   check(bReading.revision===1&&bReading.measurement===null,'Clinical owner isolation failed');
   await reject(()=>clinical.readGlucose(u),'Bound authority retired');
   await clinicalB.retire();
+  stage("evidence-admission");
   await window.d1BoundLogin(A);
   let e=await api.admitBoundClinical(A,epoch(),await ticket(),a);
   const v='ac123456-1234-4abc-8def-000000000011';
+  stage("evidence-legacy");
   check((await e.readEvidence(u)).evidence===null,'Legacy unit inferred');
+  stage("evidence-insert");
   const added=await e.insertEvidence(3,v,7.83,'mmol/L',t+1);
+  stage("evidence-projection");
   const ev=added.evidence;
   check(added.revision===4&&ev.originalValue===7.83&&ev.originalUnit==='mmol/L'&&
     Math.abs(ev.mgDl-141.0620697)<1e-9&&ev.displayMgDl==='141'&&ev.displayMmolL==='7.8','D5 conversion mismatch');
+  stage("evidence-reopen");
   await e.retire();
   e=await api.admitBoundClinical(A,epoch(),await ticket(),a);
   check(JSON.stringify((await e.readEvidence(v)).evidence)===JSON.stringify(ev),'Evidence reopen mismatch');
+  stage("evidence-duplicate");
   await reject(()=>e.insertEvidence(4,v,8,'mmol/L',t+1),'Existing or deleted measurement identity');
   e=await api.admitBoundClinical(A,epoch(),await ticket(),a);
   check((await e.readEvidence(v)).revision===4,'Duplicate changed revision');
-  await reject(()=>e.deleteGlucose(4,v),'Unexpected measurement row');
+  stage("evidence-old-port");
+  await reject(()=>e.deleteGlucose(4,v),'Explicit evidence requires dedicated port');
   e=await api.admitBoundClinical(A,epoch(),await ticket(),a);
   check((await e.readEvidence(v)).evidence.originalValue===7.83,'Old port changed evidence');
-  const pending=e.readEvidence(v);window.d1BoundLock();
-  await reject(()=>pending,'Bound authority retired');
+  stage("evidence-lock");
+  const pending=e.readEvidence(v);
+  const denied=reject(()=>pending,'Bound authority retired');
+  window.d1BoundLock();
+  await denied;
   await window.d1BoundLogin(B);
+  stage("evidence-owner-isolation");
   const other=await api.admitBoundClinical(B,epoch(),await window.d1BoundProof(B),b);
   check((await other.readEvidence(v)).evidence===null,'Evidence owner leak');
   await other.retire();
+  stage("complete");
   return {negativeCases:negatives+1,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true,idleRevocation:true,clinicalPort:true,clinicalRevisionA:3,explicitEvidence:true,evidenceRevision:4};
 }"""
 
@@ -934,7 +951,20 @@ def exercise_bound(browser_type,profile,locale,origin):
         assert not blocked and not errors
         return result
     except Exception:
-        raise RuntimeError("D1 bound admission qualification failed") from None
+        # Only fixed synthetic stage codes; never print exception contents,
+        # evidence, credentials, keys or raw browser messages.
+        stage = "unknown"
+        try:
+            candidate = page.evaluate("window.__d1BoundStage || 'unknown'")
+            if candidate in {"bootstrap", "bound-admission", "legacy-clinical",
+                             "evidence-admission", "evidence-legacy", "evidence-insert",
+                             "evidence-projection", "evidence-reopen", "evidence-duplicate",
+                             "evidence-old-port", "evidence-lock", "evidence-owner-isolation",
+                             "complete"}:
+                stage = candidate
+        except Exception:
+            pass
+        raise RuntimeError("D1 bound admission qualification failed stage=" + stage) from None
     finally:
         ctx.close()
 
