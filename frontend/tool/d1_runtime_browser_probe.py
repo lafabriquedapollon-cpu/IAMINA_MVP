@@ -879,7 +879,25 @@ I5_BOUND = r"""async ()=>{
   check(await fence()===null,'Idle lock retirement did not clear fence');
   await reject(()=>as.inspect(),'Bound authority retired');
   check(await as.retire()===true,'Retirement acknowledgement missing');
-  return {negativeCases:negatives+1,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true,idleRevocation:true};
+  const clinical=await api.admitBoundClinical(A,epoch(),await ticket(),a);
+  const allowed=['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readTreatment','writeTreatment','retire'];
+  check(Object.isFrozen(clinical)&&Object.getPrototypeOf(clinical)===null&&
+    JSON.stringify(Object.keys(clinical))===JSON.stringify(allowed),'Unexpected clinical surface');
+  const u='ac123456-1234-4abc-8def-000000000010',t=1795564800;
+  const inserted=await clinical.insertGlucose(2,u,131.25,'mg/dL',t);
+  check(inserted.revision===3&&inserted.measurement.uuid===u,'Clinical insert failed');
+  const observed=await clinical.readGlucose(u);
+  check(observed.revision===3&&observed.measurement.mgDl===131.25,'Clinical read failed');
+  const late=clinical.readJournal(3,t-1,t+1,50,0);
+  window.d1BoundLock();
+  await reject(()=>late,'Bound authority retired');
+  await window.d1BoundLogin(B);
+  const clinicalB=await api.admitBoundClinical(B,epoch(),await window.d1BoundProof(B),b);
+  const bReading=await clinicalB.readGlucose(u);
+  check(bReading.revision===1&&bReading.measurement===null,'Clinical owner isolation failed');
+  await reject(()=>clinical.readGlucose(u),'Bound authority retired');
+  await clinicalB.retire();
+  return {negativeCases:negatives+1,revisionA:2,revisionB:1,leaseBeforeOpen:true,retiredFenceCleared:true,idleRevocation:true,clinicalPort:true,clinicalRevisionA:3};
 }"""
 
 
@@ -888,7 +906,8 @@ def exercise_bound(browser_type,profile,locale,origin):
     try:
         result=page.evaluate(I5_BOUND)
         assert result=={"negativeCases":9,"revisionA":2,"revisionB":1,
-                       "leaseBeforeOpen":True,"retiredFenceCleared":True,"idleRevocation":True}
+                       "leaseBeforeOpen":True,"retiredFenceCleared":True,"idleRevocation":True,
+                       "clinicalPort":True,"clinicalRevisionA":3}
         assert not blocked and not errors
         return result
     except Exception:
@@ -1942,6 +1961,7 @@ def run():
     print("D1_I4_COPY_MIGRATION_PASS 2/2",flush=True)
     print("D1_I5_POSSESSION_PASS 2/2",flush=True)
     print("D1_I5_BOUND_ADMISSION_PASS 2/2",flush=True)
+    print("D1_I5D_CLINICAL_PORT_PASS 2/2",flush=True)
     print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
     print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
     print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)

@@ -2,6 +2,7 @@
 // This is NOT a production auth authority or a migration of any patient vault.
 import {openArchive} from './d1_archive_candidate.mjs';
 import {createAdmissionStore} from './d1_admission_store.mjs';
+import {createClinicalSession} from './d1_clinical_session_candidate.mjs';
 import {validRecord, sameRecord, wrapKey as wrapCheckpointKey, unwrapKey as unwrapCheckpointKey, encrypt as encryptCheckpoint, decrypt as decryptCheckpoint} from './d1_checkpoint_crypto.mjs';
 import {requirePossessionSecret} from './d1_possession_candidate.mjs';
 
@@ -587,4 +588,17 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
     if(session)await revoke();
     throw e;
   }finally{bytes?.fill(0);}
+}
+
+// Isolated clinical-shaped entry point. The legacy admitBound export is
+// retained solely for synthetic fault injection and independent audit.
+export async function admitBoundClinical(owner,epoch,authority,phrase){
+  const internal=await admitBound(owner,epoch,authority,phrase);
+  try {
+    return createClinicalSession(internal,()=>internal.revocationStatus()==='active'&&
+      authority('session',owner,epoch,null)===true);
+  } catch(e) {
+    await internal.retire();
+    throw e;
+  }
 }

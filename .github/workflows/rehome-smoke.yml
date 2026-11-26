@@ -1300,7 +1300,7 @@ jobs:
         run: |
           node --test frontend/tool/d1_archive_candidate.test.mjs
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
-            node --test frontend/tool/d1_checkpoint_crypto.test.mjs
+            node --test frontend/tool/d1_checkpoint_crypto.test.mjs frontend/tool/d1_clinical_session_candidate.test.mjs
           fi
       - name: D1 real browser encrypted archive restart and SQLite integrity
         timeout-minutes: 18
@@ -1370,7 +1370,7 @@ jobs:
           fi
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
             flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
-            cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs tool/d1_admission_store.mjs "$RUNNER_TEMP/d1-runtime-web/"
+            cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs tool/d1_admission_store.mjs tool/d1_clinical_session_candidate.mjs "$RUNNER_TEMP/d1-runtime-web/"
           fi
       - name: Package exact source and synthetic build digest
         id: pack
