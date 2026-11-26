@@ -30,8 +30,9 @@ final class GlucoseQuantityCandidateStore {
   /// Reopening never repairs missing tables or reassigns an existing owner.
   /// The marker detects accidental file misassociation, not malicious SQL.
   static Future<GlucoseQuantityCandidateStore> openSynthetic(
-    AppDatabase db, {bool initialize = false},
-  ) async {
+    AppDatabase db, {
+    bool initialize = false,
+  }) async {
     final owner = db.patientVaultScope?.nativeDjangoUserId;
     if (owner == null || !{900001, 900002}.contains(owner)) {
       throw StateError('Synthetic isolated owner required');
