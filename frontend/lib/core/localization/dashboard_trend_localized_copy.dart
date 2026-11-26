@@ -91,16 +91,27 @@ extension DashboardTrendLocalizedCopy on AppLocalizations {
 
   String dashboardTrendSourceLabel(String source) {
     final normalized = source.trim().toLowerCase();
-    if (normalized == 'manual') {
-      return _trendPick(en: 'Manual', fr: 'Manuel', ar: 'يدوي');
-    }
-    if (normalized.contains('cgm')) {
-      return 'CGM';
-    }
-    if (normalized.contains('import')) {
-      return _trendPick(en: 'Imported', fr: 'Importé', ar: 'مستورد');
-    }
-    return _trendPick(en: 'Recorded', fr: 'Enregistré', ar: 'مسجل');
+    // Stored source is a legacy tag (including a default of manual), not
+    // evidence of actual entry method, authenticated device, or import origin.
+    // Never infer a measurement class from a substring.
+    return switch (normalized) {
+      'manual' => _trendPick(
+          en: 'Manual (unverified)',
+          fr: 'Manuel (non vérifié)',
+          ar: 'يدوي (غير موثق)',
+        ),
+      'cgm' => _trendPick(
+          en: 'CGM (unverified)',
+          fr: 'CGM (non vérifié)',
+          ar: 'CGM (غير موثق)',
+        ),
+      'imported' => _trendPick(
+          en: 'Import (unverified)',
+          fr: 'Import (non vérifié)',
+          ar: 'استيراد (غير موثق)',
+        ),
+      _ => _trendPick(en: 'Recorded', fr: 'Enregistré', ar: 'مسجل'),
+    };
   }
 
   String? dashboardTrendContextLabel(String key) {

@@ -78,3 +78,10 @@ class WebBuildArtifactTests(unittest.TestCase):
                 artifact.expected(SHA, BRANCH)
             with self.assertRaisesRegex(ValueError, "invalid source"):
                 artifact.expected(SHA, "untrusted")
+
+    def test_convergence_uses_full_cutover_and_runtime_spec(self):
+        with patch.object(artifact.subprocess, "check_output", return_value=SHA):
+            spec = artifact.expected(SHA, "phase2/d1-d5-convergence")
+        self.assertEqual(spec["branch"], "phase2/d1-d5-convergence")
+        self.assertEqual(spec["app"], self.spec["app"])
+        self.assertEqual(spec["runtime"], self.spec["runtime"])

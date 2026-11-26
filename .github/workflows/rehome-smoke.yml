@@ -1212,7 +1212,7 @@ jobs:
   # Fail-closed scope selection. Only draft, cumulative non-product changes
   # may defer macOS; ready-for-review or explicit full qualification reruns it.
   phase1-web-scope:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -1231,7 +1231,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
           IS_DRAFT: ${{ github.event.pull_request.draft }}
-          FORCE_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'full-web-qualification') }}
+          FORCE_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'full-web-qualification') || github.head_ref == 'phase2/d1-d5-convergence' }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
@@ -1240,7 +1240,7 @@ jobs:
 
   # Phase 1 Web candidate gates. Full qualification uses one exact SHA.
   phase1-d1-linux:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -1292,14 +1292,14 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           case "$PHASE_BRANCH" in
-            phase1/d1-backup|phase1/integration-web|phase1/ci-opt1-benchmark) ;;
+            phase1/d1-backup|phase1/integration-web|phase1/ci-opt1-benchmark|phase2/d1-d5-convergence) ;;
             *) exit 1 ;;
           esac
           echo "SOURCE_SHA=$EXPECTED_SHA"
       - name: D1 candidate archive cryptographic regression
         run: |
           node --test frontend/tool/d1_archive_candidate.test.mjs
-          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             node --test frontend/tool/d1_checkpoint_crypto.test.mjs frontend/tool/d1_clinical_session_candidate.test.mjs
           fi
       - name: D1 real browser encrypted archive restart and SQLite integrity
@@ -1330,7 +1330,7 @@ jobs:
 
   # One build per target, on Linux. Both browser engines verify the same bytes.
   phase1-web-build:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark') }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     env:
@@ -1363,12 +1363,12 @@ jobs:
           set -euo pipefail
           flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.lock
-          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D1_CUTOVER_CANDIDATE=true --dart-define=IAMINA_D2_GUEST_CANDIDATE=false --dart-define=IAMINA_REMOTE_ACCOUNT_SIGN_IN=true --dart-define=IAMINA_REMOTE_ACCOUNT_ENROLLMENT=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
           else
             flutter build web --release --no-pub --no-web-resources-cdn --dart-define=IAMINA_D2_GUEST_CANDIDATE=true --dart-define=API_BASE_URL=http://127.0.0.1:8000
           fi
-          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
             cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs tool/d1_admission_store.mjs tool/d1_clinical_session_candidate.mjs "$RUNNER_TEMP/d1-runtime-web/"
           fi
@@ -1387,7 +1387,7 @@ jobs:
 
   phase1-d2-linux:
     needs: phase1-web-build
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -1439,7 +1439,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           case "$PHASE_BRANCH" in
-            phase1/d2-guest|phase1/integration-web|phase1/ci-opt1-benchmark) ;;
+            phase1/d2-guest|phase1/integration-web|phase1/ci-opt1-benchmark|phase2/d1-d5-convergence) ;;
             *) exit 1 ;;
           esac
           echo "SOURCE_SHA=$EXPECTED_SHA"
@@ -1461,7 +1461,7 @@ jobs:
           flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.lock
           flutter test --no-pub --reporter expanded test/features/navigation/d2_guest_shell_test.dart test/features/navigation/d2_guest_entry_test.dart
-          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             flutter test --no-pub --reporter expanded test/services/app_lock_service_test.dart test/services/auth_service_local_first_test.dart test/services/auth_service_failure_observability_test.dart test/services/api_auth_epoch_boundary_test.dart
             flutter test --no-pub --reporter expanded --dart-define=IAMINA_REMOTE_ACCOUNT_ENROLLMENT=true test/services/d1_auth_transition_test.dart
             flutter test --no-pub --reporter expanded test/services/d1_vault_admission_proof_test.dart
@@ -1486,10 +1486,10 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/d2-browser-venv"
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium
-          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then export D1_CUTOVER_PROBE=1; fi
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then export D1_CUTOVER_PROBE=1; fi
           D2_BROWSER_TARGET=chromium "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
       - name: D1 actual Drift encrypted checkpoint — chromium
-        if: ${{ (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark') }}
+        if: ${{ (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence') }}
         timeout-minutes: 12
         run: |
           set -euo pipefail
@@ -1504,7 +1504,7 @@ jobs:
 
 
   phase1-d3-linux:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d3-intents' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d3-intents' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -1556,7 +1556,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           case "$PHASE_BRANCH" in
-            phase1/d3-intents|phase1/integration-web|phase1/ci-opt1-benchmark) ;;
+            phase1/d3-intents|phase1/integration-web|phase1/ci-opt1-benchmark|phase2/d1-d5-convergence) ;;
             *) exit 1 ;;
           esac
           echo "SOURCE_SHA=$EXPECTED_SHA"
@@ -1594,7 +1594,7 @@ jobs:
           python manage.py migrate --noinput
           python manage.py makemigrations --check --dry-run
           python -m pytest -q core/tests/test_d3_feature_intents.py core/tests/test_d3_feature_intents_http.py core/tests/test_account_consent_identity_safety.py core/tests/test_ai_egress_boundary_gate.py
-          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             python -m pytest -q core/tests/test_d1_test_access.py
           fi
 
@@ -1602,7 +1602,7 @@ jobs:
   # independently attest supported restoration or exact fail-closed capability.
   phase1-d1-macos-storage:
     needs: phase1-web-scope
-    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d1-backup' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence')) && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
     runs-on: macos-15
     timeout-minutes: 20
     env:
@@ -1636,7 +1636,7 @@ jobs:
   # reproduces them without substituting them for Safari-target evidence.
   phase1-d2-macos-webkit:
     needs: [phase1-web-scope, phase1-web-build]
-    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark')) && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence')) && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
     runs-on: macos-15
     timeout-minutes: 25
     env:
@@ -1677,10 +1677,10 @@ jobs:
           python -m venv "$RUNNER_TEMP/d2-browser-venv"
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m pip install playwright==1.55.0 Pillow==11.3.0
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install webkit
-          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark ]]; then export D1_CUTOVER_PROBE=1; fi
+          if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then export D1_CUTOVER_PROBE=1; fi
           "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
       - name: D1 actual Drift encrypted checkpoint — webkit
-        if: ${{ (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark') }}
+        if: ${{ (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence') }}
         timeout-minutes: 12
         run: |
           set -euo pipefail
@@ -1692,3 +1692,77 @@ jobs:
           name: d2-macos-webkit-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/d2-browser-proof/
           if-no-files-found: error
+
+  phase2-d5-oracles:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase2/d5-01-oracles' || github.head_ref == 'phase2/d1-d5-convergence') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Attest source and run independent Decimal oracle
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          python3 scripts/d5_01_verify_oracles.py
+          python3 scripts/d5_05_verify_display_oracles.py
+      - name: Install pinned Flutter SDK
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 3.41.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter-sdk"
+          test "$(git -C "$RUNNER_TEMP/flutter-sdk" rev-parse HEAD)" = cc0734ac716fbb8b90f3f9db8020958b1553afa7
+          echo "$RUNNER_TEMP/flutter-sdk/bin" >> "$GITHUB_PATH"
+      - name: Test actual staged Dart contract and legacy formatter
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          flutter --version
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+          flutter test --no-pub --reporter expanded test/core/domain/d5_01_glucose_independent_oracle_test.dart test/core/domain/glucose_quantity_evidence_test.dart
+          flutter test --no-pub --reporter expanded test/core/domain/d5_05_glucose_display_projection_test.dart
+          flutter test --no-pub --reporter expanded test/core/domain/d5_05_glucose_quantity_storage_envelope_test.dart
+          flutter test --no-pub --reporter expanded test/data/drift/d5_06_glucose_quantity_candidate_store_test.dart
+          flutter test --no-pub --reporter expanded test/data/drift/d5_02_dashboard_temporal_oracle_test.dart
+          flutter test --no-pub --reporter expanded test/features/d5_03_dashboard_aggregate_oracle_test.dart test/features/dashboard_trend_contract_test.dart
+
+  # Convergence requires all eight jobs, never skipped or cancelled.
+  phase2-convergence-gate:
+    needs: [phase1-web-scope, phase1-d1-linux, phase1-web-build, phase1-d2-linux, phase1-d3-linux, phase1-d1-macos-storage, phase1-d2-macos-webkit, phase2-d5-oracles]
+    if: ${{ always() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && github.head_ref == 'phase2/d1-d5-convergence' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      FULL_SCOPE: ${{ needs.phase1-web-scope.outputs.full }}
+      GATE_1: ${{ needs.phase1-web-scope.result }}
+      GATE_2: ${{ needs.phase1-d1-linux.result }}
+      GATE_3: ${{ needs.phase1-web-build.result }}
+      GATE_4: ${{ needs.phase1-d2-linux.result }}
+      GATE_5: ${{ needs.phase1-d3-linux.result }}
+      GATE_6: ${{ needs.phase1-d1-macos-storage.result }}
+      GATE_7: ${{ needs.phase1-d2-macos-webkit.result }}
+      GATE_8: ${{ needs.phase2-d5-oracles.result }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Require every candidate gate on the common SHA
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo "SOURCE_SHA=$EXPECTED_SHA"
+          test "$FULL_SCOPE" = true
+          for i in {1..8}; do
+            key="GATE_$i"
+            test "${!key}" = success
+          done
+          echo "D1_D5_CONVERGENCE_PASS 8/8 source=$EXPECTED_SHA"

@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 
 SDK = "cc0734ac716fbb8b90f3f9db8020958b1553afa7"
-INTEGRATION = {"phase1/integration-web", "phase1/ci-opt1-benchmark"}
+INTEGRATION = {"phase1/integration-web", "phase1/ci-opt1-benchmark", "phase2/d1-d5-convergence"}
 GUEST = "phase1/d2-guest"
 APP = Path("frontend/build/web")
 COMMON = ["--release", "--no-pub", "--no-web-resources-cdn"]
