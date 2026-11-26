@@ -1494,6 +1494,12 @@ jobs:
         run: |
           set -euo pipefail
           D1_RUNTIME_ENGINE=chromium D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
+      - name: CONV-02c.2 guarded evidence UI — chromium
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          D1_RUNTIME_UI_ONLY=1 D1_RUNTIME_ENGINE=chromium D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain D2 candidate screenshots and exact SHA matrix
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -1685,6 +1691,12 @@ jobs:
         run: |
           set -euo pipefail
           D1_RUNTIME_ENGINE=webkit D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
+      - name: CONV-02c.2 guarded evidence UI — webkit
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          D1_RUNTIME_UI_ONLY=1 D1_RUNTIME_ENGINE=webkit D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain macOS D2 evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

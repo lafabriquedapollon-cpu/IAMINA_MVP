@@ -20,7 +20,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
   final _value = TextEditingController();
   int _generation = 0;
   int? _owner, _revision;
-  String? _unit, _editing;
+  String? _unit, _editing, _confirmDelete;
   bool _busy = false, _error = false;
   List<Map<String, dynamic>> _rows = [];
   String tr(String fr, String ar) => widget.arabic ? ar : fr;
@@ -36,7 +36,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
     _value.clear();
     if (mounted) {
       setState(() {
-        _owner = null; _revision = null; _unit = null; _editing = null;
+        _owner = null; _revision = null; _unit = null; _editing = null; _confirmDelete = null;
         _rows = []; _busy = false; _error = false;
       });
     }
@@ -61,7 +61,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
         _revision = result['revision'] as int;
         _rows = rows;
         _busy = false;
-        _value.clear(); _unit = null; _editing = null;
+        _value.clear(); _unit = null; _editing = null; _confirmDelete = null;
       });
     } catch (_) {
       if (!mounted || generation != _generation) return;
@@ -155,13 +155,24 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                     textDirection: TextDirection.ltr),
                   Wrap(children: [
                     TextButton(onPressed: _busy ? null : () => setState(() {
-                      _editing = row['uuid'] as String; _unit = row['originalUnit'] as String;
+                      _confirmDelete = null; _editing = row['uuid'] as String; _unit = row['originalUnit'] as String;
                       _value.text = row['originalValue'].toString();
                     }), child: Text(tr('Modifier', 'تعديل'))),
-                    TextButton(onPressed: _busy ? null : () => _perform('delete', {
-                      'revision': _revision, 'uuid': row['uuid'],
+                    TextButton(onPressed: _busy ? null : () => setState(() {
+                      _confirmDelete = row['uuid'] as String;
                     }), child: Text(tr('Supprimer', 'حذف'))),
                   ]),
+                  if (_confirmDelete == row['uuid']) ...[
+                    Text(tr('Confirmer la suppression de cette mesure ?', 'هل تريد تأكيد حذف هذا القياس؟')),
+                    Wrap(spacing: 8, children: [
+                      FilledButton(onPressed: _busy ? null : () => _perform('delete', {
+                        'revision': _revision, 'uuid': row['uuid'],
+                      }), child: Text(tr('Confirmer la suppression', 'تأكيد الحذف'))),
+                      TextButton(onPressed: _busy ? null : () => setState(() {
+                        _confirmDelete = null;
+                      }), child: Text(tr('Conserver', 'احتفاظ'))),
+                    ]),
+                  ],
                 ]),
               )),
             ],

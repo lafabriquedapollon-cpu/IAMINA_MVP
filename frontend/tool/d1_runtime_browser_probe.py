@@ -2099,7 +2099,7 @@ UI_MOUNT = r"""async (arabic)=>{
   let active=null, owner=null, generation=0, retired=()=>{};
   const t=1795564800, sentinel='ac123456-1234-4abc-8def-000000000099';
   const clear=()=>{generation++;active=null;owner=null;retired();};
-  const lock=()=>{clear();window.d1BoundLock();};
+  const lock=()=>{clear();try{window.d1BoundLock();}catch(_){/* no fixture auth initialized yet */}};
   const check=(g)=>{if(g!==generation)throw Error('UI authority retired');};
   const call=async(action,json)=>{
     const args=JSON.parse(json);
@@ -2112,8 +2112,7 @@ UI_MOUNT = r"""async (arabic)=>{
         const proof=await window.d1BoundProof(target);check(g);
         const authority=(phase,id,epoch,callback)=>proof(phase,id,epoch,phase==='watch'?()=>{
           // Clear all visible state before forwarding the durable retirement.
-          if(g===generation)clear();
-          callback();
+          try{if(g===generation)clear();}finally{callback();}
         }:callback);
         const session=await api.admitBoundClinical(target,window.d1BoundEpoch(),authority,secrets.get(target));
         if(g!==generation){await session.retire();throw Error('UI authority retired');}
@@ -2186,7 +2185,8 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
         stage="insert"
         field=page.get_by_role("textbox").first
-        field.fill("7.83")
+        field.click(timeout=20000)
+        page.keyboard.insert_text("7.83")
         click("Enregistrer","حفظ")
         expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_be_visible()
         page.get_by_text("mmol/L",exact=True).first.click()
@@ -2197,7 +2197,9 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         shot("after-form-journal")
         stage="edit"
         click("Modifier","تعديل")
-        field.fill("8.2")
+        field.click(timeout=20000)
+        page.keyboard.press("Meta+a" if ENGINE=="webkit" else "Control+a")
+        page.keyboard.insert_text("8.2")
         click("Enregistrer","حفظ")
         expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
         stage="lock"
@@ -2212,6 +2214,11 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
         stage="delete"
         click("Supprimer","حذف")
+        expect(text("Confirmer la suppression","تأكيد الحذف")).to_be_visible()
+        click("Conserver","احتفاظ")
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible()
+        click("Supprimer","حذف")
+        click("Confirmer la suppression","تأكيد الحذف")
         expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
         click("Verrouiller","قفل")
         assert not blocked and not errors
@@ -2237,16 +2244,6 @@ def run():
             try:
                 with sync_playwright() as pw:
                     browser_type = getattr(pw, ENGINE)
-                    if os.environ.get("PHASE_BRANCH",os.environ.get("GITHUB_HEAD_REF"))=="phase2/d1-d5-convergence":
-                        ui_records=[]
-                        for width,height in ((390,844),(430,932),(1280,860)):
-                            for locale in ("fr-FR","ar-MA"):
-                                ui_records.append(exercise_evidence_ui(browser_type,
-                                    Path(root)/f"ui-{locale}-{width}",locale,origin,width,height))
-                        assert len(ui_records)==6
-                        proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
-                        (proof/f"conv-ui-{ENGINE}-matrix.json").write_text(json.dumps(ui_records))
-                        print("D1_D5_EVIDENCE_UI_PASS 6/6",flush=True)
                     for locale in ("fr-FR", "ar-MA"):
                         record = dict(source_sha=os.environ["EXPECTED_SHA"], engine=ENGINE, locale=locale,
                                       sqlite3_wasm_sha256=hashlib.sha256((WEB/"sqlite3.wasm").read_bytes()).hexdigest(),
@@ -2343,5 +2340,37 @@ def run():
     print("D1_I5_JOURNAL_CHANGE_PASS 2/2",flush=True)
 
 
+def run_evidence_ui():
+    assert ENGINE in ("chromium","webkit")
+    assert os.environ["GITHUB_HEAD_REF"]=="phase2/d1-d5-convergence"
+    records=[]
+    proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
+    proof.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="d1-ui-") as root:
+        with http.server.ThreadingHTTPServer(("127.0.0.1",0),Handler) as server:
+            threading.Thread(target=server.serve_forever,daemon=True).start()
+            origin=f"http://127.0.0.1:{server.server_port}"
+            try:
+                with sync_playwright() as pw:
+                    browser_type=getattr(pw,ENGINE)
+                    for width,height in ((390,844),(430,932),(1280,860)):
+                        for locale in ("fr-FR","ar-MA"):
+                            try:
+                                record=exercise_evidence_ui(browser_type,Path(root)/f"ui-{locale}-{width}",locale,origin,width,height)
+                            except Exception as error:
+                                record={"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                                        "viewport":[width,height],"result":"FAIL","error":str(error)[:200]}
+                            records.append(record)
+                            print("D1_D5_UI "+json.dumps(record,ensure_ascii=False),flush=True)
+            finally:
+                server.shutdown()
+                (proof/f"conv-ui-{ENGINE}-matrix.json").write_text(json.dumps(records,ensure_ascii=False))
+    assert len(records)==6 and all(r["result"]=="PASS" for r in records),"D1 D5 UI matrix failed"
+    print("D1_D5_EVIDENCE_UI_PASS 6/6",flush=True)
+
+
 if __name__=="__main__":
-    run()
+    if os.environ.get("D1_RUNTIME_UI_ONLY")=="1":
+        run_evidence_ui()
+    else:
+        run()
