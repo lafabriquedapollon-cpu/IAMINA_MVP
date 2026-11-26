@@ -17,10 +17,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 
-LogEntryData reading(int id, double value, DateTime at, {DateTime? created, bool fallback = false}) =>
+LogEntryData reading(int id, double value, DateTime at, {DateTime? created, bool fallback = false, String source = 'manual'}) =>
     LogEntryData(
       id: id, createdAt: created ?? at, loggedAt: fallback ? null : at,
-      bloodSugar: value, source: 'manual', syncStatus: 'pending',
+      bloodSugar: value, source: source, syncStatus: 'pending',
       clientUuid: 'synthetic-$id', isSick: false, isStressed: false,
       isTired: false, isActive: false, ramadanMode: false,
       syncAttempts: 0, errorSync: false,
@@ -117,22 +117,70 @@ void main() {
     // No assertion here endorses a time-faithful axis or clinical causality.
   });
 
-  test('real source labels FR/AR/EN and explicit substring ambiguity', () {
-    for (final (locale, manual, imported, recorded) in [
-      (AppLocalizationsFr(), 'Manuel', 'Importé', 'Enregistré'),
-      (AppLocalizationsAr(), 'يدوي', 'مستورد', 'مسجل'),
-      (AppLocalizationsEn(), 'Manual', 'Imported', 'Recorded'),
+  test('source tags are exact, localized and never verified provenance', () {
+    for (final (locale, manual, cgm, imported, recorded) in [
+      (AppLocalizationsFr(), 'Manuel (non vérifié)', 'CGM (non vérifié)', 'Import (non vérifié)', 'Enregistré'),
+      (AppLocalizationsAr(), 'يدوي (غير موثق)', 'CGM (غير موثق)', 'استيراد (غير موثق)', 'مسجل'),
+      (AppLocalizationsEn(), 'Manual (unverified)', 'CGM (unverified)', 'Import (unverified)', 'Recorded'),
     ]) {
       expect(locale.dashboardTrendSourceLabel('manual'), manual);
-      expect(locale.dashboardTrendSourceLabel(' CGM '), 'CGM');
+      expect(locale.dashboardTrendSourceLabel(' MANUAL '), manual);
+      expect(locale.dashboardTrendSourceLabel(' CGM '), cgm);
       expect(locale.dashboardTrendSourceLabel('imported'), imported);
-      expect(locale.dashboardTrendSourceLabel(''), recorded);
-      expect(locale.dashboardTrendSourceLabel('unknown'), recorded);
-      // OPEN GAP: a token containing cgm/import is not evidence of origin.
-      expect(locale.dashboardTrendSourceLabel('not_cgm'), 'CGM');
-      expect(locale.dashboardTrendSourceLabel('not_imported'), imported);
+      for (final unknown in [
+        '', 'unknown', 'not_cgm', 'not_imported', 'cgm_verified',
+        'manual_device', 'cgm-import', 'import', 'imported_csv',
+        'verified_cgm', 'cgm\u200b', 'manual cgm',
+      ]) {
+        expect(locale.dashboardTrendSourceLabel(unknown), recorded, reason: unknown);
+      }
     }
   });
+
+  testWidgets('real selection card refuses ambiguous source tags at Web widths', (tester) async {
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+    for (final (locale, manual, cgm, imported, recorded) in [
+      (const Locale('fr'), 'Manuel (non vérifié)', 'CGM (non vérifié)', 'Import (non vérifié)', 'Enregistré'),
+      (const Locale('ar'), 'يدوي (غير موثق)', 'CGM (غير موثق)', 'استيراد (غير موثق)', 'مسجل'),
+      (const Locale('en'), 'Manual (unverified)', 'CGM (unverified)', 'Import (unverified)', 'Recorded'),
+    ]) {
+      for (final width in [390.0, 430.0, 768.0, 1280.0]) {
+        await tester.binding.setSurfaceSize(Size(width, 900));
+        for (final (source, label) in [
+          ('not_cgm', recorded), ('not_imported', recorded),
+          ('manual', manual), ('cgm', cgm), ('imported', imported),
+        ]) {
+          final log = reading(1, 120, day1, source: source);
+          await tester.pumpWidget(MaterialApp(
+            locale: locale,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: SingleChildScrollView(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: DashboardTrendSelectionCard(
+                  log: log, unit: 'mg/dL', locale: locale.languageCode,
+                ),
+              ),
+            )),
+          ));
+          await tester.pumpAndSettle();
+          final card = find.byType(DashboardTrendSelectionCard);
+          expect(find.descendant(of: card, matching: find.text(label)), findsOneWidget,
+              reason: '${locale.languageCode} / $width / $source');
+          expect(Directionality.of(tester.element(card)),
+              locale.languageCode == 'ar' ? TextDirection.rtl : TextDirection.ltr);
+          expect(log.source, source);
+          expect(log.bloodSugar, 120.0);
+          expect(tester.takeException(), isNull,
+              reason: 'layout at ${locale.languageCode} / $width / $source');
+        }
+      }
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, timeout: const Timeout(Duration(seconds: 60)));
 
   testWidgets('actual section computes sample mean and never authorizes target', (tester) async {
     // Construct and open the DB inside the same real-async zone as seeding.
