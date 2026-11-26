@@ -9,12 +9,14 @@ import 'core/theme/amina_visual_language.dart';
 import 'core/theme/app_theme.dart';
 import 'data/drift/database.dart';
 import 'firebase_options.dart';
+import 'features/navigation/d2_guest_entry.dart';
 import 'l10n/app_localizations.dart';
 import 'services/api_client.dart';
 import 'services/app_lock_protected_state_policy.dart';
 import 'services/app_lock_service.dart';
 import 'services/audit_access_policy.dart';
 import 'services/auth_service.dart';
+import 'services/d1_cutover_policy.dart';
 import 'services/firebase_migration_policy.dart';
 import 'services/medical_vault_protected_state.dart';
 import 'services/locale_preference_service.dart';
@@ -40,6 +42,25 @@ Future<bool> _hasProtectedLocalState({
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // The cutover build must not initialize credentials, legacy probes, or
+  // patient providers. D2 remains available as a separate synthetic build.
+  if (kD1CutoverCandidate ||
+      const bool.fromEnvironment('IAMINA_D2_GUEST_CANDIDATE', defaultValue: false)) {
+    runApp(MaterialApp(
+      title: 'IAmina',
+      theme: AminaVisualLanguage.harmonize(AminaTheme.light),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      debugShowCheckedModeBanner: false,
+      // This candidate is guest-only even if remote account flags are true.
+      // Do not persist a bearer or enroll an account outside the normal
+      // protected-state/app-lock/vault admission path. Widget tests inject
+      // synthetic authentication; real admission must be integrated separately.
+      home: const D2GuestEntry(),
+    ));
+    return;
+  }
 
   if (kFirebaseMigrationEnabled) {
     try {
