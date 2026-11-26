@@ -1306,16 +1306,26 @@ jobs:
         timeout-minutes: 18
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/d1-browser-venv"
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" -m pip install playwright==1.55.0
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" -m playwright install --with-deps chromium webkit
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_opfs_capability_probe.py
-          archive_status=0
-          portable_status=0
-          D1_LINUX_CAPABILITY_GATE=1 "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_archive_browser_probe.py || archive_status=$?
-          "$RUNNER_TEMP/d1-browser-venv/bin/python" frontend/tool/d1_portable_browser_probe.py || portable_status=$?
-          echo "D1_TRANSPORT_STATUS opfs_idb=$archive_status portable=$portable_status"
-          test "$archive_status" -eq 0 && test "$portable_status" -eq 0
+          # Official Playwright image: browser binaries + OS dependencies,
+          # pinned to the 1.55.0 registry manifest, never apt on the runner.
+          image='mcr.microsoft.com/playwright/python@sha256:640d578aae63cfb632461d1b0aecb01414e4e020864ac3dd45a868dc0eff3078'
+          timeout 300s docker pull --platform linux/amd64 "$image"
+          docker image inspect "$image" --format '{{.Os}}/{{.Architecture}} {{json .RepoDigests}}'
+          timeout 600s docker run --rm --init --ipc=host --platform linux/amd64 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --workdir /work --env EXPECTED_SHA --env PYTHONDONTWRITEBYTECODE=1 \
+            --entrypoint /bin/bash "$image" -c '
+              set -euo pipefail
+              python -m pip install --disable-pip-version-check --timeout 30 --retries 2 playwright==1.55.0
+              python -c "import importlib.metadata as m; assert m.version(\"playwright\") == \"1.55.0\""
+              python frontend/tool/d1_opfs_capability_probe.py
+              archive_status=0
+              portable_status=0
+              D1_LINUX_CAPABILITY_GATE=1 python frontend/tool/d1_archive_browser_probe.py || archive_status=$?
+              python frontend/tool/d1_portable_browser_probe.py || portable_status=$?
+              echo "D1_TRANSPORT_STATUS opfs_idb=$archive_status portable=$portable_status"
+              test "$archive_status" -eq 0 && test "$portable_status" -eq 0
+            '
 
 
   # One build per target, on Linux. Both browser engines verify the same bytes.
