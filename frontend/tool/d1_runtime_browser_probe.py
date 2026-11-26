@@ -49,6 +49,8 @@ def open_context(browser_type, profile, locale, origin, extra_origin=None, trace
     page.on("pageerror", page_error)
     if trace is not None:
         page.on("console", lambda message: trace("console", message))
+        page.on("response", lambda response: trace("response", response))
+        page.on("requestfailed", lambda request: trace("requestfailed", request))
     page.goto(origin, wait_until="domcontentloaded")
     page.wait_for_function("typeof window.d1Snapshot === 'function' && typeof window.d1Inspect === 'function'", timeout=60000)
     return context, page, blocked, errors
@@ -2155,6 +2157,8 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
     from urllib.parse import urlsplit
     stage="before-navigation"
     frames=[]
+    local_fonts=[]
+    local_font_failures=[]
     def trace(kind, payload):
         record={"engine":ENGINE,"locale":locale,"width":width,"stage":stage,"event":kind}
         try:
@@ -2170,6 +2174,20 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
                     record["pathDigest"]=hashlib.sha256(u.path.encode()).hexdigest()
                 else:
                     record["category"]="other-blocked"
+            elif kind in ("response","requestfailed"):
+                u=urlsplit(payload.url)
+                prefix="/assets/engine-font-fallback/"
+                if not payload.url.startswith(origin+"/") or not u.path.startswith(prefix):
+                    return
+                relative=u.path[len(prefix):]
+                known=relative in (
+                    "notosanssymbols/v43/rP2up3q65FkAtHfwd-eIS2brbDN6gxP34F9jRRCe4W3gfQ8gb_VFRkzrbQ.woff2",
+                    "notosansarabic/v28/nwpxtLGrOAZMl5nJ_wfgRg3DrWFZWsnVBJ_sS6tlqHHFlhQ5l3sQWIHPqzCfyGyvvnCBFQLaig.woff2",
+                )
+                ok=kind=="response" and payload.status==200 and known
+                record["localFont"]=relative.split("/")[0] if known else "unknown"
+                record["status"]=payload.status if kind=="response" else "requestfailed"
+                (local_fonts if ok else local_font_failures).append(record["localFont"])
             elif kind=="pageerror":
                 message=str(payload)
                 stack=getattr(payload,"stack","") or ""
@@ -2370,8 +2388,12 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         assert not blocked
         stage="final-pageerror"
         assert not errors
+        stage="final-local-font"
+        assert not local_font_failures
+        assert ("notosansarabic" if ar else "notosanssymbols") in local_fonts
         return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
-                "viewport":[width,height],"frames":frames,"result":"PASS"}
+                "viewport":[width,height],"frames":frames,"localFonts":sorted(set(local_fonts)),
+                "blockedRequests":len(blocked),"pageErrors":len(errors),"result":"PASS"}
     except Exception as failure:
         # Diagnostic metadata is limited to the synthetic form's known controls;
         # never emit raw exception messages, arbitrary DOM text or secrets.

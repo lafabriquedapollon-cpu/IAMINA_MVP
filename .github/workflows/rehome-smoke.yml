@@ -1372,6 +1372,13 @@ jobs:
             flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
             cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs tool/d1_admission_store.mjs tool/d1_clinical_session_candidate.mjs "$RUNNER_TEMP/d1-runtime-web/"
           fi
+      - name: Prepare licensed local engine fallback fonts (synthetic runtime only)
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/d1-font-venv"
+          "$RUNNER_TEMP/d1-font-venv/bin/python" -m pip install --only-binary=:all: fonttools==4.63.0 brotli==1.2.0
+          "$RUNNER_TEMP/d1-font-venv/bin/python" scripts/prepare_d1_runtime_fonts.py "$RUNNER_TEMP/d1-runtime-web" frontend/assets/fonts
       - name: Package exact source and synthetic build digest
         id: pack
         run: |
