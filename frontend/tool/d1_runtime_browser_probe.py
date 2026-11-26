@@ -884,7 +884,7 @@ I5_BOUND = r"""async ({a,b})=>{
   stage("legacy-clinical");
   const clinicalTicket=await ticket();
   const clinical=await api.admitBoundClinical(A,epoch(),clinicalTicket,a);
-  const allowed=['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readEvidence','insertEvidence','editEvidence','deleteEvidence','readTreatment','writeTreatment','retire'];
+  const allowed=['readJournal','readGlucose','insertGlucose','editGlucose','deleteGlucose','readEvidence','readEvidenceJournal','insertEvidence','editEvidence','deleteEvidence','readTreatment','writeTreatment','retire'];
   check(Object.isFrozen(clinical)&&Object.getPrototypeOf(clinical)===null&&
     JSON.stringify(Object.keys(clinical))===JSON.stringify(allowed),'Unexpected clinical surface');
   const u='ac123456-1234-4abc-8def-000000000010',t=1795564800;
@@ -1023,6 +1023,59 @@ I5_BOUND_RESTART = r"""async ({a,b})=>{
 }"""
 
 
+I5_EVIDENCE_JOURNAL = r"""async ({a,b})=>{
+  const api=await import('/d1_admission_candidate.mjs');
+  const A=900001,B=900002,t=1795564800;
+  const ids=[21,22,23,24].map(n=>'ac123456-1234-4abc-8def-'+String(n).padStart(12,'0'));
+  const check=ok=>{if(!ok)throw Error('Evidence journal invariant failed');};
+  const reject=async(fn,reason)=>{try{await fn();}catch(e){
+    check(String(e).includes(reason));return;
+  }throw Error('Expected journal refusal');};
+  const open=async(owner,secret,raw=false)=>{
+    const proof=await window.d1BoundProof(owner);
+    return raw?api.admitBound(owner,window.d1BoundEpoch(),proof,secret):
+      api.admitBoundClinical(owner,window.d1BoundEpoch(),proof,secret);
+  };
+  window.__d1EvidenceJournalStage='insert';
+  await window.d1BoundLogin(A);
+  let s=await open(A,a);
+  for(let i=0;i<ids.length;i++){
+    const result=await s.insertEvidence(6+i,ids[i],i===0?7.83:140+i,
+      i===0?'mmol/L':'mg/dL',t+[0,1,1,2][i]);
+    check(result.revision===7+i);
+  }
+  window.__d1EvidenceJournalStage='pagination';
+  const first=await s.readEvidenceJournal(10,t,t+2,2,0);
+  const second=await s.readEvidenceJournal(10,t,t+2,2,2);
+  check(first.revision===10&&first.nextOffset===2&&first.rows.map(x=>x.uuid).join(',')===ids.slice(1,3).join(','));
+  check(second.revision===10&&second.nextOffset===null&&second.rows.length===1&&
+    second.rows[0].uuid===ids[0]&&second.rows[0].originalUnit==='mmol/L'&&
+    second.rows[0].originalValue===7.83&&second.rows[0].displayMgDl==='141'&&second.rows[0].displayMmolL==='7.8');
+  check((await s.readEvidenceJournal(10,t+2,t+3,50,0)).rows[0].uuid===ids[3]);
+  check((await s.readEvidenceJournal(10,t+3,t+4,50,0)).rows.length===0);
+  check((await s.readEvidenceJournal(10,t,t+2,50,0)).rows.length===3);
+  check((await s.readEvidenceJournal(10,t,t+2,2,4)).rows.length===0);
+  window.__d1EvidenceJournalStage='conflict';
+  check((await s.editEvidence(10,ids[0],150,'mg/dL',t+3)).revision===11);
+  await reject(()=>s.readEvidenceJournal(10,t,t+2,2,2),'Checkpoint conflict');
+  s=await open(A,a);
+  check((await s.readEvidenceJournal(11,t,t+2,50,0)).rows.length===2);
+  await reject(()=>s.readEvidenceJournal(11,t,t+2,51,0),'Invalid evidence journal range');
+  s=await open(A,a);
+  await s.retire();
+  window.__d1EvidenceJournalStage='revocation';
+  s=await open(A,a,true);
+  await reject(()=>s.readEvidenceJournal(11,t,t+4,50,0,{beforeReturn:()=>window.d1BoundLock()}),'Bound authority retired');
+  await window.d1BoundLogin(B);
+  s=await open(B,b);
+  const empty=await s.readEvidenceJournal(1,t,t+4,50,0);
+  check(empty.rows.length===0&&empty.nextOffset===null&&empty.revision===1);
+  await s.retire();
+  window.__d1EvidenceJournalStage='complete';
+  return {halfOpen:true,pagination:true,tieOrder:true,legacyExcluded:true,sourceProjection:true,staleRejected:true,revoked:true,ownerIsolation:true,revisionA:11};
+}"""
+
+
 def exercise_bound(browser_type,profile,locale,origin):
     ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
     try:
@@ -1063,9 +1116,22 @@ def exercise_bound(browser_type,profile,locale,origin):
                          "noResurrection":True,"replay":True,"legacyPreserved":True}
         assert not blocked and not errors
         result["restart"]=restart
+        journal=page.evaluate(I5_EVIDENCE_JOURNAL,secrets)
+        assert journal=={"halfOpen":True,"pagination":True,"tieOrder":True,"legacyExcluded":True,
+                         "sourceProjection":True,"staleRejected":True,"revoked":True,
+                         "ownerIsolation":True,"revisionA":11}
+        assert not blocked and not errors
+        result["evidenceJournal"]=journal
         return result
     except Exception:
-        raise RuntimeError("D1 evidence mutation restart qualification failed") from None
+        stage="restart"
+        try:
+            candidate=page.evaluate("window.__d1EvidenceJournalStage || 'restart'")
+            if candidate in {"restart","insert","pagination","conflict","revocation","complete"}:
+                stage=candidate
+        except Exception:
+            pass
+        raise RuntimeError("D1 evidence restart/journal qualification failed stage="+stage) from None
     finally:
         secrets.clear()
         ctx.close()
@@ -2120,6 +2186,7 @@ def run():
     print("D1_D5_EXPLICIT_EVIDENCE_PASS 2/2",flush=True)
     print("D1_D5_EVIDENCE_MUTATION_PASS 2/2",flush=True)
     print("D1_D5_EVIDENCE_RESTART_PASS 2/2",flush=True)
+    print("D1_D5_EVIDENCE_JOURNAL_PASS 2/2",flush=True)
     print("D1_I5_PROACTIVE_REVOCATION_PASS 2/2",flush=True)
     print("D1_I5_REVOCATION_FAULT_PASS 2/2",flush=True)
     print("D1_I5_CROSS_HINTS_PASS 2/2",flush=True)

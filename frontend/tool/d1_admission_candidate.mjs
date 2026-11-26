@@ -324,6 +324,33 @@ class AdmissionSession {
       return {revision,replay:false,deleted:gone,measurement};
     }finally{bytes?.fill(0);next?.fill(0);this.#busy=false;}
   }
+  async readEvidenceJournal(expectedRevision,start,end,limit,offset,{beforeReturn}={}){
+    require(this.#guard,'Bound authority required');this.#local();
+    require([expectedRevision,start,end,limit,offset].every(Number.isSafeInteger)&&
+      expectedRevision>0&&start>0&&end>start&&end<=4102444800&&
+      limit>=1&&limit<=50&&offset>=0&&offset<=10000,'Invalid evidence journal range');
+    const r=await this.#read();
+    require(r.revision===expectedRevision,'Checkpoint conflict');
+    let bytes;
+    try{
+      bytes=await decrypt(r,this.#key,this.#lease.owner);this.#local();
+      const result=JSON.parse(await window.d1EvidenceJournal(bytes,this.#lease.owner,start,end,limit,offset));
+      this.#local();
+      require(Array.isArray(result.rows)&&result.rows.length<=limit&&
+        new Set(result.rows.map(x=>x.uuid)).size===result.rows.length&&
+        result.rows.every(x=>typeof x.uuid==='string'&&
+          Number.isFinite(x.originalValue)&&x.originalValue>0&&
+          ['mg/dL','mmol/L'].includes(x.originalUnit)&&
+          Number.isFinite(x.mgDl)&&x.mgDl>0&&x.provenance==='user_entered'&&
+          Number.isSafeInteger(x.loggedAtSeconds)&&x.loggedAtSeconds>=start&&x.loggedAtSeconds<end)&&
+        (result.nextOffset===null||(result.rows.length===limit&&result.nextOffset===offset+limit&&result.nextOffset<=10000)),
+        'Evidence journal invariant failed');
+      if(beforeReturn)await beforeReturn();
+      const current=await this.#read();this.#local();
+      require(sameRecord(current,r),'Checkpoint conflict');
+      return {revision:r.revision,rows:result.rows,nextOffset:result.nextOffset};
+    }finally{bytes?.fill(0);}
+  }
   async readEvidence(uuid){
     require(this.#guard,'Bound authority required');this.#local();
     require(typeof uuid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid),'Invalid measurement UUID');
@@ -643,6 +670,7 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
       editGlucose:(revision,uuid,mgDl,unit,seconds,hooks)=>perform(()=>session.changeGlucose(revision,uuid,'edit',mgDl,unit,seconds,hooks)),
       deleteGlucose:(revision,uuid,hooks)=>perform(()=>session.changeGlucose(revision,uuid,'delete',0,'mg/dL',0,hooks)),
       readEvidence:uuid=>perform(()=>session.readEvidence(uuid)),
+      readEvidenceJournal:(revision,start,end,limit,offset,hooks)=>perform(()=>session.readEvidenceJournal(revision,start,end,limit,offset,hooks)),
       insertEvidence:(revision,uuid,original,unit,seconds,hooks)=>perform(()=>session.changeEvidence(revision,uuid,'insert',original,unit,seconds,hooks)),
       editEvidence:(revision,uuid,original,unit,seconds,hooks)=>perform(()=>session.changeEvidence(revision,uuid,'edit',original,unit,seconds,hooks)),
       deleteEvidence:(revision,uuid,hooks)=>perform(()=>session.changeEvidence(revision,uuid,'delete',0,'mg/dL',0,hooks)),

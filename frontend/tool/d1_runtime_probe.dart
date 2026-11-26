@@ -43,6 +43,8 @@ external set _journalPageFn(JSFunction function);
 external set _glucoseReadFn(JSFunction function);
 @JS('d1GlucoseInsert')
 external set _glucoseInsertFn(JSFunction function);
+@JS('d1EvidenceJournal')
+external set _evidenceJournalFn(JSFunction function);
 @JS('d1EvidenceRead')
 external set _evidenceReadFn(JSFunction function);
 @JS('d1EvidenceChange')
@@ -659,15 +661,56 @@ Future<String> _readEvidence(Uint8List input, int owner, String uuid) async {
     final meta = await db.customSelect('SELECT client_uuid, owner_id, envelope_json FROM $_evidenceTable WHERE client_uuid = ?',
       variables: [Variable<String>(uuid)]).getSingle();
     final evidence = _decodeEvidence(meta, row, owner);
-    return jsonEncode({
-      'uuid': uuid, 'originalValue': evidence.originalRawValue,
+    return jsonEncode(_evidenceJson(row, evidence));
+  } finally {
+    try { await vault.db.close(); }
+    finally { vault.wipe(); }
+  }
+}
+
+Map<String, Object?> _evidenceJson(LogEntryData row, GlucoseQuantityEvidence evidence) {
+  return {
+      'uuid': row.clientUuid, 'originalValue': evidence.originalRawValue,
       'originalUnit': evidence.originalUnit!.ucumCode,
       'mgDl': evidence.canonicalMgDl,
       'loggedAtSeconds': row.loggedAt!.millisecondsSinceEpoch ~/ 1000,
       'provenance': 'user_entered',
       'displayMgDl': GlucoseDisplayProjection.fromEvidence(evidence, GlucoseSourceUnit.mgDl)?.numericText,
       'displayMmolL': GlucoseDisplayProjection.fromEvidence(evidence, GlucoseSourceUnit.mmolL)?.numericText,
-    });
+  };
+}
+
+// Dedicated journal: no inferred units, no tombstones or legacy rows.
+// Half-open UTC intervals and deterministic order within a single snapshot.
+Future<String> _evidenceJournal(Uint8List input, int owner, int start, int end,
+    int limit, int offset) async {
+  _require(start > 0 && end > start && end <= 4102444800 &&
+      limit >= 1 && limit <= 50 && offset >= 0 && offset <= 10000,
+      'Invalid evidence journal range');
+  final vault = await _MemoryVault.open(owner, input);
+  try {
+    await vault.inspect();
+    final db = vault.db;
+    final from = DateTime.fromMillisecondsSinceEpoch(start * 1000, isUtc: true);
+    final until = DateTime.fromMillisecondsSinceEpoch(end * 1000, isUtc: true);
+    final rows = await (db.select(db.logEntries)
+      ..where((t) => t.mealDescription.equals(_evidenceMarker) &
+          t.loggedAt.isBiggerOrEqualValue(from) & t.loggedAt.isSmallerThanValue(until))
+      ..orderBy([
+        (t) => OrderingTerm(expression: t.loggedAt, mode: OrderingMode.desc),
+        (t) => OrderingTerm(expression: t.createdAt, mode: OrderingMode.desc),
+        (t) => OrderingTerm(expression: t.clientUuid, mode: OrderingMode.asc),
+      ])
+      ..limit(limit + 1, offset: offset)).get();
+    _require(rows.length <= limit || offset + limit <= 10000,
+        'Evidence journal pagination bound exceeded');
+    final projected = <Map<String, Object?>>[];
+    for (final row in rows.take(limit)) {
+      final meta = await db.customSelect('SELECT client_uuid, owner_id, envelope_json FROM $_evidenceTable WHERE client_uuid = ?',
+        variables: [Variable<String>(row.clientUuid)]).getSingle();
+      projected.add(_evidenceJson(row, _decodeEvidence(meta, row, owner)));
+    }
+    return jsonEncode({'rows': projected, 'nextOffset': rows.length > limit ? offset + limit : null});
   } finally {
     try { await vault.db.close(); }
     finally { vault.wipe(); }
@@ -837,6 +880,11 @@ void main() {
       JSNumber mgDl, JSNumber seconds) =>
       _insertGlucose(bytes.toDart, owner.toDartInt, uuid.toDart,
           mgDl.toDartDouble, seconds.toDartInt)
+          .then((value) => value.toJS).toJS).toJS;
+  _evidenceJournalFn = ((JSUint8Array bytes, JSNumber owner, JSNumber start,
+      JSNumber end, JSNumber limit, JSNumber offset) =>
+      _evidenceJournal(bytes.toDart, owner.toDartInt, start.toDartInt,
+          end.toDartInt, limit.toDartInt, offset.toDartInt)
           .then((value) => value.toJS).toJS).toJS;
   _evidenceReadFn = ((JSUint8Array bytes, JSNumber owner, JSString uuid) =>
       _readEvidence(bytes.toDart, owner.toDartInt, uuid.toDart).then((value) => value.toJS).toJS).toJS;
