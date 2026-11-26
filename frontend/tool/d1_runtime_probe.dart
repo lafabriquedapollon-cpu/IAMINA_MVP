@@ -772,7 +772,8 @@ Future<Uint8List> _changeEvidence(Uint8List input, int owner, String uuid,
           [uuid, owner, jsonEncode(envelope)]);
       } else {
         _require(row != null && row.mealDescription == _evidenceMarker, 'Explicit evidence unavailable');
-        final id = row!.id;
+        final originalRow = row!;
+        final id = originalRow.id;
         if (action == 'delete') {
           await db.customStatement('CREATE TABLE IF NOT EXISTS $_evidenceDeletedTable (client_uuid TEXT NOT NULL PRIMARY KEY, owner_id INTEGER NOT NULL)');
           await db.customStatement('INSERT INTO $_evidenceDeletedTable (client_uuid, owner_id) VALUES (?, ?)', [uuid, owner]);
@@ -786,7 +787,7 @@ Future<Uint8List> _changeEvidence(Uint8List input, int owner, String uuid,
           await db.customStatement('UPDATE $_evidenceTable SET envelope_json = ? WHERE client_uuid = ? AND owner_id = ?',
             [jsonEncode(envelope), uuid, owner]);
           final after = await (db.select(db.logEntries)..where((r) => r.clientUuid.equals(uuid))).getSingle();
-          _require(after.id == id && after.createdAt == row.createdAt, 'Evidence identity changed');
+          _require(after.id == id && after.createdAt == originalRow.createdAt, 'Evidence identity changed');
         }
       }
       await db.customStatement('CREATE TABLE IF NOT EXISTS $_evidenceReceiptTable (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), owner_id INTEGER NOT NULL, client_uuid TEXT NOT NULL, action TEXT NOT NULL, base_revision INTEGER NOT NULL)');
