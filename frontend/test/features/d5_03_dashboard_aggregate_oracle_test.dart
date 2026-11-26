@@ -135,23 +135,33 @@ void main() {
   });
 
   testWidgets('actual section computes sample mean and never authorizes target', (tester) async {
-    final db = AppDatabase(NativeDatabase.memory());
-    final now = DateTime.now();
+    // Construct and open the DB inside the same real-async zone as seeding.
+    // A DB constructed in FakeAsync can leave its internal completers there
+    // while runAsync waits outside that zone.
+    AppDatabase? opened;
     try {
-      await tester.runAsync(() async {
+      final db = await tester.runAsync(() async {
+        final database = AppDatabase(NativeDatabase.memory());
+        opened = database;
+        final now = DateTime.now();
+        print('D5_03_WIDGET seed-start');
         for (final (id, value, days) in [
           (1, 80.0, 5), (2, 120.0, 5), (3, 160.0, 5),
           (4, 90.0, 4), (5, 150.0, 4), (6, 210.0, 1),
         ]) {
           final at = now.subtract(Duration(days: days));
-          await db.into(db.logEntries).insert(LogEntriesCompanion.insert(
+          await database.into(database.logEntries).insert(LogEntriesCompanion.insert(
             clientUuid: 'synthetic-$id', createdAt: at,
             loggedAt: drift.Value(at), bloodSugar: value,
-          ));
+          )).timeout(const Duration(seconds: 5));
         }
+        print('D5_03_WIDGET seed-complete');
+        return database;
       });
+      expect(db, isNotNull, reason: 'real-zone fixture initialization');
+      print('D5_03_WIDGET mount-start');
       await tester.pumpWidget(Provider<AppDatabase>.value(
-        value: db,
+        value: db!,
         child: MaterialApp(
           locale: const Locale('en'),
           localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -177,9 +187,35 @@ void main() {
       expect(find.descendant(of: finder, matching: find.text('135')), findsOneWidget);
       expect(find.descendant(of: finder, matching: find.text('—')), findsOneWidget);
       expect(tester.takeException(), isNull);
+      print('D5_03_WIDGET assertions-complete');
     } finally {
+      print('D5_03_WIDGET unmount-start');
       await tester.pumpWidget(const SizedBox.shrink());
-      await tester.runAsync(() async { await db.close(); });
+      await tester.pump();
+      final database = opened;
+      if (database != null) {
+        print('D5_03_WIDGET close-start');
+        // Initiate close in the widget zone, then advance microtasks while
+        // real-async database callbacks drain. Do not block either zone.
+        var closed = false;
+        Object? closeError;
+        final closing = database.close().then<void>((_) {
+          closed = true;
+        }, onError: (Object error, StackTrace stack) {
+          closeError = error;
+          closed = true;
+        });
+        for (var i = 0; i < 100 && !closed; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+          await tester.runAsync(() async {
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          });
+        }
+        expect(closed, isTrue, reason: 'DB close must complete after stream disposal');
+        expect(closeError, isNull);
+        await closing;
+        print('D5_03_WIDGET close-complete');
+      }
     }
-  });
+  }, timeout: const Timeout(Duration(seconds: 60)));
 }
