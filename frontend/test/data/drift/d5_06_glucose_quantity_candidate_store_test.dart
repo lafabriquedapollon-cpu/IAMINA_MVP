@@ -32,7 +32,7 @@ void main() {
   late GlucoseQuantityCandidateStore store;
   setUp(() async {
     db = dbFor(900001);
-    store = await GlucoseQuantityCandidateStore.openSynthetic(db);
+    store = await GlucoseQuantityCandidateStore.openSynthetic(db, initialize: true);
   });
   tearDown(() async => db.close());
 
@@ -99,6 +99,7 @@ void main() {
     """);
     await expectLater(store.delete(id), throwsA(isA<Exception>()));
     expect((await store.read(id))!.originalRawValue, 7.83);
+    expect(await db.customSelect('SELECT client_uuid FROM d5_glucose_tombstones_v1').get(), isEmpty);
     await db.customStatement('DROP TRIGGER d5_force_delete_failure');
     await store.delete(id);
     expect(await store.read(id), isNull);
@@ -111,7 +112,7 @@ void main() {
     try {
       var disk = dbFor(900001, file: file);
       try {
-        final port = await GlucoseQuantityCandidateStore.openSynthetic(disk);
+        final port = await GlucoseQuantityCandidateStore.openSynthetic(disk, initialize: true);
         await insert(port);
       } finally { await disk.close(); }
       disk = dbFor(900001, file: file);
@@ -132,7 +133,7 @@ void main() {
     final nonfixture = dbFor(100);
     final unscoped = AppDatabase(NativeDatabase.memory());
     try {
-      final other = await GlucoseQuantityCandidateStore.openSynthetic(b);
+      final other = await GlucoseQuantityCandidateStore.openSynthetic(b, initialize: true);
       expect(await other.read(id), isNull);
       await insert(other);
       expect((await store.read(id))!.originalRawValue, 7.83);
@@ -143,5 +144,117 @@ void main() {
     } finally {
       await b.close(); await nonfixture.close(); await unscoped.close();
     }
+  });
+
+  test('empty vault is bound before any reading, survives restart, cannot be reassigned', () async {
+    final dir = await Directory.systemTemp.createTemp('d5-empty-');
+    final file = File('${dir.path}/candidate.sqlite');
+    try {
+      var disk = dbFor(900001, file: file);
+      String vaultId;
+      try {
+        await expectLater(GlucoseQuantityCandidateStore.openSynthetic(disk), throwsStateError);
+        await GlucoseQuantityCandidateStore.openSynthetic(disk, initialize: true);
+        vaultId = (await disk.customSelect('SELECT vault_id FROM d5_glucose_vault_identity_v1').getSingle()).read<String>('vault_id');
+        await expectLater(GlucoseQuantityCandidateStore.openSynthetic(disk, initialize: true), throwsStateError);
+      } finally { await disk.close(); }
+      disk = dbFor(900002, file: file);
+      try {
+        await expectLater(GlucoseQuantityCandidateStore.openSynthetic(disk), throwsStateError);
+        await expectLater(GlucoseQuantityCandidateStore.openSynthetic(disk, initialize: true), throwsStateError);
+      } finally { await disk.close(); }
+      disk = dbFor(900001, file: file);
+      try {
+        final restored = await GlucoseQuantityCandidateStore.openSynthetic(disk);
+        expect(await restored.read(id), isNull);
+        expect((await disk.customSelect('SELECT vault_id FROM d5_glucose_vault_identity_v1').getSingle()).read<String>('vault_id'), vaultId);
+      } finally { await disk.close(); }
+    } finally { await dir.delete(recursive: true); }
+  });
+
+  test('unbound nonempty or partial preexisting vault is never adopted', () async {
+    final old = dbFor(900001);
+    final partial = dbFor(900001);
+    try {
+      await legacy(old);
+      await expectLater(GlucoseQuantityCandidateStore.openSynthetic(old, initialize: true), throwsStateError);
+      expect((await old.select(old.logEntries).get()).single.bloodSugar, 5.0);
+      expect(await old.customSelect("SELECT name FROM sqlite_master WHERE name LIKE 'd5_glucose_%'").get(), isEmpty);
+      await partial.customStatement('CREATE TABLE d5_glucose_evidence_candidate_v1 (client_uuid TEXT PRIMARY KEY)');
+      await expectLater(GlucoseQuantityCandidateStore.openSynthetic(partial, initialize: true), throwsStateError);
+      await expectLater(GlucoseQuantityCandidateStore.openSynthetic(partial), throwsStateError);
+    } finally { await old.close(); await partial.close(); }
+  });
+
+  test('lost identity rejects all operations and cannot be repaired', () async {
+    await insert(store);
+    await db.customStatement('DELETE FROM d5_glucose_vault_identity_v1');
+    await expectLater(store.read(id), throwsStateError);
+    await expectLater(insert(store, uuid: 'new'), throwsStateError);
+    await expectLater(store.delete(id), throwsStateError);
+    await expectLater(GlucoseQuantityCandidateStore.openSynthetic(db), throwsStateError);
+    await expectLater(GlucoseQuantityCandidateStore.openSynthetic(db, initialize: true), throwsStateError);
+    expect((await db.select(db.logEntries).get()).single.clientUuid, id);
+  });
+
+  test('replacement vault identity invalidates previously opened handle', () async {
+    await insert(store);
+    await db.customStatement("UPDATE d5_glucose_vault_identity_v1 SET vault_id = 'ac123456-1234-4abc-8def-000000000011'");
+    await expectLater(store.read(id), throwsStateError);
+    await expectLater(store.delete(id), throwsStateError);
+  });
+
+  test('tombstone remains after file restart and forbids UUID reuse', () async {
+    final dir = await Directory.systemTemp.createTemp('d5-tombstone-');
+    final file = File('${dir.path}/candidate.sqlite');
+    try {
+      var disk = dbFor(900001, file: file);
+      try {
+        final port = await GlucoseQuantityCandidateStore.openSynthetic(disk, initialize: true);
+        await insert(port);
+        await port.delete(id);
+        expect(await port.read(id), isNull);
+        final row = (await disk.customSelect('SELECT * FROM d5_glucose_tombstones_v1').getSingle()).data;
+        expect(row, {'client_uuid': id, 'owner_id': 900001});
+        await expectLater(insert(port), throwsStateError);
+        await expectLater(port.delete(id), throwsStateError);
+      } finally { await disk.close(); }
+      disk = dbFor(900001, file: file);
+      try {
+        final port = await GlucoseQuantityCandidateStore.openSynthetic(disk);
+        await expectLater(insert(port), throwsStateError);
+        expect(await port.read(id), isNull);
+        expect(await disk.select(disk.logEntries).get(), isEmpty);
+        await insert(port, uuid: 'new');
+        expect((await port.read('new'))!.originalRawValue, 7.83);
+      } finally { await disk.close(); }
+    } finally { await dir.delete(recursive: true); }
+  });
+
+  test('tombstone insertion failure rolls back deletion', () async {
+    await insert(store);
+    await db.customStatement("""
+      CREATE TRIGGER d5_fail_tombstone BEFORE INSERT ON d5_glucose_tombstones_v1
+      BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END
+    """);
+    await expectLater(store.delete(id), throwsA(isA<Exception>()));
+    expect((await store.read(id))!.originalRawValue, 7.83);
+    expect(await db.customSelect('SELECT client_uuid FROM d5_glucose_tombstones_v1').get(), isEmpty);
+  });
+
+  test('resurrected row and cross-owner tombstone fail closed', () async {
+    await insert(store);
+    await store.delete(id);
+    await db.into(db.logEntries).insert(LogEntriesCompanion.insert(
+      clientUuid: id, createdAt: at, bloodSugar: 100,
+    ));
+    await expectLater(store.read(id), throwsStateError);
+    await expectLater(insert(store), throwsStateError);
+    await db.customStatement(
+      'INSERT INTO d5_glucose_tombstones_v1 (client_uuid, owner_id) VALUES (?, ?)',
+      ['foreign', 900002],
+    );
+    await expectLater(store.read('foreign'), throwsStateError);
+    await expectLater(GlucoseQuantityCandidateStore.openSynthetic(db), throwsStateError);
   });
 }
