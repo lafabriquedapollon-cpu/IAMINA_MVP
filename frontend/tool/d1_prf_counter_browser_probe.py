@@ -422,7 +422,8 @@ def flutter_runtime_checks(ctx,origin,fixture):
             assert response and response.status==200
             p.wait_for_function("typeof window.d1PrfRuntimeRun==='function' && typeof window.d1Snapshot==='function'",timeout=60000)
         except Exception:
-            print("D1_PRF_FLUTTER_BOOT_FAILURE "+json.dumps(diagnostics[-30:]),flush=True)
+            actual_locale=p.evaluate("()=>({language:navigator.language,languages:Array.from(navigator.languages)})")
+            print("D1_PRF_FLUTTER_BOOT_FAILURE "+json.dumps({"locale":actual_locale,"diagnostics":diagnostics[-30:]}),flush=True)
             raise
         print("D1_PRF_FLUTTER_BOOT_READY",flush=True)
         p.evaluate(INIT)
@@ -544,6 +545,15 @@ def flutter_runtime_checks(ctx,origin,fixture):
 def setup(ctx,origin):
     page=ctx.new_page()
     assert page.goto(origin+"/prf-synthetic.html").status==200
+    # Check actual browser locale and Intl, not merely configured options.
+    locale=page.evaluate("""()=>{
+      const language=navigator.language,languages=Array.from(navigator.languages);
+      return {language,languages,canonical:Intl.getCanonicalLocales(languages),
+        dateLocale:new Intl.DateTimeFormat(language).resolvedOptions().locale,
+        numberLocale:new Intl.NumberFormat(language).resolvedOptions().locale};
+    }""")
+    assert locale["language"]=="fr-FR" and locale["canonical"] and locale["dateLocale"].startswith("fr") and locale["numberLocale"].startswith("fr"),locale
+    print("D1_PRF_BROWSER_LOCALE "+json.dumps(locale),flush=True)
     page.evaluate(INIT)
     return page
 
@@ -561,7 +571,10 @@ def run():
         with sync_playwright() as pw:
             engine=getattr(pw,name)
             def launch():
-                ctx=engine.launch_persistent_context(tmp,headless=True,service_workers="block")
+                # Match the proven D1 Flutter browser configuration instead of
+                # inheriting a runner-dependent locale (e.g. POSIX/C).
+                ctx=engine.launch_persistent_context(tmp,headless=True,locale="fr-FR",
+                    viewport={"width":390,"height":844},service_workers="block")
                 ctx.route("**/*",route)
                 attach_websocket_guard(ctx,blocked)
                 attach_direct_transport_guard(ctx,blocked)
