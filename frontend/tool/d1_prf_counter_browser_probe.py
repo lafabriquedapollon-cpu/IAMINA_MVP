@@ -169,6 +169,43 @@ SIGNED_PRF="""async()=>{
             if(!Object.values(dartChecks).every(x=>x===true))throw new Error('Dart bridge '+JSON.stringify(dartChecks));
             window.dartBridgeChecks=dartChecks;
         }
+        // Dedicated immutable floor: every reopening goes to the same
+        // credential-global register, never a legacy counter write.
+        const authority={};
+        const baseline=await prfCounter.readPrfCounter(credential,pending);
+        const initialFloor=credential.signCount;
+        const reopen=async(owner=900001)=>bridge.acquire(JSON.stringify(credential),owner,pending);
+        counter=baseline.signCount+1;
+        const reopenA=await reopen();
+        bridge.revoke(reopenA);
+        authority.lockRevoked=!bridge.isLive(reopenA);
+        counter++;
+        const reopenB=await reopen(900002);
+        bridge.revoke(reopenB);
+        authority.sharedCredentialCounter=(await prfCounter.readPrfCounter(credential,pending)).signCount===counter;
+        authority.replayRefused=await refused(()=>reopen());
+        const beforeAhead=requests;
+        authority.aheadFloorRefused=await refused(()=>bridge.acquire(
+          JSON.stringify({...credential,signCount:counter+1}),900001,pending))&&requests===beforeAhead;
+        counter++;
+        let unlockBoth;
+        delay=new Promise(resolve=>{unlockBoth=resolve;});
+        const started=requests;
+        const attempts=[reopen(),reopen(900002)].map(p=>p.then(t=>({t}),()=>({t:null})));
+        for(let i=0;i<200&&requests<started+2;i++)await new Promise(r=>setTimeout(r,5));
+        const bothEntered=requests===started+2;
+        unlockBoth();
+        const outcomes=await Promise.all(attempts);
+        delay=null;
+        const winners=outcomes.filter(x=>x.t&&bridge.isLive(x.t));
+        authority.signedRaceOneWinner=bothEntered&&winners.length===1;
+        winners.forEach(x=>bridge.revoke(x.t));
+        const afterAuthority=await prfCounter.readPrfCounter(credential,pending);
+        authority.singleDurableRevision=afterAuthority.signCount===counter&&
+          afterAuthority.revision===baseline.revision+3;
+        authority.immutableFloor=credential.signCount===initialFloor;
+        if(!Object.values(authority).every(x=>x===true))throw new Error('counter authority '+JSON.stringify(authority));
+        window.authorityChecks=authority;
         return true;
     }finally{
         if(pubDescriptor)Object.defineProperty(window,'PublicKeyCredential',pubDescriptor);
@@ -262,6 +299,9 @@ def run():
                 guard=a.evaluate("window.guardBridgeChecks")
                 assert len(guard)==10 and all(v is True for v in guard.values())
                 print("D1_PRF_GUARD_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(guard),count=len(guard))),flush=True)
+                authority=a.evaluate("window.authorityChecks")
+                assert len(authority)==7 and all(v is True for v in authority.values())
+                print("D1_PRF_SINGLE_AUTHORITY_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(authority),count=len(authority))),flush=True)
                 if INTEROP:
                     dart=a.evaluate("window.dartBridgeChecks")
                     assert len(dart)==4 and all(v is True for v in dart.values())

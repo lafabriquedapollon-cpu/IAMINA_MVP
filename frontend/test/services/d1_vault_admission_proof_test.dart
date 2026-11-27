@@ -17,6 +17,7 @@ const _a = 900001;
 const _b = 900002;
 const _credentialKey = 'iamina_app_lock_credential_v1';
 const _requiredKey = 'iamina_app_lock_required_v1';
+const _d1CredentialKey = 'iamina_d1_prf_credential_candidate_v1';
 const _tokenKey = 'iamina_native_access_token';
 const _bindingKey = 'iamina_native_account_binding_v1';
 const _credential = AppLockCredential(
@@ -25,6 +26,14 @@ const _credential = AppLockCredential(
   rpId: 'patient.example',
   origin: 'https://patient.example',
   signCount: 4,
+);
+
+const _d1Credential = AppLockCredential(
+  credentialId: 'dedicated-d1-fixture',
+  publicKeySpki: 'dedicated-d1-public-key',
+  rpId: 'patient.example',
+  origin: 'https://patient.example',
+  signCount: 2,
 );
 
 String _token(int owner) => 'iamina.fixture_$owner:abc123:signature_$owner';
@@ -91,7 +100,8 @@ class _Fixture {
   Duration elapsed = Duration.zero;
   Completer<http.Response>? pendingLogin;
 
-  Future<void> start({bool signIn = true, FlutterSecureStorage? lockStorage}) async {
+  Future<void> start({bool signIn = true, FlutterSecureStorage? lockStorage,
+      D1PrfAcquirer? prf}) async {
     auth = AuthService(httpClient: MockClient((request) async {
       if (request.url.path.endsWith('/logout')) return http.Response('{}', 200);
       final email = jsonDecode(request.body)['email'];
@@ -101,7 +111,8 @@ class _Fixture {
     await auth.initialize();
     if (signIn) await auth.signInWithEmail('a@example.invalid', 'fixture');
     lock = AppLockService(authService: auth, authenticator: authenticator,
-        storage: lockStorage, admissionElapsedForTesting: () => elapsed);
+        storage: lockStorage, d1PrfAcquirer: prf,
+        admissionElapsedForTesting: () => elapsed);
     await lock.initialize();
     addTearDown(() { lock.dispose(); auth.dispose(); });
   }
@@ -200,6 +211,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => FlutterSecureStorage.setMockInitialValues({
     _credentialKey: _credential.encode(), _requiredKey: 'required',
+    _d1CredentialKey: _d1Credential.encode(),
   }));
 
   test('fresh assertion is persisted before a one-shot owner capability', () async {
@@ -687,26 +699,27 @@ void main() {
 
   test('B2a.3b one PRF proof and opaque one-shot handle, no legacy fallback', () async {
     final f = _Fixture();
-    await f.start();
-    await f.lock.unlock(); // existing UI precondition only
     final prf = _Prf();
+    await f.start(prf: prf);
+    expect(f.lock.isUnlocked, isFalse);
     final backend = _RuntimeBackend()..takePrf = true;
     final session = await D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit();
     expect(prf.calls, 1);
-    expect(f.authenticator.calls, 1);
+    expect(f.authenticator.calls, 0);
     expect(prf.owner, _a);
-    expect(prf.credential!.credentialId, _credential.credentialId);
-    expect(prf.credential!.signCount, 5);
+    expect(prf.credential!.credentialId, _d1Credential.credentialId);
+    expect(prf.credential!.signCount, _d1Credential.signCount);
     expect(backend.possession, same(prf.last));
     expect(backend.possession!.isLive, isTrue);
     expect(session.isActive, isTrue);
+    expect(f.lock.isUnlocked, isFalse);
     expect(() => backend.lastAcquisition!.takePrfPossession(), throwsA(isA<D1RuntimeAdmissionException>()));
     await session.retire();
     expect(prf.last!.isLive, isFalse);
     expect(session.isActive, isFalse);
   });
 
-  test('B2a.3b locked UI refuses before invoking PRF or backend', () async {
+  test('B2a.3b default legacy mode refuses PRF before invoking backend', () async {
     final f = _Fixture();
     await f.start();
     final prf = _Prf();
@@ -719,20 +732,18 @@ void main() {
 
   test('B2a.3b absent PRF never calls backend or legacy authenticator', () async {
     final f = _Fixture();
-    await f.start();
-    await f.lock.unlock();
     final prf = _Prf()..refuse = true;
+    await f.start(prf: prf);
     final backend = _RuntimeBackend()..takePrf = true;
     await expectLater(D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit(), _refusal);
-    expect(f.authenticator.calls, 1);
+    expect(f.authenticator.calls, 0);
     expect(backend.calls, 0);
   });
 
   test('B2a.3b lock during PRF rejects late handle and revokes it', () async {
     final f = _Fixture();
-    await f.start();
-    await f.lock.unlock();
     final prf = _Prf()..delayed = Completer<D1PrfPossession>();
+    await f.start(prf: prf);
     final backend = _RuntimeBackend()..takePrf = true;
     final result = D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit();
     final refused = expectLater(result, _refusal);
@@ -749,9 +760,8 @@ void main() {
 
   test('B2a.3b backend without possession cannot activate', () async {
     final f = _Fixture();
-    await f.start();
-    await f.lock.unlock();
     final prf = _Prf();
+    await f.start(prf: prf);
     final backend = _RuntimeBackend();
     await expectLater(D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit(),
         throwsA(isA<D1RuntimeAdmissionException>()));
@@ -761,9 +771,8 @@ void main() {
 
   test('B2a.3b wrong owner burns ticket and revokes PRF handle', () async {
     final f = _Fixture();
-    await f.start();
-    await f.lock.unlock();
     final prf = _Prf();
+    await f.start(prf: prf);
     final proof = await f.lock.issuePrfVaultAdmissionProof(prf);
     expect(() => f.lock.consumeVaultAdmissionProof(proof, owner: _b), _refusal);
     expect(prf.last!.isLive, isFalse);
@@ -772,9 +781,8 @@ void main() {
 
   test('B2a.3b replacement revokes old handle without touching successor', () async {
     final f = _Fixture();
-    await f.start();
-    await f.lock.unlock();
     final prf = _Prf();
+    await f.start(prf: prf);
     final backend = _RuntimeBackend()..takePrf = true;
     final admission = D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf);
     final first = await admission.admit();
@@ -793,9 +801,8 @@ void main() {
 
   test('B2a.3b expiry before PRF ACK rejects and revokes late handle', () async {
     final f = _Fixture();
-    await f.start();
-    await f.lock.unlock();
     final prf = _Prf()..delayed = Completer<D1PrfPossession>();
+    await f.start(prf: prf);
     final backend = _RuntimeBackend()..takePrf = true;
     final result = D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit();
     final refused = expectLater(result, _refusal);
@@ -811,9 +818,8 @@ void main() {
 
   test('B2a.3b identity transition before PRF ACK destroys the late handle', () async {
     final f = _Fixture();
-    await f.start();
-    await f.lock.unlock();
     final prf = _Prf()..delayed = Completer<D1PrfPossession>();
+    await f.start(prf: prf);
     final backend = _RuntimeBackend()..takePrf = true;
     final result = D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit();
     final refused = expectLater(result, _refusal);
@@ -832,9 +838,8 @@ void main() {
 
   test('B2a.3b lock after handle handoff before durable lease ACK', () async {
     final f = _Fixture();
-    await f.start();
-    await f.lock.unlock();
     final prf = _Prf();
+    await f.start(prf: prf);
     final backend = _RuntimeBackend()
       ..takePrf = true
       ..delayed = Completer<D1DurableRuntimeLease>();
@@ -850,6 +855,117 @@ void main() {
     await refused;
     expect(lease.retireCalls, 1);
     expect(lease.reads, 0);
+  });
+
+  test('B2b.1 dedicated admission reopens from lock with immutable floor', () async {
+    final f = _Fixture();
+    final prf = _Prf();
+    await f.start(prf: prf);
+    final backend = _RuntimeBackend()..takePrf = true;
+    final admission = D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf);
+    final first = await admission.admit();
+    final old = prf.last!;
+    f.lock.lock();
+    expect(old.isLive, isFalse);
+    expect(first.isActive, isFalse);
+    final second = await admission.admit();
+    expect(second.isActive, isTrue);
+    expect(f.authenticator.calls, 0);
+    expect(prf.calls, 2);
+    expect(prf.credential!.signCount, _d1Credential.signCount);
+    const store = FlutterSecureStorage();
+    expect(await store.read(key: _d1CredentialKey), _d1Credential.encode());
+    expect(await store.read(key: _credentialKey), _credential.encode());
+    expect(f.lock.isUnlocked, isFalse);
+    await second.retire();
+  });
+
+  test('B2b.1 dedicated mode rejects all legacy mutation and admission paths', () async {
+    final f = _Fixture();
+    final prf = _Prf();
+    await f.start(prf: prf);
+    final backend = _RuntimeBackend();
+    expect(f.lock.canOptOutOfAppLock, isFalse);
+    for (final action in <Future<void> Function()>[
+      f.lock.unlock, f.lock.configure, f.lock.recoverWithVerifiedRemoteAccount,
+      f.lock.continueWithoutAppLock, f.lock.enableForCurrentVault,
+      f.lock.disableForCurrentVault,
+    ]) {
+      await expectLater(action(), _refusal);
+    }
+    await expectLater(f.lock.issueVaultAdmissionProof(), _refusal);
+    await expectLater(D1RuntimeAdmission.legacyFixture(f.auth, f.lock, backend).admit(), _refusal);
+    expect(backend.calls, 0);
+    expect(f.authenticator.calls, 0);
+    expect(prf.calls, 0);
+    const store = FlutterSecureStorage();
+    expect(await store.read(key: _d1CredentialKey), _d1Credential.encode());
+    expect(await store.read(key: _credentialKey), _credential.encode());
+  });
+
+  test('B2b.1 missing dedicated credential refuses without copying legacy', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      _credentialKey: _credential.encode(), _requiredKey: 'required',
+    });
+    final f = _Fixture();
+    final prf = _Prf();
+    await f.start(prf: prf);
+    final backend = _RuntimeBackend()..takePrf = true;
+    expect(f.lock.recoveryRequired, isTrue);
+    expect(f.lock.isConfigured, isFalse);
+    await expectLater(D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit(), _refusal);
+    expect(prf.calls, 0);
+    expect(backend.calls, 0);
+    expect(await const FlutterSecureStorage().read(key: _d1CredentialKey), isNull);
+  });
+
+  test('B2b.1 same legacy credential or public key cannot provision candidate', () async {
+    for (final shared in <AppLockCredential>[
+      _credential,
+      const AppLockCredential(credentialId: 'different-id',
+          publicKeySpki: 'fixture-public-key', rpId: 'patient.example',
+          origin: 'https://patient.example', signCount: 2),
+    ]) {
+      FlutterSecureStorage.setMockInitialValues({
+        _credentialKey: _credential.encode(), _requiredKey: 'required',
+        _d1CredentialKey: shared.encode(),
+      });
+      final f = _Fixture();
+      final prf = _Prf();
+      await f.start(prf: prf);
+      expect(f.lock.recoveryRequired, isTrue);
+      final backend = _RuntimeBackend()..takePrf = true;
+      await expectLater(D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit(), _refusal);
+      expect(prf.calls, 0);
+      expect(backend.calls, 0);
+    }
+  });
+
+  test('B2b.1 foreign acquirer refused before assertion', () async {
+    final f = _Fixture();
+    final prf = _Prf(), foreign = _Prf();
+    await f.start(prf: prf);
+    final backend = _RuntimeBackend()..takePrf = true;
+    await expectLater(D1RuntimeAdmission(f.auth, f.lock, backend, prf: foreign).admit(), _refusal);
+    expect(prf.calls, 0);
+    expect(foreign.calls, 0);
+    expect(backend.calls, 0);
+  });
+
+  test('B2b.1 legacy counter advancement cannot replace dedicated floor', () async {
+    final f = _Fixture();
+    final prf = _Prf();
+    await f.start(prf: prf);
+    const store = FlutterSecureStorage();
+    await store.write(key: _credentialKey, value: _credential.copyWith(signCount: 900).encode());
+    await f.lock.initialize();
+    final backend = _RuntimeBackend()..takePrf = true;
+    final session = await D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit();
+    expect(prf.credential!.signCount, _d1Credential.signCount);
+    expect(prf.credential!.credentialId, _d1Credential.credentialId);
+    expect(f.authenticator.calls, 0);
+    expect(AppLockCredential.decode((await store.read(key: _credentialKey))!).signCount, 900);
+    await session.retire();
   });
 
 }
