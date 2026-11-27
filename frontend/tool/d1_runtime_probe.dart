@@ -52,10 +52,25 @@ _EvidenceIntlFormatter _evidenceIntl(Map<String,Object?> options) =>
 
 String _evidenceBrowserZone() => _evidenceIntl({}).resolvedOptions().timeZone.toDart;
 
+// Versioned compatibility rule for the isolated Web candidate, not a fixed
+// offset for all Moroccan history. Morocco repealed permanent UTC+1:
+// decree 2.26.530 (2026-06-25), official notice 2026-09-18,
+// https://www.cg.gov.ma/fr/node/13036
+// IANA tzdb 2026c (2026-07-08), Africa/Casablanca, transition at
+// 2026-09-20 02:00 local (01:00 UTC). Revisit on future legal changes.
+const _casablancaGmtTransitionUtc = 1789866000;
+
 String _evidenceNamedLocal(int seconds) {
   if(!validEvidenceSeconds(seconds)) throw StateError('Invalid evidence instant');
   final zone=_evidenceBrowserZone();
   if(zone.isEmpty) throw StateError('Browser timezone unavailable');
+  if(zone=='Africa/Casablanca' && seconds>=_casablancaGmtTransitionUtc) {
+    return formatEvidenceTimestamp(seconds,local:false);
+  }
+  return _evidenceIntlLocal(seconds,zone);
+}
+
+String _evidenceIntlLocal(int seconds,String zone) {
   final formatter=_evidenceIntl({
     'timeZone':zone, 'calendar':'gregory', 'numberingSystem':'latn',
     'year':'numeric','month':'2-digit','day':'2-digit',
@@ -1004,8 +1019,10 @@ void main() {
   // Synthetic-only diagnostic; no clinical data, no write authority.
   _evidenceTimeProbeFn = ((JSNumber value) {
     final seconds=value.toDartInt;
-    return jsonEncode({'zone':_evidenceBrowserZone(),
+    final zone=_evidenceBrowserZone();
+    return jsonEncode({'zone':zone,
       'dartLocal':formatEvidenceTimestamp(seconds),
+      'rawIntlLocal':_evidenceIntlLocal(seconds,zone),
       'namedLocal':_evidenceNamedLocal(seconds),
       'utc':formatEvidenceTimestamp(seconds,local:false)}).toJS;
   }).toJS;

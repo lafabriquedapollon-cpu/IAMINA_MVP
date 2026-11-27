@@ -3104,6 +3104,13 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
         page.set_viewport_size({"width":width,"height":height})
         assert page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")==timezone_id
         stage="named-zone-oracle"
+        # Independent legal boundary guard: an obsolete runner tzdb must fail,
+        # not silently agree with an obsolete browser or redefine the oracle.
+        # Decree 2.26.530: 2026-09-20 02:00 at UTC+1 -> 01:00 GMT.
+        if timezone_id=="Africa/Casablanca":
+            assert oracle(1789865999)=="2026-09-20T01:59:59+01:00", "Runner tzdb pre-transition mismatch"
+            assert oracle(1789866000)=="2026-09-20T01:00:00+00:00", "Runner tzdb lacks IANA 2026c change"
+            assert oracle(1795778145)=="2026-11-27T11:15:45+00:00", "Runner tzdb lacks current legal time"
         # Explicit UTC instants spanning both overlap/gap and Casablanca Ramadan.
         # Fixed instants are fixture inputs; expected strings use independent tzdb.
         for label,instant in (
@@ -3113,7 +3120,11 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
             ("paris-overlap-second","2024-10-27T01:30:00+00:00"),
             ("casablanca-ramadan","2026-03-01T12:00:00+00:00"),
             ("casablanca-after-ramadan","2026-04-01T12:00:00+00:00"),
+            ("casablanca-legal-before","2026-09-20T00:59:59+00:00"),
+            ("casablanca-legal-at","2026-09-20T01:00:00+00:00"),
+            ("casablanca-legal-after","2026-09-20T01:00:01+00:00"),
             ("reported-regression","2026-11-27T11:15:45+00:00"),
+            ("casablanca-no-seasonal-return","2027-07-01T12:00:00+00:00"),
         ):
             time_check(label,int(datetime.fromisoformat(instant).timestamp()))
         stage="seed-and-port-oracle"
