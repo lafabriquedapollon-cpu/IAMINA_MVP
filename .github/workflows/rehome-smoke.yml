@@ -1316,7 +1316,7 @@ jobs:
           docker image inspect "$image" --format '{{.Os}}/{{.Architecture}} {{json .RepoDigests}}'
           timeout 600s docker run --rm --init --ipc=host --platform linux/amd64 \
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
-            --workdir /work --env EXPECTED_SHA --env PYTHONDONTWRITEBYTECODE=1 \
+            --workdir /work --env EXPECTED_SHA --env GITHUB_HEAD_REF --env PYTHONDONTWRITEBYTECODE=1 \
             --entrypoint /bin/bash "$image" -c '
               set -euo pipefail
               python -m pip install --disable-pip-version-check --timeout 30 --retries 2 playwright==1.55.0
@@ -1327,7 +1327,11 @@ jobs:
               D1_LINUX_CAPABILITY_GATE=1 python frontend/tool/d1_archive_browser_probe.py || archive_status=$?
               python frontend/tool/d1_portable_browser_probe.py || portable_status=$?
               echo "D1_TRANSPORT_STATUS opfs_idb=$archive_status portable=$portable_status"
-              test "$archive_status" -eq 0 && test "$portable_status" -eq 0
+              test "$archive_status" -eq 0
+              test "$portable_status" -eq 0
+              if [[ "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
+                D1_PRF_ENGINE=chromium python frontend/tool/d1_prf_counter_browser_probe.py
+              fi
             '
 
 
@@ -1683,6 +1687,9 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/d1-macos-venv/bin/python" frontend/tool/d1_opfs_capability_probe.py
           "$RUNNER_TEMP/d1-macos-venv/bin/python" frontend/tool/d1_archive_browser_probe.py
+          if [[ "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
+            D1_PRF_ENGINE=webkit "$RUNNER_TEMP/d1-macos-venv/bin/python" frontend/tool/d1_prf_counter_browser_probe.py
+          fi
 
   # Web-only qualification: this runner is needed for the reference WebKit
   # browser engine, not a native macOS application or separate product target.
