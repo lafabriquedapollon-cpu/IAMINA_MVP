@@ -1718,7 +1718,7 @@ jobs:
   phase2-d5-oracles:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase2/d5-01-oracles' || github.head_ref == 'phase2/d1-d5-convergence') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       FLUTTER_SUPPRESS_ANALYTICS: "true"
     steps:
@@ -1726,6 +1726,17 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
+      - name: Checkout immutable H1 visual baseline
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: d09f153ca1f5931b525a38048bc8b94be9994745
+          path: h1-baseline
+          sparse-checkout: |
+            frontend/lib/features/dashboard/widgets/dashboard_trend_painter.dart
+            frontend/lib/features/dashboard/widgets/dashboard_trend_view.dart
+          sparse-checkout-cone-mode: false
       - name: Attest source and run independent Decimal oracle
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
@@ -1753,7 +1764,44 @@ jobs:
           flutter test --no-pub --reporter expanded test/core/domain/d5_05_glucose_quantity_storage_envelope_test.dart
           flutter test --no-pub --reporter expanded test/data/drift/d5_06_glucose_quantity_candidate_store_test.dart
           flutter test --no-pub --reporter expanded test/data/drift/d5_02_dashboard_temporal_oracle_test.dart
-          flutter test --no-pub --reporter expanded test/features/d5_03_dashboard_aggregate_oracle_test.dart test/features/dashboard_trend_contract_test.dart
+          flutter test --no-pub --reporter expanded test/features/d5_03_dashboard_aggregate_oracle_test.dart test/features/dashboard_trend_contract_test.dart test/features/dashboard_trend_density_contract_test.dart
+      - name: H1 exact baseline RED and actual plot visual comparison
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        working-directory: frontend
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/h1-proof"
+          mkdir -p "$proof/before" "$proof/after"
+          test "$(git -C ../h1-baseline rev-parse HEAD)" = d09f153ca1f5931b525a38048bc8b94be9994745
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          paths=(lib/features/dashboard/widgets/dashboard_trend_painter.dart lib/features/dashboard/widgets/dashboard_trend_view.dart)
+          restore() { git restore --source=HEAD -- "${paths[@]}"; }
+          trap restore EXIT
+          for path in "${paths[@]}"; do cp "../h1-baseline/frontend/$path" "$path"; done
+          if flutter test --no-pub --reporter expanded --plain-name 'H1 temporal geometry' test/features/d5_03_dashboard_aggregate_oracle_test.dart >"$proof/baseline-red.txt" 2>&1; then
+            echo "Baseline unexpectedly passed H1 oracle"; exit 1
+          fi
+          grep -F 'H1 actual day 1 centre' "$proof/baseline-red.txt"
+          H1_CAPTURE_DIR="$proof/before" flutter test --no-pub --reporter expanded --plain-name 'H1 visual proof of real plot' test/features/d5_03_dashboard_aggregate_oracle_test.dart
+          restore
+          trap - EXIT
+          git diff --exit-code -- "${paths[@]}"
+          H1_CAPTURE_DIR="$proof/after" flutter test --no-pub --reporter expanded --plain-name 'H1 visual proof of real plot' test/features/d5_03_dashboard_aggregate_oracle_test.dart
+          test "$(find "$proof/before" -name '*.png' | wc -l)" -eq 6
+          test "$(find "$proof/after" -name '*.png' | wc -l)" -eq 6
+          (cd "$proof"; find before after -name '*.png' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          printf 'baseline=%s\nsource=%s\n' d09f153ca1f5931b525a38048bc8b94be9994745 "$EXPECTED_SHA" > "$proof/provenance.txt"
+          echo "H1_BASELINE_RED_GREEN_VISUAL_PASS 12/12 source=$EXPECTED_SHA"
+      - name: Retain H1 visual proof and baseline RED
+        if: ${{ always() && github.head_ref == 'phase2/d1-d5-convergence' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: h1-temporal-proof-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/h1-proof/
+          if-no-files-found: warn
+          retention-days: 7
 
   # Convergence requires all eight jobs, never skipped or cancelled.
   phase2-convergence-gate:

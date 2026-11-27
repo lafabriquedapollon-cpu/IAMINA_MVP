@@ -310,18 +310,16 @@ class DashboardTrendPlot extends StatelessWidget {
     required this.onSelect,
   });
 
-  DateTime _recordedAt(LogEntryData log) => log.loggedAt ?? log.createdAt;
-
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final plotWidth =
-            (constraints.maxWidth -
-                    DashboardTrendPainter.leftInset -
-                    DashboardTrendPainter.rightInset)
-                .clamp(1.0, double.infinity)
-                .toDouble();
+        final axis = DashboardTrendTimeAxis(
+          start: start,
+          end: end,
+          left: DashboardTrendPainter.leftInset,
+          right: constraints.maxWidth - DashboardTrendPainter.rightInset,
+        );
         return Semantics(
           label: AppLocalizations.of(
             context,
@@ -329,34 +327,10 @@ class DashboardTrendPlot extends StatelessWidget {
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTapDown: (details) {
-              final dx = details.localPosition.dx
-                  .clamp(
-                    DashboardTrendPainter.leftInset,
-                    constraints.maxWidth - DashboardTrendPainter.rightInset,
-                  )
-                  .toDouble();
-              final fraction =
-                  ((dx - DashboardTrendPainter.leftInset) / plotWidth)
-                      .clamp(0.0, 1.0)
-                      .toDouble();
-              final targetMs =
-                  start.millisecondsSinceEpoch +
-                  ((end.millisecondsSinceEpoch - start.millisecondsSinceEpoch) *
-                          fraction)
-                      .round();
-              var nearest = logs.first;
-              var distance =
-                  (_recordedAt(nearest).millisecondsSinceEpoch - targetMs)
-                      .abs();
-              for (final log in logs.skip(1)) {
-                final candidate =
-                    (_recordedAt(log).millisecondsSinceEpoch - targetMs).abs();
-                if (candidate < distance) {
-                  nearest = log;
-                  distance = candidate;
-                }
-              }
-              onSelect(nearest.id);
+              final id = axis.selectLog(
+                logs, details.localPosition.dx, daily: dailySummary,
+              );
+              if (id != null) onSelect(id);
             },
             child: CustomPaint(
               painter: DashboardTrendPainter(

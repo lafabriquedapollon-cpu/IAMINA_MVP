@@ -7,6 +7,89 @@ import 'package:intl/intl.dart';
 import '../../../core/theme/amina_visual_language.dart';
 import '../../../data/drift/database.dart';
 
+// One elapsed-time projection shared by painting and hit testing.
+// Calendar grouping uses the range's zone, not the input DateTime's zone.
+// UTC day keys encode civil dates only; day boundaries use the real zone,
+// so daylight-saving transitions do not become synthetic 24-hour days.
+class DashboardTrendTimeAxis {
+  final DateTime start;
+  final DateTime end;
+  final double left;
+  final double right;
+
+  const DashboardTrendTimeAxis({
+    required this.start,
+    required this.end,
+    required this.left,
+    required this.right,
+  });
+
+  bool get valid => end.isAfter(start) && right > left;
+  bool includes(DateTime at) =>
+      valid && !at.isBefore(start) && !at.isAfter(end);
+
+  DateTime dayKey(DateTime at) {
+    final zoned = start.isUtc ? at.toUtc() : at.toLocal();
+    return DateTime.utc(zoned.year, zoned.month, zoned.day);
+  }
+
+  DateTime _boundary(DateTime day) => start.isUtc
+      ? DateTime.utc(day.year, day.month, day.day)
+      : DateTime(day.year, day.month, day.day);
+
+  DateTime dayCenter(DateTime day) {
+    final from = _boundary(day);
+    final until = _boundary(day.add(const Duration(days: 1)));
+    final clippedStart = from.isBefore(start) ? start : from;
+    final clippedEnd = until.isAfter(end) ? end : until;
+    return clippedStart.add(Duration(
+      microseconds: clippedEnd.difference(clippedStart).inMicroseconds ~/ 2,
+    ));
+  }
+
+  Iterable<DateTime> get days sync* {
+    if (!valid) return;
+    final last = dayKey(end);
+    for (var day = dayKey(start); !day.isAfter(last);
+        day = day.add(const Duration(days: 1))) {
+      yield day;
+    }
+  }
+
+  double xFor(DateTime at) {
+    final fraction = at.difference(start).inMicroseconds /
+        end.difference(start).inMicroseconds;
+    return left + fraction.clamp(0.0, 1.0).toDouble() * (right - left);
+  }
+
+  DateTime? timeAt(double x) {
+    if (!valid || !x.isFinite || x < left || x > right) return null;
+    final fraction = (x - left) / (right - left);
+    return start.add(Duration(
+      microseconds: (end.difference(start).inMicroseconds * fraction).round(),
+    ));
+  }
+
+  int? selectLog(List<LogEntryData> logs, double x, {required bool daily}) {
+    final target = timeAt(x);
+    if (target == null) return null;
+    final day = dayKey(target);
+    LogEntryData? nearest;
+    int? distance;
+    for (final log in logs) {
+      final at = log.loggedAt ?? log.createdAt;
+      if (!includes(at) || (daily && dayKey(at) != day)) continue;
+      final delta = at.difference(target).inMicroseconds.abs();
+      if (distance == null || delta < distance ||
+          (delta == distance && log.id < nearest!.id)) {
+        nearest = log;
+        distance = delta;
+      }
+    }
+    return nearest?.id;
+  }
+}
+
 class DashboardTrendPainter extends CustomPainter {
   final List<LogEntryData> logs;
   final List<MedicationEventData> medications;
@@ -53,37 +136,34 @@ class DashboardTrendPainter extends CustomPainter {
       size.width - rightInset,
       size.height - bottom,
     );
-    if (rect.width <= 0 || rect.height <= 0 || logs.isEmpty) return;
+    final axis = DashboardTrendTimeAxis(
+      start: start, end: end, left: rect.left, right: rect.right,
+    );
+    if (rect.height <= 0 || !axis.valid) return;
+    final visible = logs.where((log) => axis.includes(_recordedAt(log))).toList();
+    if (visible.isEmpty) return;
 
-    final bounds = _valueBounds();
+    final bounds = _valueBounds(visible);
     final minY = bounds.$1;
     final maxY = bounds.$2;
 
     double yFor(double value) =>
         rect.bottom - ((value - minY) / (maxY - minY)) * rect.height;
 
-    double xFor(DateTime time) {
-      final total = end.millisecondsSinceEpoch - start.millisecondsSinceEpoch;
-      if (total <= 0) return rect.left;
-      final elapsed = time.millisecondsSinceEpoch - start.millisecondsSinceEpoch;
-      final fraction = (elapsed / total).clamp(0.0, 1.0).toDouble();
-      return rect.left + fraction * rect.width;
-    }
-
     _paintTargetBand(canvas, rect, yFor);
-    _paintGridAndAxes(canvas, rect, minY, maxY);
-    _paintMedicationEvents(canvas, rect, xFor);
+    _paintGridAndAxes(canvas, rect, minY, maxY, axis);
+    _paintMedicationEvents(canvas, rect, axis);
 
     if (dailySummary) {
-      _paintDailySummary(canvas, rect, yFor);
+      _paintDailySummary(canvas, yFor, axis, visible);
     } else {
-      _paintRecordedPoints(canvas, xFor, yFor);
+      _paintRecordedPoints(canvas, axis.xFor, yFor, visible);
     }
   }
 
-  (double, double) _valueBounds() {
+  (double, double) _valueBounds(List<LogEntryData> visible) {
     final values = <double>[
-      ...logs.map((log) => log.bloodSugar),
+      ...visible.map((log) => log.bloodSugar),
       if (low != null) low!,
       if (high != null) high!,
     ];
@@ -127,6 +207,7 @@ class DashboardTrendPainter extends CustomPainter {
     Rect rect,
     double minY,
     double maxY,
+    DashboardTrendTimeAxis axis,
   ) {
     final gridPaint = Paint()
       ..color = (isDark ? Colors.white : const Color(0xFF123E35))
@@ -154,25 +235,24 @@ class DashboardTrendPainter extends CustomPainter {
     }
 
     if (dailySummary) {
-      final summaries = _dailySummaries();
+      final days = axis.days.toList(growable: false);
       final maxLabels = math.max(2, math.min(6, (rect.width / 72).floor()));
-      final labelStride = summaries.length <= maxLabels
-          ? 1
-          : math.max(1, (summaries.length / maxLabels).ceil());
-      for (var i = 0; i < summaries.length; i++) {
-        final summary = summaries[i];
-        final x = _xForSummaryIndex(i, summaries.length, rect);
+      final labelStride = math.max(1, ((days.length - 1) / (maxLabels - 1)).ceil());
+      double? lastLabelX;
+      for (var i = 0; i < days.length; i++) {
+        final day = days[i];
+        final x = axis.xFor(axis.dayCenter(day));
         final guide = Paint()
           ..color = (isDark ? Colors.white : const Color(0xFF123E35))
               .withValues(alpha: .045)
           ..strokeWidth = 1;
         canvas.drawLine(Offset(x, rect.top), Offset(x, rect.bottom), guide);
-        final showLabel =
-            i == 0 || i == summaries.length - 1 || i % labelStride == 0;
-        if (showLabel) {
+        final showLabel = i % labelStride == 0 || i == days.length - 1;
+        if (showLabel && (lastLabelX == null || x - lastLabelX >= 72)) {
+          lastLabelX = x;
           _paintXAxisLabel(
             canvas,
-            DateFormat('d MMM', locale).format(summary.day),
+            DateFormat('d MMM', locale).format(day),
             x,
             rect,
             axisStyle,
@@ -212,7 +292,7 @@ class DashboardTrendPainter extends CustomPainter {
     final painter = TextPainter(
       text: TextSpan(text: label, style: style),
       textDirection: ui.TextDirection.ltr,
-    )..layout();
+    )..layout(maxWidth: rect.width);
     var dx = x - painter.width / 2;
     if (edgeIndex == 0) dx = rect.left;
     if (edgeIndex == 2) dx = rect.right - painter.width;
@@ -223,19 +303,15 @@ class DashboardTrendPainter extends CustomPainter {
   void _paintMedicationEvents(
     Canvas canvas,
     Rect rect,
-    double Function(DateTime) xFor,
+    DashboardTrendTimeAxis axis,
   ) {
     if (medications.isEmpty) return;
     final paint = Paint()
       ..color = const Color(0xFFC9852B).withValues(alpha: .8)
       ..strokeWidth = 1.5;
     for (final event in medications) {
-      final x = dailySummary
-          ? _xForDay(
-              DateTime(event.takenAt.year, event.takenAt.month, event.takenAt.day),
-              rect,
-            )
-          : xFor(event.takenAt);
+      if (!axis.includes(event.takenAt)) continue;
+      final x = axis.xFor(event.takenAt);
       canvas.drawLine(Offset(x, rect.top), Offset(x, rect.top + 8), paint);
       canvas.drawCircle(Offset(x, rect.top + 1), 2.2, paint);
     }
@@ -243,10 +319,11 @@ class DashboardTrendPainter extends CustomPainter {
 
   void _paintDailySummary(
     Canvas canvas,
-    Rect rect,
     double Function(double) yFor,
+    DashboardTrendTimeAxis axis,
+    List<LogEntryData> visible,
   ) {
-    final summaries = _dailySummaries();
+    final summaries = _dailySummaries(axis, visible);
     if (summaries.isEmpty) return;
 
     final whiskerPaint = Paint()
@@ -265,7 +342,7 @@ class DashboardTrendPainter extends CustomPainter {
     final points = <Offset>[];
     for (var i = 0; i < summaries.length; i++) {
       final summary = summaries[i];
-      final x = _xForSummaryIndex(i, summaries.length, rect);
+      final x = axis.xFor(axis.dayCenter(summary.day));
       final yMin = yFor(summary.min);
       final yMax = yFor(summary.max);
       canvas.drawLine(Offset(x, yMax), Offset(x, yMin), whiskerPaint);
@@ -273,14 +350,21 @@ class DashboardTrendPainter extends CustomPainter {
     }
 
     if (points.length > 1) {
-      final path = Path()..moveTo(points.first.dx, points.first.dy);
+      final path = Path();
+      var hasSegment = false;
       for (var i = 0; i < points.length - 1; i++) {
+        // Missing days are not measurements: leave the interval blank.
+        if (summaries[i + 1].day.difference(summaries[i].day).inDays != 1) {
+          continue;
+        }
         final current = points[i];
         final next = points[i + 1];
         final midX = (current.dx + next.dx) / 2;
+        path.moveTo(current.dx, current.dy);
         path.cubicTo(midX, current.dy, midX, next.dy, next.dx, next.dy);
+        hasSegment = true;
       }
-      canvas.drawPath(path, linePaint);
+      if (hasSegment) canvas.drawPath(path, linePaint);
     }
 
     for (var i = 0; i < summaries.length; i++) {
@@ -314,36 +398,12 @@ class DashboardTrendPainter extends CustomPainter {
     }
   }
 
-  double _xForSummaryIndex(int index, int count, Rect rect) {
-    if (count <= 1) return rect.center.dx;
-    final sidePadding = math.min(24.0, rect.width * .04);
-    final usable = rect.width - sidePadding * 2;
-    return rect.left + sidePadding + usable * (index / (count - 1));
-  }
-
-  double _xForDay(DateTime day, Rect rect) {
-    final summaries = _dailySummaries();
-    if (summaries.isEmpty) return rect.center.dx;
-    var index = summaries.indexWhere((summary) => summary.day == day);
-    if (index < 0) {
-      index = 0;
-      var bestDistance = (summaries.first.day.difference(day)).abs();
-      for (var i = 1; i < summaries.length; i++) {
-        final distance = summaries[i].day.difference(day).abs();
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          index = i;
-        }
-      }
-    }
-    return _xForSummaryIndex(index, summaries.length, rect);
-  }
-
-  List<_DailySummary> _dailySummaries() {
+  List<_DailySummary> _dailySummaries(
+    DashboardTrendTimeAxis axis, List<LogEntryData> visible,
+  ) {
     final byDay = <DateTime, List<LogEntryData>>{};
-    for (final log in logs) {
-      final at = _recordedAt(log);
-      final day = DateTime(at.year, at.month, at.day);
+    for (final log in visible) {
+      final day = axis.dayKey(_recordedAt(log));
       byDay.putIfAbsent(day, () => <LogEntryData>[]).add(log);
     }
     final days = byDay.keys.toList()..sort();
@@ -368,15 +428,16 @@ class DashboardTrendPainter extends CustomPainter {
     Canvas canvas,
     double Function(DateTime) xFor,
     double Function(double) yFor,
+    List<LogEntryData> visible,
   ) {
     final pointPaint = Paint()
       ..color = AminaVisualLanguage.forestDeep.withValues(alpha: .78);
     final selectedPaint = Paint()..color = AminaVisualLanguage.actionGreen;
-    final latestId = logs
+    final latestId = visible
         .reduce((a, b) => _recordedAt(a).isAfter(_recordedAt(b)) ? a : b)
         .id;
 
-    for (final log in logs) {
+    for (final log in visible) {
       final point = Offset(xFor(_recordedAt(log)), yFor(log.bloodSugar));
       final selected = log.id == selectedLogId;
       final latest = log.id == latestId;
