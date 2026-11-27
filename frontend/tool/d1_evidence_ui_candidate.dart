@@ -28,30 +28,87 @@ final class EvidenceUiBinding {
         session: raw['session'] as int, vault: raw['vault'] as String);
 }
 
+// Half-open UTC interval; an explicit offset is required for historical input.
+const evidenceStartSeconds = 1;
+const evidenceEndSeconds = 4102444800;
+const evidencePageSize = 10;
+
+bool validEvidenceSeconds(int seconds) =>
+    seconds >= evidenceStartSeconds && seconds < evidenceEndSeconds;
+
+int? parseEvidenceTimestamp(String input) {
+  final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$')
+      .firstMatch(input.trim());
+  if (match == null) return null;
+  final p = [for (var i=1; i<=6; i++) int.parse(match.group(i)!)];
+  final civil = DateTime.utc(p[0],p[1],p[2],p[3],p[4],p[5]);
+  if (civil.year!=p[0] || civil.month!=p[1] || civil.day!=p[2] ||
+      civil.hour!=p[3] || civil.minute!=p[4] || civil.second!=p[5]) return null;
+  final zone=match.group(7)!;
+  var minutes=0;
+  if (zone!='Z') {
+    final h=int.parse(zone.substring(1,3)), m=int.parse(zone.substring(4,6));
+    if (h>14 || m>59 || (h==14 && m!=0) || zone=='-00:00') return null;
+    minutes=(h*60+m)*(zone.startsWith('-')?-1:1);
+  }
+  final seconds=civil.millisecondsSinceEpoch~/1000-minutes*60;
+  return validEvidenceSeconds(seconds) ? seconds : null;
+}
+
+String formatEvidenceTimestamp(int seconds, {bool local=true}) {
+  final utc=DateTime.fromMillisecondsSinceEpoch(seconds*1000,isUtc:true);
+  final date=local ? utc.toLocal() : utc;
+  String two(int n)=>n.toString().padLeft(2,'0');
+  final offset=date.timeZoneOffset.inMinutes;
+  final abs=offset.abs();
+  return date.year.toString().padLeft(4,'0')+'-'+two(date.month)+'-'+two(date.day)
+      +'T'+two(date.hour)+':'+two(date.minute)+':'+two(date.second)
+      +(offset<0?'-':'+')+two(abs~/60)+':'+two(abs%60);
+}
+
+int compareEvidenceRows(Map<String,dynamic> a, Map<String,dynamic> b) {
+  final time=(b['loggedAtSeconds'] as int).compareTo(a['loggedAtSeconds'] as int);
+  return time!=0 ? time : (a['uuid'] as String).compareTo(b['uuid'] as String);
+}
+
 final class EvidenceUiResult {
   final EvidenceUiBinding binding;
-  final int generation, requestId, revision;
+  final int generation, requestId, revision, offset;
+  final int? nextOffset;
   final List<Map<String, dynamic>> rows;
-  EvidenceUiResult._(this.binding, this.generation, this.requestId, this.revision, this.rows);
+  EvidenceUiResult._(this.binding, this.generation, this.requestId, this.revision,
+    this.offset, this.nextOffset, this.rows);
   factory EvidenceUiResult.fromJson(Map<String, dynamic> raw) {
     final rows = (raw['rows'] as List).map((r) =>
         Map<String, dynamic>.unmodifiable(Map<String, dynamic>.from(r as Map))).toList();
     final seen = <String>{};
     for (final row in rows) {
       final uuid = row['uuid'], value = row['originalValue'];
+      final logged = row['loggedAtSeconds'], created = row['createdAtSeconds'];
       if (uuid is! String ||
           !RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$').hasMatch(uuid) ||
           !seen.add(uuid) || value is! num || !value.isFinite || value <= 0 ||
           !['mg/dL', 'mmol/L'].contains(row['originalUnit']) ||
-          row['displayMgDl'] is! String || row['displayMmolL'] is! String) {
+          row['displayMgDl'] is! String || row['displayMmolL'] is! String ||
+          logged is! int || !validEvidenceSeconds(logged) ||
+          created is! int || !validEvidenceSeconds(created)) {
         throw StateError('Invalid UI row');
       }
     }
-    if (rows.length > 50) throw StateError('Fixture capacity exceeded');
+    final offset=raw['offset'] as int, next=raw['nextOffset'] as int?;
+    if (raw['start']!=evidenceStartSeconds || raw['end']!=evidenceEndSeconds ||
+        raw['limit']!=evidencePageSize || offset<0 || offset>10000 ||
+        offset%evidencePageSize!=0 || rows.length>evidencePageSize ||
+        (next!=null && (next!=offset+evidencePageSize || next>10000 || rows.length!=evidencePageSize))) {
+      throw StateError('Invalid UI journal page');
+    }
+    for(var i=1;i<rows.length;i++) {
+      if(compareEvidenceRows(rows[i-1],rows[i])>=0) throw StateError('Invalid UI journal order');
+    }
     return EvidenceUiResult._(
       EvidenceUiBinding.fromJson(Map<String, dynamic>.from(raw['binding'] as Map)),
       raw['generation'] as int, raw['requestId'] as int, raw['revision'] as int,
-      List.unmodifiable(rows));
+      offset, next, List.unmodifiable(rows));
   }
 }
 
@@ -70,11 +127,14 @@ class EvidenceUiCandidate extends StatefulWidget {
 
 class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
   final _value = TextEditingController();
+  final _timestamp = TextEditingController();
   final _valueFocus = FocusNode();
   int _generation = 0, _requestSequence = 0;
   EvidenceUiBinding? _binding;
   int? get _owner => _binding?.owner;
-  int? _revision;
+  int? _revision, _nextOffset, _editingSeconds;
+  int _offset=0;
+  bool _customTime=false;
   String? _unit, _editing, _confirmDelete;
   bool _busy = false, _error = false;
   List<Map<String, dynamic>> _rows = [];
@@ -90,10 +150,12 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
     _generation++;
     _valueFocus.unfocus();
     _value.clear();
+    _timestamp.clear();
     if (mounted) {
       setState(() {
         _binding = null; _revision = null; _unit = null; _editing = null; _confirmDelete = null;
         _rows = []; _busy = false; _error = false;
+        _offset=0; _nextOffset=null; _editingSeconds=null; _customTime=false;
       });
     }
   }
@@ -108,6 +170,9 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
     final generation = _generation;
     final previous = _binding;
     final opening = action == 'open';
+    final paging = action == 'page';
+    final requestedOffset = paging ? args['offset'] as int : 0;
+    final priorRevision = _revision;
     final owner = opening ? args['owner'] as int? : previous?.owner;
     final requestId = ++_requestSequence;
     setState(() { _busy = true; _error = false; });
@@ -120,6 +185,8 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
       final result = await widget.call(action, {
         ...args, 'owner': owner, 'generation': generation, 'requestId': requestId,
         'session': session, 'binding': previous?.toJson(),
+        'start':evidenceStartSeconds, 'end':evidenceEndSeconds,
+        'limit':evidencePageSize, 'offset':requestedOffset,
       });
       if (!mounted || generation != _generation) return;
       final response = EvidenceUiResult.fromJson(result);
@@ -128,15 +195,27 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
           response.generation != generation || response.requestId != requestId ||
           (previous != null && !previous.matches(binding)) ||
           !widget.isCurrent(binding) || response.revision <= 0 ||
-          (!opening && response.revision != _revision! + 1)) {
+          response.offset != requestedOffset ||
+          (!opening && response.revision != priorRevision! + (paging ? 0 : 1))) {
         throw StateError('UI response binding refused');
+      }
+      if (paging && (_rows.isEmpty || response.rows.isEmpty ||
+          response.rows.any((r)=>_rows.any((old)=>old['uuid']==r['uuid'])) ||
+          (requestedOffset>_offset && compareEvidenceRows(_rows.last,response.rows.first)>=0) ||
+          (requestedOffset<_offset && compareEvidenceRows(response.rows.last,_rows.first)>=0))) {
+        throw StateError('Journal page boundary refused');
       }
       setState(() {
         _binding = binding;
         _revision = response.revision;
         _rows = response.rows;
+        _offset=response.offset; _nextOffset=response.nextOffset;
         _busy = false;
-        _value.clear(); _unit = null; _editing = null; _confirmDelete = null;
+        _confirmDelete = null;
+        if (!paging) {
+          _value.clear(); _unit = null; _editing = null;
+          _timestamp.clear(); _customTime=false; _editingSeconds=null;
+        }
       });
     } catch (_) {
       if (!mounted || generation != _generation) return;
@@ -148,12 +227,16 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
   void _save() {
     final raw = _value.text.trim().replaceAll(',', '.');
     final value = double.tryParse(raw);
-    if (_unit == null || value == null || !value.isFinite || value <= 0) {
+    final now=DateTime.now().millisecondsSinceEpoch~/1000;
+    final seconds=_editingSeconds ?? (_customTime ? parseEvidenceTimestamp(_timestamp.text) : now);
+    if (_unit == null || value == null || !value.isFinite || value <= 0 ||
+        seconds==null || !validEvidenceSeconds(seconds) || seconds>now) {
       setState(() => _error = true);
       return;
     }
     _perform(_editing == null ? 'insert' : 'edit', {
       'revision': _revision, 'uuid': _editing, 'value': value, 'unit': _unit,
+      'loggedAtSeconds': seconds,
     });
   }
 
@@ -163,6 +246,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
     _generation++;
     _valueFocus.dispose();
     _value.dispose();
+    _timestamp.dispose();
     super.dispose();
   }
 
@@ -241,10 +325,27 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                   Semantics(identifier: 'evidence-save', child: FilledButton(
                     key: const Key('evidence-save'), onPressed: _busy ? null : _save,
                     child: Text(tr('Enregistrer', 'حفظ')))),
+                  if (_editingSeconds != null)
+                    Text(formatEvidenceTimestamp(_editingSeconds!), textDirection: TextDirection.ltr)
+                  else ...[
+                    TextButton(key: const Key('evidence-time-toggle'), onPressed: _busy ? null : () {
+                      setState(() {
+                        _customTime=!_customTime;
+                        _timestamp.text=_customTime ? formatEvidenceTimestamp(DateTime.now().millisecondsSinceEpoch~/1000) : '';
+                      });
+                    }, child: Text(_customTime ? tr('Utiliser l’heure actuelle','استعمال الوقت الحالي') :
+                      tr('Mesure antérieure (date et heure)','قياس سابق (التاريخ والوقت)'))),
+                    if (_customTime) Semantics(identifier:'evidence-time', child: TextField(
+                      key: const Key('evidence-time'), controller:_timestamp, enabled:!_busy,
+                      textDirection:TextDirection.ltr, autocorrect:false, enableSuggestions:false,
+                      decoration:InputDecoration(labelText:tr('Date et heure avec fuseau','التاريخ والوقت مع التوقيت'),
+                        hintText:'2026-11-01T08:00:00+01:00'))),
+                  ],
                   if (_error) Semantics(identifier: 'evidence-input-error', liveRegion: true,
                     child: Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.'))),
                   if (_editing != null) TextButton(onPressed: _busy ? null : () => setState(() {
                     _editing = null; _unit = null; _value.clear();
+                    _editingSeconds=null; _customTime=false; _timestamp.clear();
                   }), child: Text(tr('Annuler', 'إلغاء'))),
                 ],
               ))),
@@ -252,6 +353,17 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
               Text(tr('Mesures enregistrées', 'القياسات المسجلة'),
                 style: Theme.of(context).textTheme.titleLarge),
               if (_rows.isEmpty) Text(tr('Aucune mesure explicite', 'لا توجد قياسات صريحة')),
+              if (_offset>0 || _nextOffset!=null) ...[
+                Text(tr('Page', 'صفحة')+' '+(_offset~/evidencePageSize+1).toString()),
+                Wrap(spacing:8,children:[
+                  TextButton(key:const Key('evidence-prev'),onPressed:_busy||_editing!=null||_offset==0?null:()=>_perform('page',{
+                    'revision':_revision,'offset':_offset-evidencePageSize,
+                  }),child:Text(tr('Précédent','السابق'))),
+                  TextButton(key:const Key('evidence-next'),onPressed:_busy||_editing!=null||_nextOffset==null?null:()=>_perform('page',{
+                    'revision':_revision,'offset':_nextOffset,
+                  }),child:Text(tr('Suivant','التالي'))),
+                ]),
+              ],
               for (final row in _rows) Card(semanticContainer: false, child: Padding(padding: const EdgeInsets.all(12),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text('${row['originalValue']} ${row['originalUnit']}',
@@ -259,11 +371,15 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                     style: Theme.of(context).textTheme.titleMedium),
                   Text('${row['displayMgDl']} mg/dL · ${row['displayMmolL']} mmol/L',
                     textDirection: TextDirection.ltr),
+                  Text(formatEvidenceTimestamp(row['loggedAtSeconds'] as int),
+                    textDirection: TextDirection.ltr, style:Theme.of(context).textTheme.bodySmall),
                   Wrap(children: [
                     TextButton(onPressed: _busy ? null : () {
                       setState(() {
                         _confirmDelete = null; _editing = row['uuid'] as String; _unit = row['originalUnit'] as String;
                         _value.text = row['originalValue'].toString();
+                        _editingSeconds=row['loggedAtSeconds'] as int;
+                        _customTime=false; _timestamp.clear();
                       });
                       _valueFocus.requestFocus();
                     }, child: Text(tr('Modifier', 'تعديل'))),

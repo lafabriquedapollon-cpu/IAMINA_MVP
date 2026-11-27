@@ -342,7 +342,10 @@ class AdmissionSession {
           Number.isFinite(x.originalValue)&&x.originalValue>0&&
           ['mg/dL','mmol/L'].includes(x.originalUnit)&&
           Number.isFinite(x.mgDl)&&x.mgDl>0&&x.provenance==='user_entered'&&
-          Number.isSafeInteger(x.loggedAtSeconds)&&x.loggedAtSeconds>=start&&x.loggedAtSeconds<end)&&
+          Number.isSafeInteger(x.loggedAtSeconds)&&x.loggedAtSeconds>=start&&x.loggedAtSeconds<end&&
+          Number.isSafeInteger(x.createdAtSeconds)&&x.createdAtSeconds>0&&x.createdAtSeconds<4102444800)&&
+        result.rows.every((x,i,rows)=>i===0||rows[i-1].loggedAtSeconds>x.loggedAtSeconds||
+          (rows[i-1].loggedAtSeconds===x.loggedAtSeconds&&rows[i-1].uuid<x.uuid))&&
         (result.nextOffset===null||(result.rows.length===limit&&result.nextOffset===offset+limit&&result.nextOffset<=10000)),
         'Evidence journal invariant failed');
       if(beforeReturn)await beforeReturn();
@@ -369,7 +372,7 @@ class AdmissionSession {
     require(Number.isSafeInteger(expectedRevision)&&expectedRevision>0&&
       typeof uuid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)&&
       (action==='delete'||(['insert','edit'].includes(action)&&Number.isFinite(original)&&original>0&&
-      ['mg/dL','mmol/L'].includes(unit)&&Number.isSafeInteger(seconds)&&seconds>0&&seconds<=4102444800)),
+      ['mg/dL','mmol/L'].includes(unit)&&Number.isSafeInteger(seconds)&&seconds>0&&seconds<4102444800)),
       'Invalid explicit measurement');
     require(!this.#busy,'Mutation already pending');this.#busy=true;
     let bytes,next;

@@ -690,6 +690,7 @@ Map<String, Object?> _evidenceJson(LogEntryData row, GlucoseQuantityEvidence evi
       'originalUnit': evidence.originalUnit!.ucumCode,
       'mgDl': evidence.canonicalMgDl,
       'loggedAtSeconds': row.loggedAt!.millisecondsSinceEpoch ~/ 1000,
+      'createdAtSeconds': row.createdAt.millisecondsSinceEpoch ~/ 1000,
       'provenance': 'user_entered',
       'displayMgDl': GlucoseDisplayProjection.fromEvidence(evidence, GlucoseSourceUnit.mgDl)?.numericText,
       'displayMmolL': GlucoseDisplayProjection.fromEvidence(evidence, GlucoseSourceUnit.mmolL)?.numericText,
@@ -714,7 +715,6 @@ Future<String> _evidenceJournal(Uint8List input, int owner, int start, int end,
           t.loggedAt.isBiggerOrEqualValue(from) & t.loggedAt.isSmallerThanValue(until))
       ..orderBy([
         (t) => OrderingTerm(expression: t.loggedAt, mode: OrderingMode.desc),
-        (t) => OrderingTerm(expression: t.createdAt, mode: OrderingMode.desc),
         (t) => OrderingTerm(expression: t.clientUuid, mode: OrderingMode.asc),
       ])
       ..limit(limit + 1, offset: offset)).get();
@@ -805,7 +805,7 @@ Future<Uint8List> _changeEvidence(Uint8List input, int owner, String uuid,
   final unit = GlucoseSourceUnit.fromExplicitUcumCode(unitCode);
   _require(_fixtureUuid.hasMatch(uuid) && revision > 0 && revision < 0xffffffff &&
       (action == 'delete' || (['insert','edit'].contains(action) && unit != null &&
-        seconds > 0 && seconds <= 4102444800)), 'Invalid evidence mutation');
+        seconds > 0 && seconds < 4102444800)), 'Invalid evidence mutation');
   final evidence = action == 'delete' ? null :
       GlucoseQuantityEvidence.userEntry(originalValue: original, declaredUnit: unit!);
   final envelope = evidence == null ? null :
@@ -823,7 +823,7 @@ Future<Uint8List> _changeEvidence(Uint8List input, int owner, String uuid,
         await db.customStatement('CREATE TABLE IF NOT EXISTS $_evidenceTable (client_uuid TEXT NOT NULL PRIMARY KEY, owner_id INTEGER NOT NULL, envelope_json TEXT NOT NULL)');
         final time = DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
         await db.into(db.logEntries).insert(LogEntriesCompanion.insert(
-          clientUuid: uuid, createdAt: time, loggedAt: Value(time),
+          clientUuid: uuid, createdAt: DateTime.now().toUtc(), loggedAt: Value(time),
           bloodSugar: evidence!.canonicalMgDl!, mealDescription: const Value(_evidenceMarker),
           syncStatus: const Value('d5_candidate_local'),
         ));

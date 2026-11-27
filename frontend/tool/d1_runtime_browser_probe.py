@@ -25,10 +25,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-def open_context(browser_type, profile, locale, origin, extra_origin=None, trace=None):
+def open_context(browser_type, profile, locale, origin, extra_origin=None, trace=None, timezone_id=None):
     context = browser_type.launch_persistent_context(
         str(profile), headless=True, locale=locale,
         viewport={"width":390,"height":844}, service_workers="block",
+        **({"timezone_id":timezone_id} if timezone_id else {}),
     )
     blocked, errors = [], []
     def route(r):
@@ -2107,9 +2108,11 @@ UI_MOUNT = r"""async (arabic)=>{
     await bootstrap.retire();
   }
   let active=null, binding=null, generation=0, lastRequest=0, retired=()=>{};
-  const t=1795564800, sentinel='ac123456-1234-4abc-8def-000000000099';
+  const start=1,end=4102444800,limit=10;
+  let currentOffset=0,nextOffset=null,currentRevision=null;
+  const sentinel='ac123456-1234-4abc-8def-000000000099';
   const sameBinding=(a,b)=>a&&b&&['owner','epoch','identityGeneration','session','vault'].every(k=>a[k]===b[k]);
-  const clear=()=>{generation++;active=null;binding=null;retired();};
+  const clear=()=>{generation++;active=null;binding=null;currentOffset=0;nextOffset=null;currentRevision=null;retired();};
   const lock=()=>{clear();try{window.d1BoundLock();}catch(_){/* no fixture auth initialized yet */}};
   const check=(g)=>{if(g!==generation)throw Error('UI authority retired');};
   const call=async(action,json)=>{
@@ -2120,6 +2123,9 @@ UI_MOUNT = r"""async (arabic)=>{
          !Number.isSafeInteger(args.generation)||args.generation<0||
          !Number.isSafeInteger(args.session)||args.session<=0)throw Error('Invalid request correlation');
       lastRequest=args.requestId;
+      if(args.start!==start||args.end!==end||args.limit!==limit||!Number.isSafeInteger(args.offset)||
+         args.offset<0||args.offset>10000||args.offset%limit!==0||
+         (action!=='page'&&args.offset!==0))throw Error('Invalid journal coordinates');
       if(action==='open'){
         if(active||args.binding!==null||args.session!==args.requestId||
            ![900001,900002].includes(args.owner))throw Error('Invalid fixture');
@@ -2136,7 +2142,9 @@ UI_MOUNT = r"""async (arabic)=>{
           vault:'amina_vault_v1_native_'+target});
       }else{
         if(!active||!binding||args.owner!==binding.owner||args.session!==binding.session||
-           !sameBinding(args.binding,binding)||!Number.isSafeInteger(args.revision))throw Error('UI authority required');
+           !sameBinding(args.binding,binding)||!Number.isSafeInteger(args.revision)||args.revision!==currentRevision)throw Error('UI authority required');
+        if(action==='page'&&!(args.offset===nextOffset||currentOffset>0&&args.offset===currentOffset-limit))
+          throw Error('Invalid page navigation');
       }
       const session=active, expected=binding;
       const live=()=>{
@@ -2146,16 +2154,28 @@ UI_MOUNT = r"""async (arabic)=>{
       };
       live();
       let ack=null;
-      if(action==='insert')ack=await session.insertEvidence(args.revision,crypto.randomUUID(),args.value,args.unit,t);
-      else if(action==='edit')ack=await session.editEvidence(args.revision,args.uuid,args.value,args.unit,t);
-      else if(action==='delete')ack=await session.deleteEvidence(args.revision,args.uuid);
-      else if(action!=='open')throw Error('Unsupported UI action');
+      if(action==='insert'||action==='edit'){
+        if(!Number.isSafeInteger(args.loggedAtSeconds)||args.loggedAtSeconds<start||
+           args.loggedAtSeconds>=end||args.loggedAtSeconds>Math.floor(Date.now()/1000))throw Error('Invalid measurement instant');
+        if(action==='insert')ack=await session.insertEvidence(args.revision,crypto.randomUUID(),args.value,args.unit,args.loggedAtSeconds);
+        else{
+          const existing=await session.readEvidence(args.uuid);live();
+          if(existing.revision!==args.revision||existing.evidence?.loggedAtSeconds!==args.loggedAtSeconds)
+            throw Error('Measurement instant changed');
+          ack=await session.editEvidence(args.revision,args.uuid,args.value,args.unit,args.loggedAtSeconds);
+          if(ack.evidence.createdAtSeconds!==existing.evidence.createdAtSeconds)throw Error('Creation instant changed');
+        }
+      }else if(action==='delete')ack=await session.deleteEvidence(args.revision,args.uuid);
+      else if(action!=='open'&&action!=='page')throw Error('Unsupported UI action');
       live();
       const revision=(await session.readEvidence(sentinel)).revision;live();
-      if(action!=='open'&&(ack?.revision!==args.revision+1||revision!==ack.revision))throw Error('Mutation ACK mismatch');
-      const journal=await session.readEvidenceJournal(revision,t,t+86400,50,0);live();
-      if(journal.nextOffset!==null||journal.revision!==revision)throw Error('Fixture journal mismatch');
-      return JSON.stringify({binding:expected,generation:args.generation,requestId:args.requestId,revision,rows:journal.rows});
+      if(action==='page'&&revision!==args.revision)throw Error('Checkpoint conflict');
+      if(action!=='open'&&action!=='page'&&(ack?.revision!==args.revision+1||revision!==ack.revision))throw Error('Mutation ACK mismatch');
+      const journal=await session.readEvidenceJournal(revision,start,end,limit,args.offset);live();
+      if(journal.revision!==revision)throw Error('Fixture journal mismatch');
+      currentRevision=revision;currentOffset=args.offset;nextOffset=journal.nextOffset;
+      return JSON.stringify({binding:expected,generation:args.generation,requestId:args.requestId,revision,
+        start,end,limit,offset:currentOffset,nextOffset,rows:journal.rows});
     }catch(_){
       if(g===generation)lock();
       throw Error('UI operation refused');
@@ -2929,8 +2949,291 @@ def run_h2_ui():
     print("H2_WEB_PASS 2/2 scenarios=8/8",flush=True)
 
 
+
+# H3 uses the real encrypted vault, not an in-memory list or a fake page port.
+# The wrapper exists solely in the synthetic browser harness.
+_H3_MOUNT_WRAPPER = r"""
+  const baseTime=Date.UTC(2024,9,27,0,30)/1000;
+  const id=n=>'ac123456-1234-4abc-8def-'+String(n+100).padStart(12,'0');
+  const checkH3=(ok)=>{if(!ok)throw Error('H3 oracle mismatch');};
+  window.__h3Stage='seed-admission';
+  await window.d1BoundLogin(900001);
+  let seed=await api.admitBoundClinical(900001,window.d1BoundEpoch(),await window.d1BoundProof(900001),secrets.get(900001));
+  window.__h3Stage='seed-53';
+  for(let i=1;i<=53;i++){
+    const measured=i===53?baseTime+3600:i===52?baseTime-1:baseTime;
+    const ack=await seed.insertEvidence(i,id(i),100.25+i,'mg/dL',measured);
+    checkH3(ack.revision===i+1&&ack.evidence.loggedAtSeconds===measured&&
+      ack.evidence.createdAtSeconds>measured);
+  }
+  window.__h3Stage='port-50-plus-3';
+  const all=[id(53),...Array.from({length:51},(_,i)=>id(i+1)),id(52)];
+  const first=await seed.readEvidenceJournal(54,1,4102444800,50,0);
+  const second=await seed.readEvidenceJournal(54,1,4102444800,50,50);
+  checkH3(first.nextOffset===50&&second.nextOffset===null&&
+    first.rows.length===50&&second.rows.length===3&&
+    JSON.stringify([...first.rows,...second.rows].map(r=>r.uuid))===JSON.stringify(all));
+  window.__h3Stage='half-open-dst';
+  const overlap1=await seed.readEvidenceJournal(54,baseTime,baseTime+3600,50,0);
+  const overlap2=await seed.readEvidenceJournal(54,baseTime,baseTime+3600,50,50);
+  checkH3(overlap1.rows.length===50&&overlap2.rows.length===1&&
+    overlap2.nextOffset===null&&overlap1.rows.every(r=>r.loggedAtSeconds===baseTime)&&
+    overlap2.rows[0].loggedAtSeconds===baseTime);
+  checkH3((await seed.readEvidenceJournal(54,baseTime+3600,baseTime+3601,50,0)).rows[0].uuid===id(53));
+  checkH3((await seed.readEvidenceJournal(54,baseTime-1,baseTime,50,0)).rows[0].uuid===id(52));
+  window.__h3Stage='exclusive-end-refusal';
+  let denied=false;
+  try{await seed.insertEvidence(54,id(54),200.25,'mg/dL',4102444800);}
+  catch(e){denied=String(e).includes('Invalid explicit measurement');}
+  checkH3(denied);
+  await seed.retire();
+  seed=null;
+  window.__h3Stage='mount-ready';
+  let latest=null, edited=null, conflict=false, conflictCommitted=false;
+  const wrapper=async(action,json)=>{
+    const args=JSON.parse(json);
+    if(conflict&&action==='page'){
+      conflict=false;
+      const ack=await active.insertEvidence(args.revision,id(54),190.25,'mg/dL',Math.floor(Date.now()/1000));
+      checkH3(ack.revision===args.revision+1);
+      conflictCommitted=true;
+    }
+    const response=JSON.parse(await call(action,json));
+    latest=response;
+    if(action==='edit'){
+      const read=await active.readEvidence(args.uuid);
+      checkH3(read.revision===response.revision);
+      edited=read.evidence;
+    }
+    return JSON.stringify(response);
+  };
+  window.__h3Fixture=Object.freeze({
+    page:()=>latest===null?null:{offset:latest.offset,revision:latest.revision,next:latest.nextOffset,
+      rows:latest.rows.map(r=>({uuid:r.uuid,value:r.originalValue,logged:r.loggedAtSeconds,created:r.createdAtSeconds}))},
+    edited:()=>edited,
+    conflict:()=>{conflict=true;},
+    committed:()=>conflictCommitted,
+    secret:()=>secrets.get(900001),
+  });
+  window.d1MountEvidenceUi(wrapper,lock,cb=>{retired=cb;},arabic);
+"""
+assert UI_MOUNT.count(_H2_MOUNT_ANCHOR)==1
+H3_UI_MOUNT=UI_MOUNT.replace(_H2_MOUNT_ANCHOR,_H3_MOUNT_WRAPPER)
+
+
+def exercise_h3_ui(browser_type, profile, locale, origin):
+    from PIL import Image
+    from playwright.sync_api import expect
+    width,height=390,844
+    timezone_id="Europe/Paris" if locale=="fr-FR" else "Africa/Casablanca"
+    proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
+    frames=[]
+    stage="navigation"
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin,timezone_id=timezone_id)
+    secret=None
+    ar=locale=="ar-MA"
+    def text(fr,arabic):
+        return page.get_by_text(arabic if ar else fr,exact=True).first
+    def click(fr,arabic):
+        target=text(fr,arabic)
+        target.scroll_into_view_if_needed(timeout=20000)
+        expect(target).to_be_visible(timeout=20000)
+        target.click(timeout=20000)
+    def control(identifier):
+        target=page.locator(f'[flt-semantics-identifier="{identifier}"]')
+        expect(target).to_have_count(1,timeout=15000)
+        target.scroll_into_view_if_needed(timeout=10000)
+        expect(target).to_be_visible(timeout=15000)
+        return target
+    def enter(identifier,value):
+        field=control(identifier)
+        bounds=field.bounding_box(timeout=10000)
+        assert bounds and bounds["width"]>0 and bounds["height"]>0
+        page.mouse.click(bounds["x"]+bounds["width"]/2,bounds["y"]+bounds["height"]/2)
+        native=page.locator("input:focus, textarea:focus")
+        expect(native).to_have_count(1,timeout=10000)
+        native.press("ControlOrMeta+a",timeout=10000)
+        native.press_sequentially(value,delay=60,timeout=15000)
+        expect(native).to_have_value(value,timeout=10000)
+    def semantics():
+        page.wait_for_selector("flutter-view, flt-glass-pane",timeout=60000)
+        placeholder=page.locator("flt-semantics-placeholder")
+        if placeholder.count():
+            placeholder.evaluate("(el)=>el.click()")
+    def shot(name):
+        path=proof/f"h3-web-{ENGINE}-{locale}-{name}.png"
+        page.screenshot(path=str(path),animations="disabled",timeout=15000)
+        with Image.open(path) as im:
+            rgb=im.convert("RGB")
+            assert rgb.size==(width,height)
+            assert len(rgb.getcolors(width*height) or [])>50
+        frames.append({"file":path.name,"sha256":hashlib.sha256(path.read_bytes()).hexdigest()})
+    def journal(n,revision):
+        expected="صفحة "+str(n) if ar else "Page "+str(n)
+        expect(page.get_by_text(expected,exact=True)).to_be_visible(timeout=20000)
+        page.wait_for_function("v=>{const p=window.__h3Fixture.page();return p?.offset===v[0]&&p?.revision===v[1]}",
+            arg=[(n-1)*10,revision],timeout=20000)
+        return page.evaluate("window.__h3Fixture.page()")
+    def next_page(n,revision):
+        click("Suivant","التالي")
+        return journal(n,revision)
+    try:
+        page.set_viewport_size({"width":width,"height":height})
+        assert page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")==timezone_id
+        stage="seed-and-port-oracle"
+        page.evaluate(H3_UI_MOUNT,ar)
+        semantics()
+        click("Ouvrir profil A","فتح الملف A")
+        stage="six-page-traversal"
+        first=journal(1,54)
+        pages=[first]
+        # Known local rendering of two distinct UTC instants at fall overlap.
+        expected="2024-10-27T02:30:00+01:00"
+        expect(page.get_by_text(expected,exact=True).first).to_be_visible(timeout=20000)
+        shot("first-page")
+        for n in range(2,7):
+            pages.append(next_page(n,54))
+        rows=[r for p in pages for r in p["rows"]]
+        assert [len(p["rows"]) for p in pages]==[10,10,10,10,10,3]
+        assert len({r["uuid"] for r in rows})==53 and pages[-1]["next"] is None
+        assert [r["value"] for r in rows]==[153.25]+[100.25+i for i in range(1,52)]+[152.25]
+        last=pages[-1]["rows"][0]
+        assert last["value"]==150.25
+        expect(page.get_by_text("150.25 mg/dL",exact=True)).to_be_visible(timeout=20000)
+        shot("sixth-page")
+        click("Précédent","السابق")
+        assert journal(5,54)==pages[4]
+        assert next_page(6,54)==pages[5]
+        stage="edit-old-page"
+        click("Modifier","تعديل")
+        enter("evidence-value","175.25")
+        control("evidence-save").click(timeout=10000)
+        journal(1,55)
+        edited=page.evaluate("window.__h3Fixture.edited()")
+        assert edited["uuid"]==last["uuid"] and edited["originalValue"]==175.25
+        assert edited["loggedAtSeconds"]==last["logged"] and edited["createdAtSeconds"]==last["created"]
+        for n in range(2,7):
+            next_page(n,55)
+        expect(page.get_by_text("175.25 mg/dL",exact=True)).to_be_visible(timeout=20000)
+        stage="historical-insert"
+        click("Mesure antérieure (date et heure)","قياس سابق (التاريخ والوقت)")
+        enter("evidence-time","2024-10-27T02:30:00")
+        enter("evidence-value","7.83")
+        control("evidence-mmoll").click(timeout=10000)
+        control("evidence-save").click(timeout=10000)
+        expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_be_visible(timeout=20000)
+        assert page.evaluate("window.__h3Fixture.page().revision")==55
+        enter("evidence-time","2024-10-27T02:30:00+01:00")
+        control("evidence-save").click(timeout=10000)
+        result=journal(1,56)
+        past=next(r for r in result["rows"] if r["value"]==7.83)
+        assert past["logged"]==1729992600 and past["created"]>past["logged"]
+        expect(page.get_by_text("7.83 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        shot("historical-saved")
+        stage="current-insert"
+        before=page.evaluate("Math.floor(Date.now()/1000)")
+        enter("evidence-value","8.2")
+        control("evidence-mmoll").click(timeout=10000)
+        control("evidence-save").click(timeout=10000)
+        result=journal(1,57)
+        now=next(r for r in result["rows"] if r["value"]==8.2)
+        after=page.evaluate("Math.floor(Date.now()/1000)")
+        assert before<=now["logged"]<=after and now["logged"]<=now["created"]<=after
+        shot("current-saved")
+        stage="real-revision-conflict"
+        page.evaluate("window.__h3Fixture.conflict()")
+        click("Suivant","التالي")
+        expect(text("Coffre verrouillé","المخزن مقفل")).to_be_visible(timeout=20000)
+        assert page.evaluate("window.__h3Fixture.committed()") is True
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_have_count(0)
+        shot("stale-page-refused")
+        stage="readmit"
+        click("Ouvrir profil A","فتح الملف A")
+        restored=journal(1,58)
+        assert any(r["value"]==190.25 for r in restored["rows"])
+        shot("readmitted")
+        click("Verrouiller","قفل")
+        expect(text("Coffre verrouillé","المخزن مقفل")).to_be_visible(timeout=20000)
+        secret=page.evaluate("window.__h3Fixture.secret()")
+        assert not blocked and not errors
+        ctx.close()
+        stage="restart-storage"
+        ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin,timezone_id=timezone_id)
+        restart=page.evaluate(r"""async secret=>{
+          const api=await import('/d1_admission_candidate.mjs');
+          await window.d1BoundLogin(900001);
+          const s=await api.admitBoundClinical(900001,window.d1BoundEpoch(),await window.d1BoundProof(900001),secret);
+          const a=await s.readEvidenceJournal(58,1,4102444800,50,0);
+          const b=await s.readEvidenceJournal(58,1,4102444800,50,50);
+          const rows=[...a.rows,...b.rows];
+          const e=rows.find(r=>r.originalValue===175.25);
+          const historical=rows.find(r=>r.originalValue===7.83);
+          await s.retire();
+          return {count:rows.length,unique:new Set(rows.map(r=>r.uuid)).size,
+            first:a.rows.length,last:b.rows.length,next:b.nextOffset,
+            edited:e?.loggedAtSeconds,created:e?.createdAtSeconds,
+            historical:historical?.loggedAtSeconds,conflict:rows.some(r=>r.originalValue===190.25)};
+        }""",secret)
+        assert restart=={"count":56,"unique":56,"first":50,"last":6,"next":None,
+            "edited":last["logged"],"created":last["created"],"historical":1729992600,"conflict":True}
+        assert not blocked and not errors
+        return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                "viewport":[width,height],"timezone":timezone_id,"seedCount":53,"pageCounts":[10,10,10,10,10,3],
+                "halfOpenDst":True,"exclusiveEndRefused":True,"historicalExact":True,
+                "currentExact":True,"editInstantPreserved":True,"stalePageRefused":True,
+                "restartCount":56,"blockedRequests":0,"pageErrors":0,"frames":frames,"result":"PASS"}
+    except Exception as error:
+        if stage=="seed-and-port-oracle":
+            try:
+                sub=page.evaluate("window.__h3Stage")
+                if sub in ("seed-admission","seed-53","port-50-plus-3","half-open-dst","exclusive-end-refusal","mount-ready"):
+                    stage=sub
+            except Exception:
+                pass
+        try:
+            page.screenshot(path=str(proof/f"h3-web-{ENGINE}-{locale}-failure.png"),timeout=5000)
+        except Exception:
+            pass
+        return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                "stage":stage,"errorType":type(error).__name__,"blockedRequests":len(blocked),
+                "pageErrors":len(errors),"result":"FAIL"}
+    finally:
+        secret=None
+        ctx.close()
+
+
+def run_h3_ui():
+    assert ENGINE in ("chromium","webkit")
+    assert os.environ["GITHUB_HEAD_REF"]=="phase2/d1-d5-convergence"
+    proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
+    proof.mkdir(parents=True,exist_ok=True)
+    records=[]
+    with tempfile.TemporaryDirectory(prefix="h3-ui-") as root:
+        with http.server.ThreadingHTTPServer(("127.0.0.1",0),Handler) as server:
+            threading.Thread(target=server.serve_forever,daemon=True).start()
+            origin=f"http://127.0.0.1:{server.server_port}"
+            try:
+                with sync_playwright() as pw:
+                    browser_type=getattr(pw,ENGINE)
+                    for locale in ("fr-FR","ar-MA"):
+                        try:
+                            record=exercise_h3_ui(browser_type,Path(root)/f"h3-{locale}",locale,origin)
+                        except Exception as error:
+                            record={"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                                    "stage":"navigation","errorType":type(error).__name__,"result":"FAIL"}
+                        records.append(record)
+                        print("H3_WEB "+json.dumps(record),flush=True)
+            finally:
+                server.shutdown()
+                (proof/f"h3-web-{ENGINE}-matrix.json").write_text(json.dumps(records))
+    assert len(records)==2 and all(r["result"]=="PASS" for r in records),"H3 Web journal matrix failed"
+    print("H3_WEB_PASS 2/2",flush=True)
+
+
 if __name__=="__main__":
-    if os.environ.get("H2_RUNTIME_UI_ONLY")=="1":
+    if os.environ.get("H3_RUNTIME_UI_ONLY")=="1":
+        run_h3_ui()
+    elif os.environ.get("H2_RUNTIME_UI_ONLY")=="1":
         run_h2_ui()
     elif os.environ.get("H1_RUNTIME_UI_ONLY")=="1":
         run_h1_ui()

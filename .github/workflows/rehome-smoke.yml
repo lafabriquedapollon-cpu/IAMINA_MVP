@@ -1396,7 +1396,7 @@ jobs:
     needs: phase1-web-build
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 50
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       PHASE_BRANCH: ${{ github.head_ref }}
@@ -1523,6 +1523,12 @@ jobs:
         run: |
           set -euo pipefail
           H2_RUNTIME_UI_ONLY=1 D1_RUNTIME_ENGINE=chromium D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
+      - name: H3 real timestamps and paginated journal — chromium
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          H3_RUNTIME_UI_ONLY=1 D1_RUNTIME_ENGINE=chromium D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain D2 candidate screenshots and exact SHA matrix
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -1667,7 +1673,7 @@ jobs:
     needs: [phase1-web-scope, phase1-web-build]
     if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'migration/iamina-snapshot-20261123' && (github.head_ref == 'phase1/d2-guest' || (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence')) && (needs.phase1-web-scope.result != 'success' || needs.phase1-web-scope.outputs.full != 'false') }}
     runs-on: macos-15
-    timeout-minutes: 35
+    timeout-minutes: 50
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       D2_BROWSER_TARGET: webkit
@@ -1733,6 +1739,12 @@ jobs:
         run: |
           set -euo pipefail
           H2_RUNTIME_UI_ONLY=1 D1_RUNTIME_ENGINE=webkit D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
+      - name: H3 real timestamps and paginated journal — webkit
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          H3_RUNTIME_UI_ONLY=1 D1_RUNTIME_ENGINE=webkit D1_RUNTIME_WEB="$RUNNER_TEMP/d1-runtime-web" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_runtime_browser_probe.py
       - name: Retain macOS D2 evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
