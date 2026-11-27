@@ -5,10 +5,61 @@ import 'package:amina/core/theme/app_theme.dart' show kOfflineFontFallbacks;
 typedef EvidenceUiCall = Future<Map<String, dynamic>> Function(
     String action, Map<String, Object?> args);
 
+// Correlation fields do not grant admission authority.
+final class EvidenceUiBinding {
+  final int owner, epoch, identityGeneration, session;
+  final String vault;
+  const EvidenceUiBinding({required this.owner, required this.epoch,
+    required this.identityGeneration, required this.session, required this.vault});
+  bool get valid => (owner == 900001 || owner == 900002) &&
+      epoch > 0 && identityGeneration >= 0 && session > 0 &&
+      vault == 'amina_vault_v1_native_$owner';
+  bool matches(EvidenceUiBinding other) =>
+      owner == other.owner && epoch == other.epoch &&
+      identityGeneration == other.identityGeneration &&
+      session == other.session && vault == other.vault;
+  Map<String, Object?> toJson() => {
+    'owner': owner, 'epoch': epoch, 'identityGeneration': identityGeneration,
+    'session': session, 'vault': vault,
+  };
+  factory EvidenceUiBinding.fromJson(Map<String, dynamic> raw) =>
+      EvidenceUiBinding(owner: raw['owner'] as int, epoch: raw['epoch'] as int,
+        identityGeneration: raw['identityGeneration'] as int,
+        session: raw['session'] as int, vault: raw['vault'] as String);
+}
+
+final class EvidenceUiResult {
+  final EvidenceUiBinding binding;
+  final int generation, requestId, revision;
+  final List<Map<String, dynamic>> rows;
+  EvidenceUiResult._(this.binding, this.generation, this.requestId, this.revision, this.rows);
+  factory EvidenceUiResult.fromJson(Map<String, dynamic> raw) {
+    final rows = (raw['rows'] as List).map((r) =>
+        Map<String, dynamic>.unmodifiable(Map<String, dynamic>.from(r as Map))).toList();
+    final seen = <String>{};
+    for (final row in rows) {
+      final uuid = row['uuid'], value = row['originalValue'];
+      if (uuid is! String ||
+          !RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$').hasMatch(uuid) ||
+          !seen.add(uuid) || value is! num || !value.isFinite || value <= 0 ||
+          !['mg/dL', 'mmol/L'].contains(row['originalUnit']) ||
+          row['displayMgDl'] is! String || row['displayMmolL'] is! String) {
+        throw StateError('Invalid UI row');
+      }
+    }
+    if (rows.length > 50) throw StateError('Fixture capacity exceeded');
+    return EvidenceUiResult._(
+      EvidenceUiBinding.fromJson(Map<String, dynamic>.from(raw['binding'] as Map)),
+      raw['generation'] as int, raw['requestId'] as int, raw['revision'] as int,
+      List.unmodifiable(rows));
+  }
+}
+
 class EvidenceUiCandidate extends StatefulWidget {
   const EvidenceUiCandidate({super.key, required this.call,
-    required this.revoke, required this.lock, required this.arabic});
+    required this.revoke, required this.lock, required this.arabic, required this.isCurrent});
   final EvidenceUiCall call;
+  final bool Function(EvidenceUiBinding) isCurrent;
   final ValueNotifier<int> revoke;
   final VoidCallback lock;
   final bool arabic;
@@ -20,8 +71,10 @@ class EvidenceUiCandidate extends StatefulWidget {
 class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
   final _value = TextEditingController();
   final _valueFocus = FocusNode();
-  int _generation = 0;
-  int? _owner, _revision;
+  int _generation = 0, _requestSequence = 0;
+  EvidenceUiBinding? _binding;
+  int? get _owner => _binding?.owner;
+  int? _revision;
   String? _unit, _editing, _confirmDelete;
   bool _busy = false, _error = false;
   List<Map<String, dynamic>> _rows = [];
@@ -39,7 +92,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
     _value.clear();
     if (mounted) {
       setState(() {
-        _owner = null; _revision = null; _unit = null; _editing = null; _confirmDelete = null;
+        _binding = null; _revision = null; _unit = null; _editing = null; _confirmDelete = null;
         _rows = []; _busy = false; _error = false;
       });
     }
@@ -53,16 +106,35 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
   Future<void> _perform(String action, Map<String, Object?> args) async {
     if (_busy) return;
     final generation = _generation;
+    final previous = _binding;
+    final opening = action == 'open';
+    final owner = opening ? args['owner'] as int? : previous?.owner;
+    final requestId = ++_requestSequence;
     setState(() { _busy = true; _error = false; });
     try {
-      final result = await widget.call(action, args);
+      if (owner == null || (opening && previous != null) ||
+          (!opening && (previous == null || !widget.isCurrent(previous)))) {
+        throw StateError('UI authority required');
+      }
+      final session = opening ? requestId : previous!.session;
+      final result = await widget.call(action, {
+        ...args, 'owner': owner, 'generation': generation, 'requestId': requestId,
+        'session': session, 'binding': previous?.toJson(),
+      });
       if (!mounted || generation != _generation) return;
-      final rows = (result['rows'] as List).map((r) =>
-          Map<String, dynamic>.from(r as Map)).toList(growable: false);
+      final response = EvidenceUiResult.fromJson(result);
+      final binding = response.binding;
+      if (!binding.valid || binding.owner != owner || binding.session != session ||
+          response.generation != generation || response.requestId != requestId ||
+          (previous != null && !previous.matches(binding)) ||
+          !widget.isCurrent(binding) || response.revision <= 0 ||
+          (!opening && response.revision != _revision! + 1)) {
+        throw StateError('UI response binding refused');
+      }
       setState(() {
-        _owner = result['owner'] as int;
-        _revision = result['revision'] as int;
-        _rows = rows;
+        _binding = binding;
+        _revision = response.revision;
+        _rows = response.rows;
         _busy = false;
         _value.clear(); _unit = null; _editing = null; _confirmDelete = null;
       });

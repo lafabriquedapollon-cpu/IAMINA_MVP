@@ -2106,39 +2106,58 @@ UI_MOUNT = r"""async (arabic)=>{
     const bootstrap=await api.enroll(owner,1,api.syntheticProof(owner,{identityVerified:true,unlocked:true,epoch:1}),secret);
     await bootstrap.retire();
   }
-  let active=null, owner=null, generation=0, retired=()=>{};
+  let active=null, binding=null, generation=0, lastRequest=0, retired=()=>{};
   const t=1795564800, sentinel='ac123456-1234-4abc-8def-000000000099';
-  const clear=()=>{generation++;active=null;owner=null;retired();};
+  const sameBinding=(a,b)=>a&&b&&['owner','epoch','identityGeneration','session','vault'].every(k=>a[k]===b[k]);
+  const clear=()=>{generation++;active=null;binding=null;retired();};
   const lock=()=>{clear();try{window.d1BoundLock();}catch(_){/* no fixture auth initialized yet */}};
   const check=(g)=>{if(g!==generation)throw Error('UI authority retired');};
   const call=async(action,json)=>{
     const args=JSON.parse(json);
-    let g=generation;
+    const g=generation;
     try{
+      if(!Number.isSafeInteger(args.requestId)||args.requestId<=lastRequest||
+         !Number.isSafeInteger(args.generation)||args.generation<0||
+         !Number.isSafeInteger(args.session)||args.session<=0)throw Error('Invalid request correlation');
+      lastRequest=args.requestId;
       if(action==='open'){
-        if(active||![900001,900002].includes(args.owner))throw Error('Invalid fixture');
+        if(active||args.binding!==null||args.session!==args.requestId||
+           ![900001,900002].includes(args.owner))throw Error('Invalid fixture');
         const target=args.owner;
         await window.d1BoundLogin(target);check(g);
         const proof=await window.d1BoundProof(target);check(g);
         const authority=(phase,id,epoch,callback)=>proof(phase,id,epoch,phase==='watch'?()=>{
-          // Clear all visible state before forwarding the durable retirement.
           try{if(g===generation)clear();}finally{callback();}
         }:callback);
-        const session=await api.admitBoundClinical(target,window.d1BoundEpoch(),authority,secrets.get(target));
+        const epoch=window.d1BoundEpoch(), identityGeneration=window.d1BoundIdentityGeneration();
+        if(!Number.isSafeInteger(identityGeneration)||identityGeneration<0)throw Error('Identity required');
+        const session=await api.admitBoundClinical(target,epoch,authority,secrets.get(target));
         if(g!==generation){await session.retire();throw Error('UI authority retired');}
-        active=session;owner=target;
+        active=session;
+        binding=Object.freeze({owner:target,epoch,identityGeneration,session:args.session,
+          vault:'amina_vault_v1_native_'+target});
       }else{
-        if(!active||!Number.isSafeInteger(args.revision))throw Error('UI authority required');
-        if(action==='insert')await active.insertEvidence(args.revision,crypto.randomUUID(),args.value,args.unit,t);
-        else if(action==='edit')await active.editEvidence(args.revision,args.uuid,args.value,args.unit,t);
-        else if(action==='delete')await active.deleteEvidence(args.revision,args.uuid);
-        else throw Error('Unsupported UI action');
+        if(!active||!binding||args.owner!==binding.owner||args.session!==binding.session||
+           !sameBinding(args.binding,binding)||!Number.isSafeInteger(args.revision))throw Error('UI authority required');
       }
-      check(g);
-      const revision=(await active.readEvidence(sentinel)).revision;check(g);
-      const journal=await active.readEvidenceJournal(revision,t,t+86400,50,0);check(g);
-      if(journal.nextOffset!==null)throw Error('Fixture capacity exceeded');
-      return JSON.stringify({owner,revision,rows:journal.rows});
+      const session=active, expected=binding;
+      const live=()=>{
+        check(g);
+        if(active!==session||binding!==expected||window.d1BoundEpoch()!==expected.epoch||
+           window.d1BoundIdentityGeneration()!==expected.identityGeneration)throw Error('UI binding retired');
+      };
+      live();
+      let ack=null;
+      if(action==='insert')ack=await session.insertEvidence(args.revision,crypto.randomUUID(),args.value,args.unit,t);
+      else if(action==='edit')ack=await session.editEvidence(args.revision,args.uuid,args.value,args.unit,t);
+      else if(action==='delete')ack=await session.deleteEvidence(args.revision,args.uuid);
+      else if(action!=='open')throw Error('Unsupported UI action');
+      live();
+      const revision=(await session.readEvidence(sentinel)).revision;live();
+      if(action!=='open'&&(ack?.revision!==args.revision+1||revision!==ack.revision))throw Error('Mutation ACK mismatch');
+      const journal=await session.readEvidenceJournal(revision,t,t+86400,50,0);live();
+      if(journal.nextOffset!==null||journal.revision!==revision)throw Error('Fixture journal mismatch');
+      return JSON.stringify({binding:expected,generation:args.generation,requestId:args.requestId,revision,rows:journal.rows});
     }catch(_){
       if(g===generation)lock();
       throw Error('UI operation refused');

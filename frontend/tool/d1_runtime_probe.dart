@@ -75,6 +75,8 @@ external set _boundLoginFn(JSFunction function);
 external set _boundProofFn(JSFunction function);
 @JS('d1BoundEpoch')
 external set _boundEpochFn(JSFunction function);
+@JS('d1BoundIdentityGeneration')
+external set _boundIdentityGenerationFn(JSFunction function);
 @JS('d1BoundLock')
 external set _boundLockFn(JSFunction function);
 
@@ -944,6 +946,8 @@ void main() {
       _boundLogin(owner.toDartInt).then((_) => true.toJS).toJS).toJS;
   _boundProofFn = ((JSNumber owner) => _boundProof(owner.toDartInt).toJS).toJS;
   _boundEpochFn = (() => AuthService.authEpoch.toJS).toJS;
+  _boundIdentityGenerationFn = (() =>
+      (_boundAuth?.verifiedNativeAdmissionGeneration ?? -1).toJS).toJS;
   _boundLockFn = (() { _boundLock!.lock(); }).toJS;
   _snapshotFn = ((JSUint8Array? bytes, JSNumber owner) =>
       _snapshot(bytes?.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
@@ -1014,6 +1018,15 @@ void main() {
   _mountEvidenceUiFn = ((JSFunction operation, JSFunction lock, JSFunction subscribe, JSBoolean arabic) {
     final revoke = ValueNotifier<int>(0);
     subscribe.callAsFunction(null, (() { revoke.value++; }).toJS);
+    bool isCurrent(EvidenceUiBinding binding) {
+      final auth = _boundAuth;
+      return binding.valid && auth != null &&
+          auth.boundNativeAccountId == binding.owner &&
+          auth.verifiedNativeAdmissionGeneration == binding.identityGeneration &&
+          AuthService.authEpoch == binding.epoch &&
+          _boundLock?.isUnlocked == true &&
+          PatientVaultScope.nativeDjango(binding.owner).databaseName == binding.vault;
+    }
     Future<Map<String, dynamic>> call(String action, Map<String, Object?> args) async {
       final promise = operation.callAsFunction(null, action.toJS, jsonEncode(args).toJS) as JSPromise<JSString>;
       final result = await promise.toDart;
@@ -1025,7 +1038,7 @@ void main() {
       locale: Locale(arabic.toDart ? 'ar' : 'fr'),
       supportedLocales: const [Locale('fr'), Locale('ar')],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
-      home: EvidenceUiCandidate(call: call, revoke: revoke,
+      home: EvidenceUiCandidate(call: call, revoke: revoke, isCurrent: isCurrent,
         lock: () { lock.callAsFunction(); }, arabic: arabic.toDart),
     ));
   }).toJS;
