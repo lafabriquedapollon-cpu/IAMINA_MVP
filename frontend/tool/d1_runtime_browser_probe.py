@@ -2386,6 +2386,10 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height, f
         expect(native).to_have_count(1,timeout=10000)
         stage=prefix+"-replace"
         native.press("ControlOrMeta+a",timeout=10000)
+        native.press("Backspace",timeout=10000)
+        stage=prefix+"-empty"
+        expect(native).to_have_count(1,timeout=10000)
+        expect(native).to_have_value("",timeout=10000)
         native.press_sequentially(value,delay=60,timeout=10000)
         stage=prefix+"-value"
         try:
