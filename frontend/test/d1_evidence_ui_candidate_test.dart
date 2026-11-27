@@ -200,6 +200,13 @@ void main() {
   ];
 
   testWidgets('H3 pagination keeps revision and rejects stale response', (tester) async {
+    // Keep the pager within the synthetic viewport, independent of the
+    // framework's default 800x600 and lazy ListView construction.
+    tester.view.devicePixelRatio=1;
+    tester.view.physicalSize=const Size(800,1000);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final offsets=<int>[];
     final revoke=ValueNotifier<int>(0);
     var locks=0;
     var stale=false;
@@ -213,6 +220,7 @@ void main() {
         expect(action,'page');
         expect(args['revision'],7);
         final offset=args['offset'] as int;
+        offsets.add(offset);
         return result(args,stale?8:7,pageRows(offset,10));
       },
     )));
@@ -220,23 +228,38 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Page 1'),findsOneWidget);
     await tester.ensureVisible(find.byKey(const Key('evidence-next')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('evidence-next')).hitTestable(),findsOneWidget);
     await tester.tap(find.byKey(const Key('evidence-next')));
     await tester.pumpAndSettle();
+    expect(offsets,[10]);
+    expect(locks,0);
     expect(find.text('Page 2'),findsOneWidget);
     await tester.ensureVisible(find.byKey(const Key('evidence-prev')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('evidence-prev')).hitTestable(),findsOneWidget);
     await tester.tap(find.byKey(const Key('evidence-prev')));
     await tester.pumpAndSettle();
     expect(find.text('Page 1'),findsOneWidget);
+    expect(offsets,[10,0]);
+    expect(locks,0);
     stale=true;
     await tester.ensureVisible(find.byKey(const Key('evidence-next')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('evidence-next')).hitTestable(),findsOneWidget);
     await tester.tap(find.byKey(const Key('evidence-next')));
     await tester.pumpAndSettle();
+    expect(offsets,[10,0,10]);
     expect(locks,1);
     expect(find.text('Coffre verrouillé'),findsOneWidget);
     await tester.pumpWidget(const SizedBox());revoke.dispose();
   });
 
   testWidgets('H3 edit preserves measurement instant and clears after revocation', (tester) async {
+    tester.view.devicePixelRatio=1;
+    tester.view.physicalSize=const Size(800,1000);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     final revoke=ValueNotifier<int>(0);
     final measured=DateTime.utc(2024,10,27,1,30).millisecondsSinceEpoch~/1000;
     var edits=0;
@@ -253,7 +276,11 @@ void main() {
       },
     )));
     await tester.tap(find.text('Ouvrir profil A'));await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('Modifier'));await tester.tap(find.text('Modifier'));await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Modifier'));
+    await tester.pumpAndSettle();
+    expect(find.text('Modifier').hitTestable(),findsOneWidget);
+    await tester.tap(find.text('Modifier'));await tester.pumpAndSettle();
+    expect(find.text('Modifier la mesure'),findsOneWidget);
     await tester.enterText(find.byKey(const Key('evidence-value')),'8.2');
     await tester.ensureVisible(find.byKey(const Key('evidence-save')));
     await tester.tap(find.byKey(const Key('evidence-save')));await tester.pumpAndSettle();
