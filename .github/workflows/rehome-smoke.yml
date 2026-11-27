@@ -1302,6 +1302,9 @@ jobs:
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             node --test frontend/tool/d1_checkpoint_crypto.test.mjs frontend/tool/d1_clinical_session_candidate.test.mjs
           fi
+          if [[ "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
+            node --test frontend/tool/d1_prf_possession_candidate.test.mjs
+          fi
       - name: D1 real browser encrypted archive restart and SQLite integrity
         timeout-minutes: 18
         run: |
