@@ -304,4 +304,28 @@ void main() {
     await tester.pumpWidget(const SizedBox());revoke.dispose();
   });
 
+
+  testWidgets('H3 named-zone display preserves UTC and rejects invalid projection', (tester) async {
+    tester.view.devicePixelRatio=1;
+    tester.view.physicalSize=const Size(800,1000);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final revoke=ValueNotifier<int>(0);
+    final measured=DateTime.utc(2026,11,27,11,15,45).millisecondsSinceEpoch~/1000;
+    Future<void> mount(String Function(int) projection) async {
+      await tester.pumpWidget(MaterialApp(home:EvidenceUiCandidate(
+        key:UniqueKey(),arabic:false,revoke:revoke,lock:(){},isCurrent:current,
+        timestampProjection:projection,
+        call:(action,args) async=>result(args,1,[{...row(7.83),'loggedAtSeconds':measured}]),
+      )));
+      await tester.tap(find.text('Ouvrir profil A'));await tester.pumpAndSettle();
+    }
+    await mount((_)=>'2026-11-27T12:15:45+01:00');
+    expect(find.text('2026-11-27T12:15:45+01:00'),findsOneWidget);
+    await mount((_)=>'2026-11-27T12:15:45+00:00'); // wrong UTC instant
+    expect(find.text('2026-11-27T11:15:45+00:00'),findsOneWidget);
+    expect(find.text('2026-11-27T12:15:45+00:00'),findsNothing);
+    await tester.pumpWidget(const SizedBox());revoke.dispose();
+  });
+
 }

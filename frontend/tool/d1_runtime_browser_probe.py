@@ -3024,10 +3024,13 @@ H3_UI_MOUNT=UI_MOUNT.replace(_H2_MOUNT_ANCHOR,_H3_MOUNT_WRAPPER)
 def exercise_h3_ui(browser_type, profile, locale, origin):
     from PIL import Image
     from playwright.sync_api import expect
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
     width,height=390,844
     timezone_id="Europe/Paris" if locale=="fr-FR" else "Africa/Casablanca"
     proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
     frames=[]
+    time_checks=[]
     stage="navigation"
     ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin,timezone_id=timezone_id)
     secret=None
@@ -3077,9 +3080,42 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
     def next_page(n,revision):
         click("Suivant","التالي")
         return journal(n,revision)
+    def oracle(seconds):
+        return datetime.fromtimestamp(seconds,timezone.utc).astimezone(ZoneInfo(timezone_id)).isoformat(timespec="seconds")
+    def time_check(label,seconds,visible=False):
+        expected=oracle(seconds)
+        observed=page.evaluate(r"""s=>{
+          const diagnostic=JSON.parse(window.d1EvidenceTimeProbe(s));
+          const date=new Date(s*1000);
+          return {...diagnostic,dateOffsetMinutes:-date.getTimezoneOffset(),
+            dateRoundtrip:Math.floor(date.getTime()/1000)};
+        }""",seconds)
+        record={"case":label,"seconds":seconds,"expected":expected,**observed,"visibleChecked":False}
+        time_checks.append(record)
+        # Emit diagnostics even if the named-zone result disagrees with tzdb.
+        print("H3_TIME_DIAG "+json.dumps({"engine":ENGINE,"locale":locale,**record}),flush=True)
+        assert observed["zone"]==timezone_id and observed["dateRoundtrip"]==seconds
+        assert observed["namedLocal"]==expected, "Named-zone projection differs from independent tzdb"
+        if visible:
+            expect(page.get_by_text(expected,exact=True).first).to_be_visible(timeout=20000)
+            record["visibleChecked"]=True
+        return expected
     try:
         page.set_viewport_size({"width":width,"height":height})
         assert page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")==timezone_id
+        stage="named-zone-oracle"
+        # Explicit UTC instants spanning both overlap/gap and Casablanca Ramadan.
+        # Fixed instants are fixture inputs; expected strings use independent tzdb.
+        for label,instant in (
+            ("paris-spring-before","2024-03-31T00:59:59+00:00"),
+            ("paris-spring-after","2024-03-31T01:00:00+00:00"),
+            ("paris-overlap-first","2024-10-27T00:30:00+00:00"),
+            ("paris-overlap-second","2024-10-27T01:30:00+00:00"),
+            ("casablanca-ramadan","2026-03-01T12:00:00+00:00"),
+            ("casablanca-after-ramadan","2026-04-01T12:00:00+00:00"),
+            ("reported-regression","2026-11-27T11:15:45+00:00"),
+        ):
+            time_check(label,int(datetime.fromisoformat(instant).timestamp()))
         stage="seed-and-port-oracle"
         page.evaluate(H3_UI_MOUNT,ar)
         semantics()
@@ -3087,9 +3123,9 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
         stage="six-page-traversal"
         first=journal(1,54)
         pages=[first]
-        # Known local rendering of two distinct UTC instants at fall overlap.
-        expected="2024-10-27T02:30:00+01:00"
-        expect(page.get_by_text(expected,exact=True).first).to_be_visible(timeout=20000)
+        # Check both actual rendered overlap instants, not just the declared zone.
+        time_check("visible-overlap-second",first["rows"][0]["logged"],visible=True)
+        time_check("visible-overlap-first",first["rows"][1]["logged"],visible=True)
         shot("first-page")
         for n in range(2,7):
             pages.append(next_page(n,54))
@@ -3129,6 +3165,7 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
         past=next(r for r in result["rows"] if r["value"]==7.83)
         assert past["logged"]==1729992600 and past["created"]>past["logged"]
         expect(page.get_by_text("7.83 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        time_check("visible-historical",past["logged"],visible=True)
         shot("historical-saved")
         stage="current-insert"
         before=page.evaluate("Math.floor(Date.now()/1000)")
@@ -3139,6 +3176,8 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
         now=next(r for r in result["rows"] if r["value"]==8.2)
         after=page.evaluate("Math.floor(Date.now()/1000)")
         assert before<=now["logged"]<=after and now["logged"]<=now["created"]<=after
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        time_check("visible-current",now["logged"],visible=True)
         shot("current-saved")
         stage="real-revision-conflict"
         page.evaluate("window.__h3Fixture.conflict()")
@@ -3151,6 +3190,7 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
         click("Ouvrir profil A","فتح الملف A")
         restored=journal(1,58)
         assert any(r["value"]==190.25 for r in restored["rows"])
+        time_check("visible-readmitted-current",now["logged"],visible=True)
         shot("readmitted")
         click("Verrouiller","قفل")
         expect(text("Coffre verrouillé","المخزن مقفل")).to_be_visible(timeout=20000)
@@ -3181,7 +3221,8 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
                 "viewport":[width,height],"timezone":timezone_id,"seedCount":53,"pageCounts":[10,10,10,10,10,3],
                 "halfOpenDst":True,"exclusiveEndRefused":True,"historicalExact":True,
                 "currentExact":True,"editInstantPreserved":True,"stalePageRefused":True,
-                "restartCount":56,"blockedRequests":0,"pageErrors":0,"frames":frames,"result":"PASS"}
+                "restartCount":56,"blockedRequests":0,"pageErrors":0,"frames":frames,
+                "namedTimezoneChecks":time_checks,"result":"PASS"}
     except Exception as error:
         if stage=="seed-and-port-oracle":
             try:
@@ -3196,7 +3237,7 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
             pass
         return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
                 "stage":stage,"errorType":type(error).__name__,"blockedRequests":len(blocked),
-                "pageErrors":len(errors),"result":"FAIL"}
+                "pageErrors":len(errors),"namedTimezoneChecks":time_checks,"result":"FAIL"}
     finally:
         secret=None
         ctx.close()

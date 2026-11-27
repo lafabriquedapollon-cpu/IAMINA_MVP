@@ -29,6 +29,64 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:sqlite3/wasm.dart';
 
+
+// Named-zone projection for the isolated Web evidence UI. The UTC instant
+// remains the only storage authority. Do not mix DateTime.toLocal() with a
+// separately derived timezone offset: browser engines can disagree.
+@JS('Intl.DateTimeFormat')
+external JSObject _makeEvidenceFormatter(JSString locale, JSObject options);
+
+extension type _EvidenceIntlFormatter(JSObject _) implements JSObject {
+  external _EvidenceIntlOptions resolvedOptions();
+  external JSArray<_EvidenceIntlPart> formatToParts(JSNumber milliseconds);
+}
+extension type _EvidenceIntlOptions(JSObject _) implements JSObject {
+  external JSString get timeZone;
+}
+extension type _EvidenceIntlPart(JSObject _) implements JSObject {
+  external JSString get type;
+  external JSString get value;
+}
+_EvidenceIntlFormatter _evidenceIntl(Map<String,Object?> options) =>
+    _EvidenceIntlFormatter(_makeEvidenceFormatter('en-GB'.toJS,options.jsify() as JSObject));
+
+String _evidenceBrowserZone() => _evidenceIntl({}).resolvedOptions().timeZone.toDart;
+
+String _evidenceNamedLocal(int seconds) {
+  if(!validEvidenceSeconds(seconds)) throw StateError('Invalid evidence instant');
+  final zone=_evidenceBrowserZone();
+  if(zone.isEmpty) throw StateError('Browser timezone unavailable');
+  final formatter=_evidenceIntl({
+    'timeZone':zone, 'calendar':'gregory', 'numberingSystem':'latn',
+    'year':'numeric','month':'2-digit','day':'2-digit',
+    'hour':'2-digit','minute':'2-digit','second':'2-digit','hourCycle':'h23',
+  });
+  final parts=<String,String>{
+    for(final part in formatter.formatToParts((seconds*1000).toJS).toDart)
+      if(part.type.toDart!='literal') part.type.toDart:part.value.toDart,
+  };
+  int field(String name)=>int.parse(parts[name]!);
+  final year=field('year'),month=field('month'),day=field('day');
+  final hour=field('hour'),minute=field('minute'),second=field('second');
+  final civil=DateTime.utc(year,month,day,hour,minute,second);
+  if(civil.year!=year||civil.month!=month||civil.day!=day||
+     civil.hour!=hour||civil.minute!=minute||civil.second!=second) {
+    throw StateError('Invalid named-zone civil time');
+  }
+  final delta=civil.millisecondsSinceEpoch~/1000-seconds;
+  if(delta%60!=0||delta.abs()>14*3600) throw StateError('Unsupported timezone offset');
+  final offset=delta~/60,abs=offset.abs();
+  String two(int n)=>n.toString().padLeft(2,'0');
+  final value=year.toString().padLeft(4,'0')+'-'+two(month)+'-'+two(day)+
+    'T'+two(hour)+':'+two(minute)+':'+two(second)+
+    (offset<0?'-':'+')+two(abs~/60)+':'+two(abs%60);
+  if(parseEvidenceTimestamp(value)!=seconds) throw StateError('Timezone projection changed instant');
+  return value;
+}
+
+@JS('d1EvidenceTimeProbe')
+external set _evidenceTimeProbeFn(JSFunction function);
+
 @JS('d1MountH1Trend')
 external set _mountH1TrendFn(JSFunction function);
 
@@ -943,6 +1001,14 @@ class _H1TrendFixtureState extends State<_H1TrendFixture> {
 }
 
 void main() {
+  // Synthetic-only diagnostic; no clinical data, no write authority.
+  _evidenceTimeProbeFn = ((JSNumber value) {
+    final seconds=value.toDartInt;
+    return jsonEncode({'zone':_evidenceBrowserZone(),
+      'dartLocal':formatEvidenceTimestamp(seconds),
+      'namedLocal':_evidenceNamedLocal(seconds),
+      'utc':formatEvidenceTimestamp(seconds,local:false)}).toJS;
+  }).toJS;
   WidgetsFlutterBinding.ensureInitialized();
   _boundLoginFn = ((JSNumber owner) =>
       _boundLogin(owner.toDartInt).then((_) => true.toJS).toJS).toJS;
@@ -1042,7 +1108,8 @@ void main() {
       supportedLocales: const [Locale('fr'), Locale('ar')],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
       home: EvidenceUiCandidate(call: call, revoke: revoke, isCurrent: isCurrent,
-        lock: () { lock.callAsFunction(); }, arabic: arabic.toDart),
+        lock: () { lock.callAsFunction(); }, arabic: arabic.toDart,
+        timestampProjection:_evidenceNamedLocal),
     ));
   }).toJS;
   runApp(const MaterialApp(home: Scaffold(

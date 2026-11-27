@@ -114,7 +114,10 @@ final class EvidenceUiResult {
 
 class EvidenceUiCandidate extends StatefulWidget {
   const EvidenceUiCandidate({super.key, required this.call,
-    required this.revoke, required this.lock, required this.arabic, required this.isCurrent});
+    required this.revoke, required this.lock, required this.arabic, required this.isCurrent,
+    this.timestampProjection});
+  // Presentation only. This callback cannot change the stored UTC instant.
+  final String Function(int)? timestampProjection;
   final EvidenceUiCall call;
   final bool Function(EvidenceUiBinding) isCurrent;
   final ValueNotifier<int> revoke;
@@ -139,6 +142,16 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
   bool _busy = false, _error = false;
   List<Map<String, dynamic>> _rows = [];
   String tr(String fr, String ar) => widget.arabic ? ar : fr;
+
+  String _time(int seconds) {
+    final projection=widget.timestampProjection;
+    if(projection==null) return formatEvidenceTimestamp(seconds);
+    try {
+      final displayed=projection(seconds);
+      if(parseEvidenceTimestamp(displayed)==seconds) return displayed;
+    } catch (_) { /* explicitly offset UTC fallback */ }
+    return formatEvidenceTimestamp(seconds,local:false);
+  }
 
   @override
   void initState() {
@@ -326,12 +339,12 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                     key: const Key('evidence-save'), onPressed: _busy ? null : _save,
                     child: Text(tr('Enregistrer', 'حفظ')))),
                   if (_editingSeconds != null)
-                    Text(formatEvidenceTimestamp(_editingSeconds!), textDirection: TextDirection.ltr)
+                    Text(_time(_editingSeconds!), textDirection: TextDirection.ltr)
                   else ...[
                     TextButton(key: const Key('evidence-time-toggle'), onPressed: _busy ? null : () {
                       setState(() {
                         _customTime=!_customTime;
-                        _timestamp.text=_customTime ? formatEvidenceTimestamp(DateTime.now().millisecondsSinceEpoch~/1000) : '';
+                        _timestamp.text=_customTime ? _time(DateTime.now().millisecondsSinceEpoch~/1000) : '';
                       });
                     }, child: Text(_customTime ? tr('Utiliser l’heure actuelle','استعمال الوقت الحالي') :
                       tr('Mesure antérieure (date et heure)','قياس سابق (التاريخ والوقت)'))),
@@ -371,7 +384,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                     style: Theme.of(context).textTheme.titleMedium),
                   Text('${row['displayMgDl']} mg/dL · ${row['displayMmolL']} mmol/L',
                     textDirection: TextDirection.ltr),
-                  Text(formatEvidenceTimestamp(row['loggedAtSeconds'] as int),
+                  Text(_time(row['loggedAtSeconds'] as int),
                     textDirection: TextDirection.ltr, style:Theme.of(context).textTheme.bodySmall),
                   Wrap(children: [
                     TextButton(onPressed: _busy ? null : () {
