@@ -67,8 +67,9 @@ final class D1WebPrfAcquirer implements D1PrfAcquirer {
       final token = await work.timeout(const Duration(seconds: 25),
         onTimeout: () {
           expired = true;
-          unawaited(work.then<void>((late) { _revoke(late); },
-              onError: (Object _, StackTrace __) {}));
+          unawaited(work.then<void>((lateToken) {
+            try { _revoke(lateToken); } catch (_) { /* already locally expired */ }
+          }, onError: (Object _, StackTrace __) {}));
           throw const AppLockException('vault_prf_possession_refused');
         });
       possession = _WebPossession(token);
