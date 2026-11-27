@@ -419,7 +419,13 @@ def flutter_runtime_checks(ctx,origin,fixture):
         return call(p,"login",str(owner))=="PASS" and call(p,"admit")=="PASS"
     def read(p):
         return json.loads(call(p,"read"))
+    def fence(p):
+        return p.evaluate("""async()=>{
+          const {createAdmissionStore}=await import('/d1_admission_store.mjs');
+          return createAdmissionStore('iamina-d1-admission-prf-vault-candidate-v1').readFence();
+        }""")
     checks["flutterA"]=record(a,900001) and read(a)=={"value":7.83,"unit":"mmol/L","provenance":"userEntered"}
+    old_fence=fence(a)
     # Hold an actual decrypt promise open in tab A; tab B replaces its fence.
     a.evaluate("""()=>{
       const original=crypto.subtle.decrypt.bind(crypto.subtle);
@@ -429,14 +435,19 @@ def flutter_runtime_checks(ctx,origin,fixture):
         await new Promise(resolve=>{window.prfDecryptRelease=resolve;window.prfDecryptEntered=true;});
         return value;
       }});
-      window.prfRead=d1PrfRuntimeRun('read','');
+      window.prfReadSettled=false;
+      window.prfRead=d1PrfRuntimeRun('read','').then(v=>{window.prfReadSettled=true;return v;});
     }""")
     a.wait_for_function("window.prfDecryptEntered===true")
     checks["flutterB"]=record(b,900002) and read(b)=={"value":142,"unit":"mg/dL","provenance":"userEntered"}
+    new_fence=fence(b)
+    checks["crossTabFenceReplaced"]=old_fence["acquisitionId"]!=new_fence["acquisitionId"] and new_fence["owner"]==900002 and new_fence["active"]
+    still_pending=a.evaluate("()=>!window.prfReadSettled")
     a.evaluate("()=>{delete crypto.subtle.decrypt;window.prfDecryptRelease();}")
-    checks["crossTabLateRead"]=a.evaluate("()=>window.prfRead")=="REFUSED"
+    checks["crossTabLateRead"]=still_pending and a.evaluate("()=>window.prfRead")=="REFUSED"
     checks["staleRetirePreservesB"]=call(a,"retire")=="PASS" and read(b)["value"]==142
     checks["lockRevokesB"]=call(b,"lock")=="PASS" and call(b,"read")=="REFUSED" and call(b,"retire")=="PASS"
+    checks["lockDurableFence"]=fence(b)["acquisitionId"]==new_fence["acquisitionId"] and not fence(b)["active"]
     checks["flutterReopenA"]=record(a,900001) and read(a)["value"]==7.83
     # Hang WebCrypto after decrypt, without ever returning its result before
     # deadline. The operation must refuse and retire independently.
@@ -448,19 +459,70 @@ def flutter_runtime_checks(ctx,origin,fixture):
         await new Promise(resolve=>{window.prfDecryptRelease=resolve;window.prfDecryptEntered=true;});
         return value;
       }});
-      window.prfRead=d1PrfRuntimeRun('read','');
+      window.prfReadSettled=false;
+      window.prfRead=d1PrfRuntimeRun('read','').then(v=>{window.prfReadSettled=true;return v;});
     }""")
     a.wait_for_function("window.prfDecryptEntered===true")
+    timeout_fence=fence(a)
     checks["boundedRead"]=a.evaluate("()=>window.prfRead")=="REFUSED"
-    checks["timeoutRetired"]=call(a,"retire")=="PASS" and json.loads(call(a,"status"))["active"] is False
+    retired=fence(a)
+    checks["timeoutRetired"]=retired["acquisitionId"]==timeout_fence["acquisitionId"] and not retired["active"] and json.loads(call(a,"status"))["active"] is False
+    checks["timeoutRetireRetry"]=call(a,"retire")=="PASS"
     a.evaluate("()=>{delete crypto.subtle.decrypt;window.prfDecryptRelease();}")
+    # Stall the unwrap during admission itself. No lease/fence may be
+    # published by a late return, and the next admission must still work.
+    a.evaluate("""()=>{
+      const original=crypto.subtle.unwrapKey.bind(crypto.subtle);
+      window.prfUnwrapEntered=false;
+      Object.defineProperty(crypto.subtle,'unwrapKey',{configurable:true,value:async(...args)=>{
+        const value=await original(...args);
+        await new Promise(resolve=>{window.prfUnwrapRelease=resolve;window.prfUnwrapEntered=true;});
+        return value;
+      }});
+      window.prfAdmission=d1PrfRuntimeRun('admit','');
+    }""")
+    a.wait_for_function("window.prfUnwrapEntered===true")
+    checks["boundedAdmission"]=a.evaluate("()=>window.prfAdmission")=="REFUSED"
+    checks["timeoutNoNewFence"]=fence(a)==retired
+    a.evaluate("()=>{delete crypto.subtle.unwrapKey;window.prfUnwrapRelease();}")
     checks["successorAfterTimeout"]=record(b,900002) and read(b)["value"]==142
     checks["identitySwitchRetires"]=call(b,"login","900001")=="PASS" and call(b,"read")=="REFUSED"
     checks["sameTabSwitchA"]=call(b,"admit")=="PASS" and read(b)["value"]==7.83
     checks["noLegacyCalls"]=all(json.loads(call(p,"status"))["legacyCalls"]==0 for p in pages)
     checks["finalRetirement"]=call(b,"retire")=="PASS"
+    # Issue two real PRF tokens in different documents, then overlap their
+    # lease acquisition by holding both unwrap operations at a barrier.
+    for p,owner,n in ((a,900001,901),(b,900002,902)):
+        p.evaluate("""async([c,owner,n])=>{
+          const id=n.toString(16).padStart(64,'0');
+          window.raceIdentity=JSON.stringify({owner,epoch:9,generation:9,acquisitionId:id});
+          window.raceToken=await iaminaD1PrfBridge.acquire(JSON.stringify(c),owner,()=>true,id);
+          const original=crypto.subtle.unwrapKey.bind(crypto.subtle);
+          window.raceEntered=false;
+          Object.defineProperty(crypto.subtle,'unwrapKey',{configurable:true,value:async(...args)=>{
+            const value=await original(...args);
+            await new Promise(resolve=>{window.raceRelease=resolve;window.raceEntered=true;});
+            return value;
+          }});
+          window.racePending=true;window.raceActive=false;
+          window.raceLeaseWork=iaminaD1PrfBridge.openLease(window.raceToken,window.raceIdentity,
+            ()=>window.racePending,()=>window.raceActive).then(v=>{window.raceLease=v;return true;},()=>false);
+        }""",[fixture["credential"],owner,n])
+    for p in pages: p.wait_for_function("window.raceEntered===true")
+    for p in pages: p.evaluate("()=>{delete crypto.subtle.unwrapKey;window.raceRelease();}")
+    outcomes=[p.evaluate("()=>window.raceLeaseWork") for p in pages]
+    checks["overlappingLeaseAcquisitions"]=all(outcomes)
+    for p in pages: p.evaluate("()=>{window.racePending=false;window.raceActive=true;}")
+    winners=[p.evaluate("()=>iaminaD1PrfBridge.verifyLease(window.raceLease)") for p in pages]
+    checks["oneCurrentFence"]=sorted(winners)==[False,True]
+    if checks["oneCurrentFence"]:
+        winner=pages[winners.index(True)];loser=pages[winners.index(False)]
+        loser.evaluate("()=>iaminaD1PrfBridge.retireLease(window.raceLease)")
+        checks["raceLoserRetireSafe"]=winner.evaluate("()=>iaminaD1PrfBridge.verifyLease(window.raceLease)")
+        winner.evaluate("()=>iaminaD1PrfBridge.retireLease(window.raceLease)")
+    else: checks["raceLoserRetireSafe"]=False
     for p in pages: p.close()
-    assert len(checks)==13 and all(checks.values()),checks
+    assert len(checks)==21 and all(checks.values()),checks
     return checks
 
 def setup(ctx,origin):
