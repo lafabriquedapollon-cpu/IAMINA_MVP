@@ -2384,12 +2384,38 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height, f
         # Require exactly one focused editor before sending real keyboard events.
         native=page.locator("input:focus, textarea:focus")
         expect(native).to_have_count(1,timeout=10000)
-        stage=prefix+"-replace"
-        native.press("ControlOrMeta+a",timeout=10000)
-        native.press("Backspace",timeout=10000)
-        stage=prefix+"-empty"
+        # R11: replace platform-dependent select-all shortcuts with explicit
+        # native selection. No value assignment, force, retry or event dispatch.
+        stage=prefix+"-select"
+        native.select_text(timeout=10000)
         expect(native).to_have_count(1,timeout=10000)
-        expect(native).to_have_value("",timeout=10000)
+        selection=native.evaluate("""el=>({
+            length:el.value.length,start:el.selectionStart,end:el.selectionEnd
+        })""")
+        print("D1_D5_SELECTION_DIAG "+json.dumps({
+            "engine":ENGINE,"locale":locale,"width":width,"stage":stage,
+            "selection":selection,
+        }),flush=True)
+        assert selection["start"]==0 and selection["end"]==selection["length"],selection
+        stage=prefix+"-replace"
+        # Use the focused browser editor and a real keyboard deletion.
+        page.keyboard.press("Delete")
+        stage=prefix+"-empty"
+        try:
+            expect(native).to_have_count(1,timeout=10000)
+            expect(native).to_have_value("",timeout=10000)
+        finally:
+            # Bounded synthetic diagnostics, including on a failed clear.
+            try:
+                observed=native.evaluate("""el=>({
+                    length:el.value.length,start:el.selectionStart,end:el.selectionEnd
+                })""",timeout=1000) if native.count()==1 else None
+                print("D1_D5_CLEAR_DIAG "+json.dumps({
+                    "engine":ENGINE,"locale":locale,"width":width,"stage":stage,
+                    "focusedCount":native.count(),"selection":observed,
+                }),flush=True)
+            except Exception:
+                pass
         native.press_sequentially(value,delay=60,timeout=10000)
         stage=prefix+"-value"
         try:
