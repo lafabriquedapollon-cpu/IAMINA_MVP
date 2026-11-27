@@ -38,7 +38,7 @@ const validEvidence=e=>sameKeys(e,['uuid','originalValue','unit','provenance'])&
 export function createPrfVault({lookup,fixtureProvision=false}) {
   const store=createAdmissionStore(DB);
   const leases=new WeakMap();
-  const getEntry=token=>{const e=lookup(token);require(e&&owners.has(e.owner));return e;};
+  const getEntry=token=>{const e=lookup(token);require(e&&e.key&&owners.has(e.owner));return e;};
   const local=(l,sessionOnly=false)=>{
     require(!l.retired&&lookup(l.possession)===l.entry);
     require(sessionOnly?l.session()===true:(l.pending()===true||l.session()===true));

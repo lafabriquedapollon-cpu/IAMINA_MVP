@@ -8,7 +8,7 @@ import {createPrfVault} from './d1_prf_vault_candidate.mjs';
 export function createPrfBridge({fixtureProvision=false}={}) {
   const keys = new WeakMap();
   const require = value => {if(!value) throw new Error('D1_PRF_POSSESSION_REFUSED');};
-  const isLive = token => !!token && typeof token === 'object' && keys.has(token);
+  const isLive = token => !!token && typeof token === 'object' && !!keys.get(token)?.key;
   const revoke = token => {
     const entry=keys.get(token);
     if(!entry)return;

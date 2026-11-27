@@ -294,6 +294,93 @@ SIGNED_PRF="""async()=>{
     }
 }"""
 
+VAULT_RESTART="""async(fixture)=>{
+    const {credential,signer}=fixture;
+    let counter=fixture.counter;
+    const enc=new TextEncoder();
+    const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes)))
+      .replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/g,'');
+    const id=Uint8Array.of(13,14,15,16);
+    const sha=async b=>new Uint8Array(await crypto.subtle.digest('SHA-256',b));
+    const key=await crypto.subtle.importKey('jwk',signer,{name:'ECDSA',namedCurve:'P-256'},false,['sign']);
+    const der=raw=>{
+        const integer=bytes=>{
+            const x=Array.from(bytes);
+            while(x.length>1&&x[0]===0)x.shift();
+            if(x[0]&128)x.unshift(0);
+            return [2,x.length,...x];
+        };
+        const r=integer(raw.slice(0,32)),s=integer(raw.slice(32));
+        return Uint8Array.of(48,r.length+s.length,...r,...s);
+    };
+    class FixtureCredential{
+        constructor(rawId,response,prf){Object.assign(this,{rawId,response,prf});}
+        getClientExtensionResults(){return {prf:this.prf};}
+    }
+    Object.defineProperty(window,'PublicKeyCredential',{value:FixtureCredential,configurable:true});
+    Object.defineProperty(navigator,'credentials',{configurable:true,value:{get:async({publicKey:p})=>{
+        if(p.userVerification!=='required'||b64(p.allowCredentials[0].id)!==credential.credentialId)
+          throw new Error('fixture contract');
+        const client=enc.encode(JSON.stringify({type:'webauthn.get',origin:location.origin,
+          challenge:b64(p.challenge),crossOrigin:false}));
+        const auth=new Uint8Array(37);auth.set(await sha(enc.encode(location.hostname)));
+        auth[32]=5;new DataView(auth.buffer).setUint32(33,counter);
+        const signed=new Uint8Array(69);signed.set(auth);signed.set(await sha(client),37);
+        const signature=der(new Uint8Array(await crypto.subtle.sign(
+          {name:'ECDSA',hash:'SHA-256'},key,signed)));
+        return new FixtureCredential(id,{clientDataJSON:client,authenticatorData:auth,signature},
+          {enabled:true,results:{first:new Uint8Array(32).fill(37).buffer}});
+    }}});
+    const {createPrfBridge}=await import('/d1_prf_guard_bridge_candidate.mjs');
+    const bridge=createPrfBridge();
+    const checks={};
+    const uuid='ac123456-1234-4abc-8def-000000000001';
+    const idFor=n=>n.toString(16).padStart(64,'0');
+    const identity=(owner,n)=>JSON.stringify({owner,epoch:2,generation:3,acquisitionId:idFor(n)});
+    const acquire=async(owner,n)=>{counter++;return bridge.acquire(JSON.stringify(credential),owner,()=>true,idFor(n));};
+    const refused=async fn=>{try{await fn();return false;}catch(e){return e.message==='D1_PRF_VAULT_REFUSED';}};
+    const readWrite=async(owner,change)=>new Promise((resolve,reject)=>{
+        const r=indexedDB.open('iamina-d1-admission-prf-vault-candidate-v1',1);
+        r.onerror=()=>reject(r.error);
+        r.onsuccess=()=>{const db=r.result,tx=db.transaction('state',change?'readwrite':'readonly');
+          const st=tx.objectStore('state'),q=st.get(owner);
+          let result;
+          q.onsuccess=()=>{result=q.result;if(change)st.put(change(result),owner);};
+          tx.oncomplete=()=>{db.close();resolve(result);};
+          tx.onabort=()=>{db.close();reject(tx.error);};};
+    });
+    const before=await readWrite('fence');
+    checks.restartRetiredFence=before.active===false;
+    let waiting=true,active=false;
+    const p=()=>waiting,s=()=>active;
+    const token=await acquire(900001,80),lease=await bridge.openLease(token,identity(900001,80),p,s);
+    waiting=false;active=true;
+    const row=JSON.parse(await bridge.readEvidence(lease,uuid));
+    checks.restartA=row.originalValue===7.83&&row.unit==='mmol/L';
+    await bridge.retireLease(lease);
+    waiting=true;active=false;
+    const tokenB=await acquire(900002,81),leaseB=await bridge.openLease(tokenB,identity(900002,81),p,s);
+    waiting=false;active=true;
+    checks.restartB=JSON.parse(await bridge.readEvidence(leaseB,uuid)).originalValue===142;
+    await bridge.retireLease(leaseB);
+    // The pending callback becomes false exactly after the durable ACK.
+    const late=await acquire(900001,82);
+    let calls=0;
+    checks.lateAckRefused=await refused(()=>bridge.openLease(late,identity(900001,82),()=>++calls<7,()=>false));
+    const lateFence=await readWrite('fence');
+    checks.lateAckRetired=calls===7&&lateFence.acquisitionId===idFor(82)&&lateFence.active===false;
+    // Tamper a single ciphertext byte, then restore the synthetic original.
+    const original=await readWrite('owner:900001',r=>({...r,cipher:r.cipher.map((b,i)=>i===0?b^1:b)}));
+    const tampered=await acquire(900001,83);
+    checks.tamperRefused=await refused(()=>bridge.openLease(tampered,identity(900001,83),()=>true,()=>false));
+    await readWrite('owner:900001',()=>original);
+    const restored=await acquire(900001,84),restoredLease=await bridge.openLease(restored,identity(900001,84),()=>true,()=>false);
+    checks.restoredAfterTamper=await bridge.verifyLease(restoredLease);
+    await bridge.retireLease(restoredLease);
+    if(!Object.values(checks).every(x=>x===true))throw new Error('restart '+JSON.stringify(checks));
+    return checks;
+}"""
+
 def setup(ctx,origin):
     page=ctx.new_page()
     assert page.goto(origin).status==200
@@ -390,6 +477,14 @@ def run():
                     dart=a.evaluate("window.dartBridgeChecks")
                     assert len(dart)==4 and all(v is True for v in dart.values())
                     print("D1_PRF_DART_INTEROP_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(dart),count=len(dart))),flush=True)
+                restart_fixture=a.evaluate("window.vaultRestartFixture")
+            finally: ctx.close()
+            ctx=launch()
+            try:
+                a=setup(ctx,origin)
+                restart=a.evaluate(VAULT_RESTART,restart_fixture)
+                assert len(restart)==7 and all(v is True for v in restart.values())
+                print("D1_PRF_VAULT_RESTART_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(restart),count=len(restart))),flush=True)
                 check("zero_external_requests",not blocked)
             finally: ctx.close()
         print("D1_PRF_COUNTER_PASS "+json.dumps(dict(source=sha,engine=name,checks=checks,count=len(checks))),flush=True)
