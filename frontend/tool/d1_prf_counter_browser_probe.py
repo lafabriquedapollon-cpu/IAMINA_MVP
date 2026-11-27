@@ -333,7 +333,7 @@ SIGNED_PRF="""async()=>{
 
 VAULT_RESTART="""async(fixture)=>{
     const {credential,signer}=fixture;
-    let counter=fixture.counter;
+    let counter=fixture.counter,prfMode='original';
     const enc=new TextEncoder();
     const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes)))
       .replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/g,'');
@@ -369,8 +369,9 @@ VAULT_RESTART="""async(fixture)=>{
         const signed=new Uint8Array(69);signed.set(auth);signed.set(await sha(client),37);
         const signature=der(new Uint8Array(await crypto.subtle.sign(
           {name:'ECDSA',hash:'SHA-256'},key,signed)));
+        if(prfMode==='lost')throw new DOMException('synthetic authenticator unavailable','NotAllowedError');
         return new FixtureCredential(id,{clientDataJSON:client,authenticatorData:auth,signature},
-          {enabled:true,results:{first:new Uint8Array(32).fill(37).buffer}});
+          prfMode==='absent'?{enabled:false}:{enabled:true,results:{first:new Uint8Array(32).fill(prfMode==='changed'?38:37).buffer}});
     }}});
     const {createPrfBridge,installPrfBridge}=await import('/d1_prf_guard_bridge_candidate.mjs');
     if(fixture.onlyInstall){
@@ -390,7 +391,7 @@ VAULT_RESTART="""async(fixture)=>{
         r.onsuccess=()=>{const db=r.result,tx=db.transaction('state',change?'readwrite':'readonly');
           const st=tx.objectStore('state'),q=st.get(owner);
           let result;
-          q.onsuccess=()=>{result=q.result;if(change)st.put(change(result),owner);};
+          q.onsuccess=()=>{result=q.result;if(change){const next=change(result);if(next===undefined)st.delete(owner);else st.put(next,owner);}};
           tx.oncomplete=()=>{db.close();resolve(result);};
           tx.onabort=()=>{db.close();reject(tx.error);};};
     });
@@ -423,7 +424,83 @@ VAULT_RESTART="""async(fixture)=>{
     checks.restoredAfterTamper=await bridge.verifyLease(restoredLease);
     await bridge.retireLease(restoredLease);
     if(!Object.values(checks).every(x=>x===true))throw new Error('restart '+JSON.stringify(checks));
-    return checks;
+    const recovery={};
+    const {createFixtureFreshAuthority}=await import('/d1_prf_lifecycle_candidate.mjs');
+    const fresh=createFixtureFreshAuthority(),provisioner=createPrfBridge({fixtureAuthority:fresh.consume});
+    const mark=await readWrite('lifecycle:900001');
+    const encrypted=await readWrite('owner:900001');
+    const frozenFence=await readWrite('fence');
+    const snapshot=async()=>JSON.stringify([await readWrite('lifecycle:900001'),
+      await readWrite('owner:900001'),await readWrite('fence')]);
+    const intact=await snapshot();
+    const denied=async fn=>{try{await fn();return false;}catch(e){return e.message==='D1_PRF_POSSESSION_REFUSED';}};
+    prfMode='lost';
+    recovery.lostAuthenticator=await denied(()=>acquire(900001,100));
+    prfMode='absent';
+    recovery.absentPrf=await denied(()=>acquire(900001,101));
+    prfMode='changed';
+    const changed=await acquire(900001,102);
+    recovery.changedPrf=await refused(()=>bridge.openLease(changed,identity(900001,102),()=>true,()=>false));
+    bridge.revoke(changed);
+    prfMode='original';
+    recovery.failuresPreserveCipher=await snapshot()===intact;
+    // Existing owner with missing metadata must not become a fresh owner.
+    await readWrite('lifecycle:900001',()=>undefined);
+    const noMarker=await acquire(900001,103);
+    recovery.missingMarkerRefuses=await refused(()=>bridge.openLease(noMarker,identity(900001,103),()=>true,()=>false));
+    counter++;
+    const noMarkerFresh=await provisioner.acquire(JSON.stringify(credential),900001,()=>true);
+    recovery.noResetWithoutMarker=await refused(()=>provisioner.provisionFixture(noMarkerFresh,()=>true,fresh.issue(900001,credential)));
+    provisioner.revoke(noMarkerFresh);
+    recovery.missingMarkerCipherPreserved=JSON.stringify(await readWrite('owner:900001'))===JSON.stringify(encrypted);
+    await readWrite('lifecycle:900001',()=>mark);
+    // Existing marker without ciphertext is loss, never fresh provisioning.
+    await readWrite('owner:900001',()=>undefined);
+    const noCipher=await acquire(900001,104);
+    recovery.missingCipherRefuses=await refused(()=>bridge.openLease(noCipher,identity(900001,104),()=>true,()=>false));
+    counter++;
+    const noCipherFresh=await provisioner.acquire(JSON.stringify(credential),900001,()=>true);
+    recovery.noResetWithoutCipher=await refused(()=>provisioner.provisionFixture(noCipherFresh,()=>true,fresh.issue(900001,credential)));
+    provisioner.revoke(noCipherFresh);
+    recovery.markerPreserved=JSON.stringify(await readWrite('lifecycle:900001'))===JSON.stringify(mark);
+    await readWrite('owner:900001',()=>encrypted);
+    // Reject metadata copied from another owner and replaced credential.
+    const markB=await readWrite('lifecycle:900002');
+    await readWrite('lifecycle:900001',()=>markB);
+    const wrongOwner=await acquire(900001,105);
+    recovery.foreignMarkerRefuses=await refused(()=>bridge.openLease(wrongOwner,identity(900001,105),()=>true,()=>false));
+    await readWrite('lifecycle:900001',()=>({...mark,binding:JSON.stringify(['AQIDBA',credential.publicKeySpki,credential.rpId,credential.origin])}));
+    const wrongCredential=await acquire(900001,106);
+    recovery.replacedCredentialRefuses=await refused(()=>bridge.openLease(wrongCredential,identity(900001,106),()=>true,()=>false));
+    await readWrite('lifecycle:900001',()=>null);
+    const malformed=await acquire(900001,107);
+    recovery.nullMarkerRefuses=await refused(()=>bridge.openLease(malformed,identity(900001,107),()=>true,()=>false));
+    await readWrite('lifecycle:900001',()=>mark);
+    recovery.fenceAndCipherUnchanged=await snapshot()===intact;
+    // Exact original credential and PRF restore the read path without a
+    // destructive reset. This is reopening, not recovery of a lost key.
+    const originalToken=await acquire(900001,108);
+    let reopening=true,opened=false;
+    const originalLease=await bridge.openLease(originalToken,identity(900001,108),()=>reopening,()=>opened);
+    reopening=false;opened=true;
+    recovery.originalCredentialReopens=JSON.parse(await bridge.readEvidence(originalLease,uuid)).originalValue===7.83;
+    await bridge.retireLease(originalLease);
+    recovery.originalCipherPreserved=JSON.stringify(await readWrite('owner:900001'))===JSON.stringify(encrypted);
+    // Missing both local keys still cannot be re-created when a prior
+    // durable fence exists. Whole-profile loss needs independent inventory.
+    await readWrite('owner:900001',()=>undefined);
+    await readWrite('lifecycle:900001',()=>undefined);
+    counter++;
+    const both=await provisioner.acquire(JSON.stringify(credential),900001,()=>true);
+    recovery.priorFenceBlocksReset=await refused(()=>provisioner.provisionFixture(both,()=>true,fresh.issue(900001,credential)));
+    provisioner.revoke(both);
+    await readWrite('owner:900001',()=>encrypted);
+    await readWrite('lifecycle:900001',()=>mark);
+    recovery.restoredExact=JSON.stringify(await readWrite('owner:900001'))===JSON.stringify(encrypted)&&
+      JSON.stringify(await readWrite('lifecycle:900001'))===JSON.stringify(mark);
+    if(!Object.values(recovery).every(x=>x===true))throw new Error('recovery '+JSON.stringify(recovery));
+    return {restart:checks,recovery};
+
 }"""
 
 # Same compiled Flutter runtime artifact as existing D1 browser probes;
@@ -680,9 +757,13 @@ def run():
             ctx=launch()
             try:
                 a=setup(ctx,origin)
-                restart=a.evaluate(VAULT_RESTART,restart_fixture)
+                result=a.evaluate(VAULT_RESTART,restart_fixture)
+                restart=result["restart"]
                 assert len(restart)==7 and all(v is True for v in restart.values())
                 print("D1_PRF_VAULT_RESTART_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(restart),count=len(restart))),flush=True)
+                recovery=result["recovery"]
+                assert len(recovery)==18 and all(v is True for v in recovery.values()),recovery
+                print("D1_PRF_RECOVERY_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(recovery),count=len(recovery))),flush=True)
                 if INTEROP:
                     runtime=flutter_runtime_checks(ctx,origin,restart_fixture)
                     print("D1_PRF_FLUTTER_RUNTIME_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(runtime),count=len(runtime))),flush=True)
