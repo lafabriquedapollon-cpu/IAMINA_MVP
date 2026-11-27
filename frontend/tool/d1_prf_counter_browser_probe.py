@@ -233,7 +233,7 @@ SIGNED_PRF="""async()=>{
         const lA=await vault.openLease(a,identity(900001,2),phase,session);
         vaultChecks.opaqueLease=Object.isFrozen(lA)&&Object.keys(lA).length===0&&!await vault.verifyLease({});
         vaultChecks.pendingVerify=await vault.verifyLease(lA);
-        vaultChecks.oneShot=await no(()=>vault.openLease(a,identity(900001,3),phase,session));
+        vaultChecks.oneShot=await no(()=>vault.openLease(a,identity(900001,2),phase,session));
         // Pending read retires the lease: admission is not a read authority.
         vaultChecks.pendingReadRefused=await no(()=>vault.readEvidence(lA,evidenceId));
         vault.revoke(a);
