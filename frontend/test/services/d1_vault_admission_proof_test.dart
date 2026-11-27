@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:amina/core/domain/glucose_quantity_evidence.dart';
+import 'package:amina/services/d1_runtime_admission.dart';
 import 'package:amina/services/app_lock_authenticator.dart';
 import 'package:amina/services/app_lock_service.dart';
 import 'package:amina/services/d1_admission_guard_adapter.dart';
@@ -101,6 +103,51 @@ class _Fixture {
         storage: lockStorage, admissionElapsedForTesting: () => elapsed);
     await lock.initialize();
     addTearDown(() { lock.dispose(); auth.dispose(); });
+  }
+}
+
+
+const _runtimeUuid = 'ac123456-1234-4abc-8def-000000000001';
+final class _RuntimeLease implements D1DurableRuntimeLease {
+  @override
+  final D1RuntimeIdentity identity;
+  _RuntimeLease(this.identity);
+  bool current = true;
+  int retireCalls = 0;
+  int reads = 0;
+  bool failRetirement = false;
+  final readEntered = Completer<void>();
+  Completer<GlucoseQuantityEvidence?>? delayedRead;
+  @override
+  Future<bool> verifyCurrent() async => current;
+  @override
+  Future<GlucoseQuantityEvidence?> readEvidence(String uuid) async {
+    reads++;
+    if (!readEntered.isCompleted) readEntered.complete();
+    return delayedRead == null
+      ? GlucoseQuantityEvidence.userEntry(originalValue: 7.83,
+          declaredUnit: GlucoseSourceUnit.mmolL)
+      : await delayedRead!.future;
+  }
+  @override
+  Future<void> retire() async {
+    retireCalls++;
+    if (failRetirement) throw StateError('synthetic retirement failure');
+    current = false;
+  }
+}
+
+final class _RuntimeBackend implements D1DurableRuntimeBackend {
+  int calls = 0;
+  final entered = Completer<D1RuntimeIdentity>();
+  Completer<D1DurableRuntimeLease>? delayed;
+  _RuntimeLease? last;
+  @override
+  Future<D1DurableRuntimeLease> acquire(D1RuntimeIdentity identity) async {
+    calls++;
+    if (!entered.isCompleted) entered.complete(identity);
+    if (delayed != null) return delayed!.future;
+    return last = _RuntimeLease(identity);
   }
 }
 
@@ -396,5 +443,146 @@ void main() {
     pending.complete(const AppLockAssertion(signCount: 6));
     await rejected;
     expect(f.lock.isUnlocked, isFalse);
+  });
+
+  test('CONV-03B1 guest cannot reach durable backend', () async {
+    final f = _Fixture();
+    await f.start(signIn: false);
+    final backend = _RuntimeBackend();
+    await expectLater(D1RuntimeAdmission(f.auth, f.lock, backend).admit(),
+        throwsA(isA<D1RuntimeAdmissionException>()));
+    expect(backend.calls, 0);
+  });
+
+  test('CONV-03B1 fresh identity and assertion expose only guarded evidence', () async {
+    final f = _Fixture();
+    await f.start();
+    final backend = _RuntimeBackend();
+    final session = await D1RuntimeAdmission(f.auth, f.lock, backend).admit();
+    expect(f.authenticator.calls, 1);
+    expect(session.isActive, isTrue);
+    final result = await session.readEvidence(_runtimeUuid);
+    expect(result!.originalRawValue, 7.83);
+    expect(result.originalUnit, GlucoseSourceUnit.mmolL);
+    f.lock.lock();
+    expect(session.isActive, isFalse);
+    await expectLater(session.readEvidence(_runtimeUuid),
+        throwsA(isA<D1RuntimeAdmissionException>()));
+    expect(backend.last!.reads, 1);
+    expect(backend.last!.retireCalls, 1);
+  });
+
+  test('CONV-03B1 late acquisition after lock is retired, never published', () async {
+    final f = _Fixture();
+    await f.start();
+    final backend = _RuntimeBackend()..delayed = Completer<D1DurableRuntimeLease>();
+    final pending = D1RuntimeAdmission(f.auth, f.lock, backend).admit();
+    final refused = expectLater(pending, throwsA(isA<D1RuntimeAdmissionException>()));
+    final identity = await backend.entered.future;
+    f.lock.lock();
+    final lease = _RuntimeLease(identity);
+    backend.delayed!.complete(lease);
+    await refused;
+    expect(lease.retireCalls, 1);
+    expect(lease.reads, 0);
+  });
+
+  test('CONV-03B1 wrong durable identity is refused without touching foreign lease', () async {
+    final f = _Fixture();
+    await f.start();
+    final backend = _RuntimeBackend()..delayed = Completer<D1DurableRuntimeLease>();
+    final pending = D1RuntimeAdmission(f.auth, f.lock, backend).admit();
+    final refused = expectLater(pending, throwsA(isA<D1RuntimeAdmissionException>()));
+    final identity = await backend.entered.future;
+    final foreign = _RuntimeLease((owner: _b, epoch: identity.epoch, generation: identity.generation));
+    backend.delayed!.complete(foreign);
+    await refused;
+    expect(foreign.retireCalls, 0);
+    expect(foreign.reads, 0);
+  });
+
+  test('CONV-03B1 A-B-A late read cannot escape or retire successor', () async {
+    final f = _Fixture();
+    await f.start();
+    final backend = _RuntimeBackend();
+    final admission = D1RuntimeAdmission(f.auth, f.lock, backend);
+    final a = await admission.admit();
+    final old = backend.last!;
+    old.delayedRead = Completer<GlucoseQuantityEvidence?>();
+    final reading = a.readEvidence(_runtimeUuid);
+    final refused = expectLater(reading, throwsA(isA<D1RuntimeAdmissionException>()));
+    await old.readEntered.future.timeout(const Duration(seconds: 5));
+    await f.auth.signInWithEmail('b@example.invalid', 'fixture');
+    expect(a.isActive, isFalse);
+    final b = await admission.admit();
+    await f.auth.signInWithEmail('a@example.invalid', 'fixture');
+    expect(b.isActive, isFalse);
+    final next = await admission.admit();
+    old.delayedRead!.complete(GlucoseQuantityEvidence.userEntry(
+        originalValue: 7.83, declaredUnit: GlucoseSourceUnit.mmolL));
+    await refused;
+    expect(next.isActive, isTrue);
+    expect(backend.last!.retireCalls, 0);
+    expect(old.retireCalls, 1);
+    await next.retire();
+  });
+
+  test('CONV-03B1 durable fence loss prevents read despite local unlock', () async {
+    final f = _Fixture();
+    await f.start();
+    final backend = _RuntimeBackend();
+    final session = await D1RuntimeAdmission(f.auth, f.lock, backend).admit();
+    backend.last!.current = false;
+    await expectLater(session.readEvidence(_runtimeUuid),
+        throwsA(isA<D1RuntimeAdmissionException>()));
+    expect(backend.last!.reads, 0);
+    expect(session.isActive, isFalse);
+  });
+
+  test('CONV-03B1 cached identity cannot reach durable backend', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      _credentialKey: _credential.encode(), _requiredKey: 'required',
+      _tokenKey: _token(_a),
+      _bindingKey: jsonEncode({'token': _token(_a), 'user_id': _a}),
+    });
+    final f = _Fixture();
+    await f.start(signIn: false);
+    final backend = _RuntimeBackend();
+    expect(f.auth.boundNativeAccountId, _a);
+    await expectLater(D1RuntimeAdmission(f.auth, f.lock, backend).admit(),
+        throwsA(isA<D1RuntimeAdmissionException>()));
+    expect(backend.calls, 0);
+    expect(f.authenticator.calls, 0);
+  });
+
+  test('CONV-03B1 expired durable acquisition cannot publish session', () async {
+    final f = _Fixture();
+    await f.start();
+    final backend = _RuntimeBackend()..delayed = Completer<D1DurableRuntimeLease>();
+    final pending = D1RuntimeAdmission(f.auth, f.lock, backend).admit();
+    final refused = expectLater(pending, throwsA(isA<D1RuntimeAdmissionException>()));
+    final identity = await backend.entered.future;
+    f.elapsed = const Duration(seconds: 30);
+    final lease = _RuntimeLease(identity);
+    backend.delayed!.complete(lease);
+    await refused;
+    expect(lease.retireCalls, 1);
+    expect(lease.reads, 0);
+  });
+
+  test('CONV-03B1 failed retirement remains visible and cannot reopen local authority', () async {
+    final f = _Fixture();
+    await f.start();
+    final backend = _RuntimeBackend();
+    final session = await D1RuntimeAdmission(f.auth, f.lock, backend).admit();
+    final lease = backend.last!..failRetirement = true;
+    await expectLater(session.retire(), throwsA(isA<D1RuntimeAdmissionException>()));
+    expect(session.durableRetirementFailed, isTrue);
+    expect(session.isActive, isFalse);
+    lease.failRetirement = false;
+    await session.retire();
+    expect(session.durableRetirementFailed, isFalse);
+    expect(session.isActive, isFalse);
+    expect(lease.retireCalls, 2);
   });
 }
