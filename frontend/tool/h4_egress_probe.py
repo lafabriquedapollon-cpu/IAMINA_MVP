@@ -91,7 +91,7 @@ def exercise_egress(engine):
           return await Promise.race([
             navigator.serviceWorker.register(path).then(()=> 'registered',e=> {
               console.info('H4_SW_REGISTER_ERROR '+e.name);
-              return 'refused';
+              return e.name==='SecurityError'&&e.message==='H4 service worker refused'?'guard-refused':'refused';
             }),
             new Promise(r=>setTimeout(()=>r('pending'),2500))
           ]);
@@ -173,7 +173,9 @@ def exercise_egress(engine):
                                     record={"case":case,"result":"UNAVAILABLE","positive":sw_positive}
                                 else:
                                     status=page.evaluate(sw_js,"/sw.js?negative")
-                                    assert status in ("refused","pending"),status
+                                    assert status=="guard-refused",status
+                                    wait_for(page,lambda:bool(blocked),"SW guard attempt missing")
+                                    assert blocked==["direct_transport:ServiceWorker.register"],blocked
                                     registrations=page.evaluate("""async()=>await Promise.race([
                                       navigator.serviceWorker.getRegistrations().then(r=>r.length),
                                       new Promise(r=>setTimeout(()=>r('pending'),1500))
@@ -181,7 +183,6 @@ def exercise_egress(engine):
                                     assert registrations in (0,"pending"),registrations
                                     assert page.evaluate("()=>navigator.serviceWorker.controller===null")
                                     assert ("GET","/sw.js?negative") not in hits[before:]
-                                    assert not blocked,blocked
                                     record={"case":case,"positive":sw_positive,"negative":status,
                                             "registrations":registrations,"controller":False,"upstreamHits":0}
                             else:
@@ -218,5 +219,5 @@ def exercise_egress(engine):
     return {"policyCases":policy_cases(),"capabilities":capabilities,"cases":records,
             "limits":["document transport guard is not native network isolation",
                       "dedicated worker fetch tested; direct transport constructors in worker realms not covered",
-                      "service worker block is harness-only; PWA service worker lifecycle requires separate qualification",
+                      "document register guard plus context block; context option alone failed in R5; PWA lifecycle not qualified",
                       "no proof of absent DNS, speculative traffic, browser process or extension egress"]}

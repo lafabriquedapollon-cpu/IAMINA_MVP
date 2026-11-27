@@ -1,5 +1,6 @@
 // CONV-02c.2: isolated synthetic qualification UI, never imported by lib/main.dart.
 import 'package:flutter/material.dart';
+import 'package:amina/core/domain/glucose_quantity_evidence.dart';
 import 'package:amina/core/theme/app_theme.dart' show kOfflineFontFallbacks;
 
 typedef EvidenceUiCall = Future<Map<String, dynamic>> Function(
@@ -32,6 +33,48 @@ final class EvidenceUiBinding {
 const evidenceStartSeconds = 1;
 const evidenceEndSeconds = 4102444800;
 const evidencePageSize = 10;
+
+// H5: explicit decimal grammar. No grouping, exponent, signs or mixed scripts.
+double? parseEvidenceQuantity(String input, String? unit) {
+  final source = GlucoseSourceUnit.fromExplicitUcumCode(unit);
+  if (source == null) return null;
+  final text = input.trim();
+  if (text.isEmpty || text.length > 64) return null;
+  final normalized = StringBuffer();
+  int? alphabet;
+  var separator = false;
+  for (final rune in text.runes) {
+    if (rune == 0x2e || rune == 0x2c || rune == 0x066b) {
+      if (separator) return null;
+      separator = true;
+      normalized.write('.');
+      continue;
+    }
+    final int base;
+    if (rune >= 0x30 && rune <= 0x39) {
+      base = 0x30;
+    } else if (rune >= 0x0660 && rune <= 0x0669) {
+      base = 0x0660;
+    } else if (rune >= 0x06f0 && rune <= 0x06f9) {
+      base = 0x06f0;
+    } else {
+      return null;
+    }
+    if (alphabet != null && alphabet != base) return null;
+    alphabet = base;
+    normalized.writeCharCode(0x30 + rune - base);
+  }
+  final decimal = normalized.toString();
+  if (!RegExp(r'^\d+(\.\d+)?$').hasMatch(decimal)) return null;
+  final value = double.tryParse(decimal);
+  if (value == null || !value.isFinite || value <= 0) return null;
+  try {
+    GlucoseConversionContract.toMgDl(value, source);
+  } on ArgumentError {
+    return null;
+  }
+  return value;
+}
 
 bool validEvidenceSeconds(int seconds) =>
     seconds >= evidenceStartSeconds && seconds < evidenceEndSeconds;
@@ -238,8 +281,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
   }
 
   void _save() {
-    final raw = _value.text.trim().replaceAll(',', '.');
-    final value = double.tryParse(raw);
+    final value = parseEvidenceQuantity(_value.text, _unit);
     final now=DateTime.now().millisecondsSinceEpoch~/1000;
     final seconds=_editingSeconds ?? (_customTime ? parseEvidenceTimestamp(_timestamp.text) : now);
     if (_unit == null || value == null || !value.isFinite || value <= 0 ||
@@ -308,7 +350,8 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
               FilledButton(onPressed: _busy ? null : () => _perform('open', {'owner': 900002}),
                 child: Text(tr('Ouvrir profil B', 'فتح الملف B'))),
             ] else ...[
-              Text(_owner == 900001 ? tr('Profil A', 'الملف A') : tr('Profil B', 'الملف B')),
+              Text(_owner == 900001 ? tr('Profil A', 'الملف A') : tr('Profil B', 'الملف B'),
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
               const SizedBox(height: 12),
               Card(semanticContainer: false, child: Padding(padding: const EdgeInsets.all(16), child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -326,18 +369,16 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                       border: const OutlineInputBorder()))),
                   const SizedBox(height: 12),
                   Text(tr('Unité de saisie (obligatoire)', 'وحدة الإدخال (إلزامية)')),
-                  Wrap(spacing: 8, children: [
+                  Wrap(spacing: 12, runSpacing: 8, children: [
                     for (final unit in ['mg/dL','mmol/L'])
                       Semantics(identifier: unit == 'mg/dL' ? 'evidence-mgdl' : 'evidence-mmoll',
                         child: ChoiceChip(key: ValueKey(unit), label: Text(unit), selected: _unit == unit,
+                          materialTapTargetSize: MaterialTapTargetSize.padded,
                           onSelected: _busy ? null : (selected) => setState(() {
                             _unit = selected ? unit : null; _error = false;
                           }))),
                   ]),
                   const SizedBox(height: 12),
-                  Semantics(identifier: 'evidence-save', child: FilledButton(
-                    key: const Key('evidence-save'), onPressed: _busy ? null : _save,
-                    child: Text(tr('Enregistrer', 'حفظ')))),
                   if (_editingSeconds != null)
                     Text(_time(_editingSeconds!), textDirection: TextDirection.ltr)
                   else ...[
@@ -354,8 +395,15 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                       decoration:InputDecoration(labelText:tr('Date et heure avec fuseau','التاريخ والوقت مع التوقيت'),
                         hintText:'2026-11-01T08:00:00+01:00'))),
                   ],
+                  const SizedBox(height: 12),
+                  Semantics(identifier: 'evidence-save', child: FilledButton(
+                    key: const Key('evidence-save'), onPressed: _busy ? null : _save,
+                    style: FilledButton.styleFrom(minimumSize: const Size(0,48)),
+                    child: Text(tr('Enregistrer', 'حفظ')))),
                   if (_error) Semantics(identifier: 'evidence-input-error', liveRegion: true,
-                    child: Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.'))),
+                    child: Padding(padding: const EdgeInsets.only(top: 8),
+                      child: Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.'),
+                        style: TextStyle(color: Theme.of(context).colorScheme.error)))),
                   if (_editing != null) TextButton(onPressed: _busy ? null : () => setState(() {
                     _editing = null; _unit = null; _value.clear();
                     _editingSeconds=null; _customTime=false; _timestamp.clear();
@@ -385,9 +433,10 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                   Text('${row['displayMgDl']} mg/dL · ${row['displayMmolL']} mmol/L',
                     textDirection: TextDirection.ltr),
                   Text(_time(row['loggedAtSeconds'] as int),
-                    textDirection: TextDirection.ltr, style:Theme.of(context).textTheme.bodySmall),
-                  Wrap(children: [
-                    TextButton(onPressed: _busy ? null : () {
+                    textDirection: TextDirection.ltr, style:Theme.of(context).textTheme.bodyMedium),
+                  const SizedBox(height: 8),
+                  Wrap(spacing: 12, runSpacing: 4, children: [
+                    TextButton(style: TextButton.styleFrom(minimumSize: const Size(44,44)), onPressed: _busy ? null : () {
                       setState(() {
                         _confirmDelete = null; _editing = row['uuid'] as String; _unit = row['originalUnit'] as String;
                         _value.text = row['originalValue'].toString();
@@ -396,7 +445,8 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                       });
                       _valueFocus.requestFocus();
                     }, child: Text(tr('Modifier', 'تعديل'))),
-                    TextButton(onPressed: _busy ? null : () => setState(() {
+                    TextButton(style: TextButton.styleFrom(minimumSize: const Size(44,44),
+                      foregroundColor: Theme.of(context).colorScheme.error), onPressed: _busy ? null : () => setState(() {
                       _confirmDelete = row['uuid'] as String;
                     }), child: Text(tr('Supprimer', 'حذف'))),
                   ]),

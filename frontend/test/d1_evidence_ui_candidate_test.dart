@@ -328,4 +328,78 @@ void main() {
     await tester.pumpWidget(const SizedBox());revoke.dispose();
   });
 
+  // H5 complementary parser coverage. A single comma is decimal, never grouping.
+  final validCases = <String,double>{
+    '7.83':7.83, '7,83':7.83, '٧٫٨٣':7.83, '۷٫۸۳':7.83,
+    ' 141 ':141.0, '١٤١':141.0,
+  };
+  for (final entry in validCases.entries) {
+    test('H5 accepts explicit decimal '+entry.key, () {
+      expect(parseEvidenceQuantity(entry.key,'mmol/L'),entry.value);
+      expect(parseEvidenceQuantity(entry.key,'mg/dL'),entry.value);
+    });
+  }
+  final rejectedFamilies = <String,List<String>>{
+    'mixed or repeated separators':['7,8.3','7٫8,3','7..83','1,234,567'],
+    'grouping and controls':['1 234','1\u00a0234','١٬٢٣٤','7\u200f.83'],
+    'scientific notation and signs':['7e1','+7','-7','7E-1'],
+    'invalid and nonfinite':['','0','0.0','NaN','Infinity','.7','7.','7/8'],
+    'mixed digit scripts':['٧.83','۷٫٨٣'],
+    'bounded length':[List.filled(65,'9').join()],
+  };
+  for (final family in rejectedFamilies.entries) {
+    test('H5 rejects '+family.key, () {
+      for (final raw in family.value) {
+        expect(parseEvidenceQuantity(raw,'mg/dL'),isNull,reason:raw);
+        expect(parseEvidenceQuantity(raw,'mmol/L'),isNull,reason:raw);
+      }
+    });
+  }
+  test('H5 refuses absent or unknown unit without guessing', () {
+    for (final unit in <String?>[null,'','mg/dl','MMOL/L','unknown']) {
+      expect(parseEvidenceQuantity('7.83',unit),isNull);
+    }
+  });
+  for (final arabic in [false,true]) {
+    testWidgets('H5 invalid entry does not mutate; localized recovery preserves source $arabic', (tester) async {
+      tester.view.devicePixelRatio=1;
+      tester.view.physicalSize=const Size(800,1200);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final revoke=ValueNotifier<int>(0);
+      final calls=<String>[];
+      await tester.pumpWidget(MaterialApp(home:EvidenceUiCandidate(
+        arabic:arabic,revoke:revoke,lock:(){},isCurrent:current,
+        call:(action,args) async {
+          calls.add(action);
+          if(action=='open')return result(args,7,[]);
+          expect(action,'insert');
+          expect(args['revision'],7);
+          expect(args['value'],7.83);
+          expect(args['unit'],'mmol/L');
+          return result(args,8,[row(7.83)]);
+        },
+      )));
+      await tester.tap(find.text(arabic?'فتح الملف A':'Ouvrir profil A'));
+      await tester.pumpAndSettle();
+      final field=find.byKey(const Key('evidence-value'));
+      final save=find.byKey(const Key('evidence-save'));
+      final unit=find.byKey(const ValueKey('mmol/L'));
+      await tester.ensureVisible(unit);await tester.tap(unit);await tester.pumpAndSettle();
+      for(final raw in ['7e1','1,2.3','0','٧.83']){
+        await tester.enterText(field,raw);
+        await tester.ensureVisible(save);await tester.tap(save);await tester.pumpAndSettle();
+        expect(calls,['open']);
+        expect(find.text(arabic?'تم رفض الإدخال أو العملية.':'Saisie ou opération refusée.'),findsOneWidget);
+      }
+      await tester.enterText(field,arabic?'٧٫٨٣':'7,83');
+      await tester.ensureVisible(save);await tester.tap(save);await tester.pumpAndSettle();
+      expect(calls,['open','insert']);
+      expect(find.text('7.83 mmol/L'),findsOneWidget);
+      revoke.value++;await tester.pumpAndSettle();
+      expect(find.text('7.83 mmol/L'),findsNothing);
+      await tester.pumpWidget(const SizedBox());revoke.dispose();
+    });
+  }
+
 }

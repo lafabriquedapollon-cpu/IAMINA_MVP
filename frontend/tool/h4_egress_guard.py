@@ -21,6 +21,16 @@ def static_request_allowed(request, allowed):
 
 
 DIRECT_GUARD = r"""(() => {
+  if(typeof globalThis.ServiceWorkerContainer?.prototype?.register==='function'){
+    Object.defineProperty(globalThis.ServiceWorkerContainer.prototype,'register',{
+      value:function(){
+        if(typeof globalThis.__h4ReportTransport==='function'){
+          Promise.resolve(globalThis.__h4ReportTransport('ServiceWorker.register')).catch(()=>{});
+        }
+        return Promise.reject(new DOMException('H4 service worker refused','SecurityError'));
+      },writable:false,configurable:false
+    });
+  }
   const names=['RTCPeerConnection','webkitRTCPeerConnection','WebTransport'];
   for(const name of names){
     if(typeof globalThis[name]!=='function')continue;
@@ -37,7 +47,7 @@ DIRECT_GUARD = r"""(() => {
 
 
 def attach_direct_transport_guard(context, blocked):
-    allowed = {"RTCPeerConnection", "webkitRTCPeerConnection", "WebTransport"}
+    allowed = {"RTCPeerConnection", "webkitRTCPeerConnection", "WebTransport", "ServiceWorker.register"}
     def report(_source, name):
         blocked.append("direct_transport:" + (name if isinstance(name,str) and name in allowed else "unknown"))
     context.expose_binding("__h4ReportTransport", report)
