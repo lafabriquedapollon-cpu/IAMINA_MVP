@@ -1,6 +1,7 @@
 // Isolated Web candidate. No host imports or script installation in main.
 // B2b must compose the exact bridge with the durable vault in the same realm.
 import 'dart:js_interop';
+import 'dart:convert';
 import 'app_lock_authenticator.dart';
 import 'd1_prf_possession.dart';
 
@@ -11,9 +12,45 @@ external JSPromise<JSObject> _acquire(JSString credential, JSNumber owner,
 external JSBoolean _isLive(JSObject token);
 @JS('iaminaD1PrfBridge.revoke')
 external void _revoke(JSObject token);
+@JS('iaminaD1PrfBridge.openLease')
+external JSPromise<JSObject> _openLease(JSObject token, JSString identity,
+    JSFunction pending, JSFunction session);
+@JS('iaminaD1PrfBridge.verifyLease')
+external JSPromise<JSBoolean> _verifyLease(JSObject token);
+@JS('iaminaD1PrfBridge.readEvidence')
+external JSPromise<JSString> _readEvidence(JSObject token, JSString uuid);
+@JS('iaminaD1PrfBridge.retireLease')
+external JSPromise<JSBoolean> _retireLease(JSObject token);
 
 final class D1WebPrfAcquirer implements D1PrfAcquirer {
   const D1WebPrfAcquirer();
+
+  // The opaque handle never crosses this library as a JSObject or raw key.
+  Future<D1WebPrfLease> openBoundLease(D1PrfPossession possession, {
+    required int owner, required int epoch, required int generation,
+    required String acquisitionId, required bool Function() isPending,
+    required bool Function() isSessionCurrent,
+  }) async {
+    D1WebPrfLease? lease;
+    try {
+      if (possession is! _WebPossession || !possession.isLive || !isPending()) {
+        throw const AppLockException('vault_prf_possession_refused');
+      }
+      final identity = jsonEncode({'owner':owner,'epoch':epoch,
+        'generation':generation,'acquisitionId':acquisitionId});
+      final token = await _openLease(possession._token, identity.toJS,
+          (() => isPending().toJS).toJS,
+          (() => isSessionCurrent().toJS).toJS).toDart;
+      lease = D1WebPrfLease._(token);
+      if (!isPending() || !possession.isLive) {
+        throw const AppLockException('vault_prf_possession_refused');
+      }
+      return lease;
+    } catch (_) {
+      if (lease != null) await lease.retire();
+      throw const AppLockException('vault_prf_possession_refused');
+    }
+  }
 
   @override
   Future<D1PrfPossession> acquire(AppLockCredential credential, int owner,
@@ -52,5 +89,37 @@ final class _WebPossession implements D1PrfPossession {
     if (_revoked) return;
     _revoked = true;
     try { _revoke(_token); } catch (_) { /* local authority stays revoked */ }
+  }
+}
+
+final class D1WebPrfLease {
+  final JSObject _token;
+  bool _retired = false;
+  D1WebPrfLease._(this._token);
+
+  Future<bool> verifyCurrent() async {
+    if (_retired) return false;
+    try {
+      final result = (await _verifyLease(_token).toDart).toDart;
+      return !_retired && result;
+    } catch (_) { return false; }
+  }
+
+  Future<String> readEvidence(String uuid) async {
+    if (_retired) throw const AppLockException('vault_prf_possession_refused');
+    try {
+      final result = (await _readEvidence(_token, uuid.toJS).toDart).toDart;
+      if (_retired) throw const AppLockException('vault_prf_possession_refused');
+      return result;
+    } catch (_) {
+      throw const AppLockException('vault_prf_possession_refused');
+    }
+  }
+
+  Future<void> retire() async {
+    _retired = true;
+    if (!(await _retireLease(_token).toDart).toDart) {
+      throw const AppLockException('vault_prf_possession_refused');
+    }
   }
 }
