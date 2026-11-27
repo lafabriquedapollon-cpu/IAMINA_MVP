@@ -1,6 +1,7 @@
 """Real IndexedDB counter CAS on isolated loopback; synthetic credentials only."""
 import http.server
 import json
+import mimetypes
 import os
 from pathlib import Path
 import tempfile
@@ -22,6 +23,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data,kind=b"<!doctype html><title>PRF counter synthetic</title>","text/html"
         elif self.path[1:] in MODULES:
             data,kind=MODULES[self.path[1:]],"text/javascript"
+        elif INTEROP and self.path=="/flutter-runtime.html":
+            data,kind=b'<!doctype html><html><head><base href="/"></head><body><script src="/flutter_bootstrap.js" async></script></body></html>',"text/html"
+        elif INTEROP and self.path.startswith("/"):
+            root=Path(INTEROP).resolve().parent
+            asset=(root/self.path[1:].split("?")[0]).resolve()
+            if not asset.is_relative_to(root) or not asset.is_file():
+                self.send_error(404)
+                return
+            data=asset.read_bytes()
+            kind="application/wasm" if asset.suffix==".wasm" else (mimetypes.guess_type(asset.name)[0] or "application/octet-stream")
         else:
             self.send_error(404)
             return
@@ -252,6 +263,7 @@ SIGNED_PRF="""async()=>{
         const bValue=JSON.parse(await vault.readEvidence(lB,evidenceId));
         vaultChecks.bEvidence=bValue.originalValue===142&&bValue.unit==='mg/dL';
         vault.revoke(b);
+        vaultChecks.directDurableRevocation=await vault.waitRevocation(b);
         vaultChecks.revoked=!await vault.verifyLease(lB)&&await no(()=>vault.readEvidence(lB,evidenceId));
         await vault.retireLease(lB);
         waiting=true;active=false;
@@ -321,6 +333,10 @@ VAULT_RESTART="""async(fixture)=>{
     Object.defineProperty(navigator,'credentials',{configurable:true,value:{get:async({publicKey:p})=>{
         if(p.userVerification!=='required'||b64(p.allowCredentials[0].id)!==credential.credentialId)
           throw new Error('fixture contract');
+        if(fixture.onlyInstall){
+          const r=await prfCounter.readPrfCounter(credential,()=>true);
+          counter=r.signCount+1;
+        }
         const client=enc.encode(JSON.stringify({type:'webauthn.get',origin:location.origin,
           challenge:b64(p.challenge),crossOrigin:false}));
         const auth=new Uint8Array(37);auth.set(await sha(enc.encode(location.hostname)));
@@ -331,7 +347,11 @@ VAULT_RESTART="""async(fixture)=>{
         return new FixtureCredential(id,{clientDataJSON:client,authenticatorData:auth,signature},
           {enabled:true,results:{first:new Uint8Array(32).fill(37).buffer}});
     }}});
-    const {createPrfBridge}=await import('/d1_prf_guard_bridge_candidate.mjs');
+    const {createPrfBridge,installPrfBridge}=await import('/d1_prf_guard_bridge_candidate.mjs');
+    if(fixture.onlyInstall){
+      installPrfBridge();
+      return true;
+    }
     const bridge=createPrfBridge();
     const checks={};
     const uuid='ac123456-1234-4abc-8def-000000000001';
@@ -380,6 +400,68 @@ VAULT_RESTART="""async(fixture)=>{
     if(!Object.values(checks).every(x=>x===true))throw new Error('restart '+JSON.stringify(checks));
     return checks;
 }"""
+
+# Same compiled Flutter runtime artifact as existing D1 browser probes;
+# independent tabs share the real PRF counter and encrypted vault namespace.
+def flutter_runtime_checks(ctx,origin,fixture):
+    pages=[ctx.new_page(),ctx.new_page()]
+    checks={}
+    for p in pages:
+        p.goto(origin+"/flutter-runtime.html",wait_until="domcontentloaded")
+        p.wait_for_function("typeof window.d1PrfRuntimeRun==='function'",timeout=60000)
+        p.evaluate(INIT)
+        assert p.evaluate(VAULT_RESTART,{**fixture,"onlyInstall":True}) is True
+        assert p.evaluate("(c)=>d1PrfRuntimeRun('init',JSON.stringify(c))",fixture["credential"])=="PASS"
+    a,b=pages
+    def call(p,op,arg=""):
+        return p.evaluate("([op,arg])=>d1PrfRuntimeRun(op,arg)",[op,arg])
+    def record(p,owner):
+        return call(p,"login",str(owner))=="PASS" and call(p,"admit")=="PASS"
+    def read(p):
+        return json.loads(call(p,"read"))
+    checks["flutterA"]=record(a,900001) and read(a)=={"value":7.83,"unit":"mmol/L","provenance":"userEntered"}
+    # Hold an actual decrypt promise open in tab A; tab B replaces its fence.
+    a.evaluate("""()=>{
+      const original=crypto.subtle.decrypt.bind(crypto.subtle);
+      window.prfDecryptEntered=false;
+      Object.defineProperty(crypto.subtle,'decrypt',{configurable:true,value:async(...args)=>{
+        const value=await original(...args);
+        await new Promise(resolve=>{window.prfDecryptRelease=resolve;window.prfDecryptEntered=true;});
+        return value;
+      }});
+      window.prfRead=d1PrfRuntimeRun('read','');
+    }""")
+    a.wait_for_function("window.prfDecryptEntered===true")
+    checks["flutterB"]=record(b,900002) and read(b)=={"value":142,"unit":"mg/dL","provenance":"userEntered"}
+    a.evaluate("()=>{delete crypto.subtle.decrypt;window.prfDecryptRelease();}")
+    checks["crossTabLateRead"]=a.evaluate("()=>window.prfRead")=="REFUSED"
+    checks["staleRetirePreservesB"]=call(a,"retire")=="PASS" and read(b)["value"]==142
+    checks["lockRevokesB"]=call(b,"lock")=="PASS" and call(b,"read")=="REFUSED" and call(b,"retire")=="PASS"
+    checks["flutterReopenA"]=record(a,900001) and read(a)["value"]==7.83
+    # Hang WebCrypto after decrypt, without ever returning its result before
+    # deadline. The operation must refuse and retire independently.
+    a.evaluate("""()=>{
+      const original=crypto.subtle.decrypt.bind(crypto.subtle);
+      window.prfDecryptEntered=false;
+      Object.defineProperty(crypto.subtle,'decrypt',{configurable:true,value:async(...args)=>{
+        const value=await original(...args);
+        await new Promise(resolve=>{window.prfDecryptRelease=resolve;window.prfDecryptEntered=true;});
+        return value;
+      }});
+      window.prfRead=d1PrfRuntimeRun('read','');
+    }""")
+    a.wait_for_function("window.prfDecryptEntered===true")
+    checks["boundedRead"]=a.evaluate("()=>window.prfRead")=="REFUSED"
+    checks["timeoutRetired"]=call(a,"retire")=="PASS" and json.loads(call(a,"status"))["active"] is False
+    a.evaluate("()=>{delete crypto.subtle.decrypt;window.prfDecryptRelease();}")
+    checks["successorAfterTimeout"]=record(b,900002) and read(b)["value"]==142
+    checks["identitySwitchRetires"]=call(b,"login","900001")=="PASS" and call(b,"read")=="REFUSED"
+    checks["sameTabSwitchA"]=call(b,"admit")=="PASS" and read(b)["value"]==7.83
+    checks["noLegacyCalls"]=all(json.loads(call(p,"status"))["legacyCalls"]==0 for p in pages)
+    checks["finalRetirement"]=call(b,"retire")=="PASS"
+    for p in pages: p.close()
+    assert len(checks)==13 and all(checks.values()),checks
+    return checks
 
 def setup(ctx,origin):
     page=ctx.new_page()
@@ -469,7 +551,7 @@ def run():
                 assert len(authority)==7 and all(v is True for v in authority.values())
                 print("D1_PRF_SINGLE_AUTHORITY_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(authority),count=len(authority))),flush=True)
                 vault=a.evaluate("window.vaultChecks")
-                assert len(vault)==18 and all(v is True for v in vault.values())
+                assert len(vault)==19 and all(v is True for v in vault.values())
                 print("D1_PRF_VAULT_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(vault),count=len(vault))),flush=True)
                 if INTEROP:
                     assert a.evaluate("window.vaultDartPass") is True
@@ -485,6 +567,9 @@ def run():
                 restart=a.evaluate(VAULT_RESTART,restart_fixture)
                 assert len(restart)==7 and all(v is True for v in restart.values())
                 print("D1_PRF_VAULT_RESTART_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(restart),count=len(restart))),flush=True)
+                if INTEROP:
+                    runtime=flutter_runtime_checks(ctx,origin,restart_fixture)
+                    print("D1_PRF_FLUTTER_RUNTIME_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(runtime),count=len(runtime))),flush=True)
                 check("zero_external_requests",not blocked)
             finally: ctx.close()
         print("D1_PRF_COUNTER_PASS "+json.dumps(dict(source=sha,engine=name,checks=checks,count=len(checks))),flush=True)

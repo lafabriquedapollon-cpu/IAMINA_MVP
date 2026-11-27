@@ -23,6 +23,9 @@ import 'package:flutter/foundation.dart' show listEquals;
 import 'package:amina/services/auth_service.dart';
 import 'package:amina/services/app_lock_service.dart';
 import 'package:amina/services/d1_admission_guard_adapter.dart';
+import 'package:amina/services/d1_runtime_admission.dart';
+import 'package:amina/services/d1_prf_possession_web.dart';
+import 'package:amina/services/d1_prf_runtime_backend_web.dart';
 import 'package:amina/services/app_lock_authenticator.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -191,6 +194,77 @@ class _ProbeAuthenticator implements AppLockAuthenticator {
   @override
   Future<AppLockAssertion> unlock(AppLockCredential credential) async =>
       AppLockAssertion(signCount: ++counter);
+}
+
+// B2b.3: actual Flutter-compiled service graph. Separate synthetic storage,
+// mock HTTP only, real PRF bridge and IndexedDB backend. No host composition.
+@JS('d1PrfRuntimeRun')
+external set _prfRuntimeFn(JSFunction value);
+AuthService? _prfAuth;
+AppLockService? _prfLock;
+D1RuntimeAdmission? _prfAdmission;
+D1RuntimeSession? _prfSession;
+_ProbeAuthenticator? _prfLegacy;
+const _prfUuid = 'ac123456-1234-4abc-8def-000000000001';
+
+Future<String> _prfRuntime(String action, String arg) async {
+  try {
+    if (action == 'init') {
+      if (_prfAuth != null) throw StateError('already initialized');
+      final storage = _MemorySecureStorage();
+      storage.values.clear();
+      storage.values['iamina_d1_prf_credential_candidate_v1'] =
+          AppLockCredential.decode(arg).encode();
+      final auth = AuthService(storage: storage, httpClient: MockClient((request) async {
+        if (!request.url.path.endsWith('/auth/login')) return http.Response('{}',403);
+        final email = jsonDecode(request.body)['email'];
+        final id = email == 'a@example.invalid' ? 900001 :
+            email == 'b@example.invalid' ? 900002 : null;
+        if (id == null) return http.Response('{}',403);
+        return http.Response(jsonEncode({'access_token':'iamina.fixture_$id:abc123:signature_$id',
+          'user':{'id':id}}),200);
+      }));
+      await auth.initialize();
+      final legacy = _ProbeAuthenticator();
+      const prf = D1WebPrfAcquirer();
+      final lock = AppLockService(authService:auth,storage:storage,
+        authenticator:legacy,d1PrfAcquirer:prf);
+      await lock.initialize();
+      _prfAuth=auth; _prfLock=lock; _prfLegacy=legacy;
+      _prfAdmission=D1RuntimeAdmission(auth,lock,const D1WebPrfRuntimeBackend(prf),prf:prf);
+      if (!lock.isConfigured || lock.isUnlocked) throw StateError('bad configuration');
+      return 'PASS';
+    }
+    final auth=_prfAuth!, lock=_prfLock!;
+    if (action == 'login') {
+      if (arg!='900001' && arg!='900002') throw StateError('synthetic owner required');
+      await auth.signInWithEmail(arg=='900001'?'a@example.invalid':'b@example.invalid','synthetic');
+      return auth.boundNativeAccountId==int.parse(arg)?'PASS':'ERROR';
+    }
+    if (action == 'admit') {
+      _prfSession=await _prfAdmission!.admit();
+      return _prfSession!.isActive && !lock.isUnlocked && _prfLegacy!.counter==1?'PASS':'ERROR';
+    }
+    if (action == 'read') {
+      final value=await _prfSession!.readEvidence(arg.isEmpty?_prfUuid:arg);
+      return jsonEncode(value==null?null:{'value':value.originalRawValue,
+        'unit':value.originalUnit!.ucumCode,'provenance':value.provenance.name});
+    }
+    if (action == 'lock') {
+      lock.lock();
+      return _prfSession?.isActive==false?'PASS':'ERROR';
+    }
+    if (action == 'retire') {
+      await _prfSession!.retire();
+      return !_prfSession!.isActive&&!_prfSession!.durableRetirementFailed?'PASS':'ERROR';
+    }
+    if (action == 'status') {
+      return jsonEncode({'active':_prfSession?.isActive??false,
+        'retirementFailed':_prfSession?.durableRetirementFailed??false,
+        'legacyCalls':_prfLegacy!.counter-1});
+    }
+    return 'ERROR';
+  } catch (_) {return 'REFUSED';}
 }
 
 AuthService? _boundAuth;
@@ -1016,6 +1090,8 @@ class _H1TrendFixtureState extends State<_H1TrendFixture> {
 }
 
 void main() {
+  _prfRuntimeFn = ((JSString action, JSString arg) =>
+    _prfRuntime(action.toDart,arg.toDart).then((v)=>v.toJS).toJS).toJS;
   // Synthetic-only diagnostic; no clinical data, no write authority.
   _evidenceTimeProbeFn = ((JSNumber value) {
     final seconds=value.toDartInt;
