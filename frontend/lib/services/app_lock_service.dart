@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'app_lock_authenticator.dart';
 import 'app_lock_authenticator_factory.dart';
 import 'auth_service.dart';
+import 'd1_prf_possession.dart';
 
 typedef ProtectedLocalStateProbe = Future<bool> Function();
 
@@ -17,9 +18,23 @@ final class D1VaultAdmissionProof {
   final int _epoch;
   final int _admissionGeneration;
   final Duration _issuedAt;
+  final D1PrfPossession? _possession;
+  bool _possessionRevoked = false;
 
   D1VaultAdmissionProof._(this._owner, this._authGeneration, this._epoch,
-      this._admissionGeneration, this._issuedAt);
+      this._admissionGeneration, this._issuedAt, [this._possession]);
+
+  bool get _possessionLive {
+    if (_possessionRevoked) return false;
+    try { return _possession?.isLive ?? true; }
+    catch (_) { return false; }
+  }
+
+  void _revokePossession() {
+    if (_possession == null || _possessionRevoked) return;
+    _possessionRevoked = true;
+    _possession.revoke();
+  }
 }
 
 /// Process-local continuation of a consumed ticket. The pending phase has
@@ -31,12 +46,14 @@ final class D1VaultAdmissionGuard {
   bool _claimed = false;
   bool _active = false;
   bool _retired = false;
+  bool _possessionTaken = false;
   VoidCallback? _onRetired;
 
   D1VaultAdmissionGuard._(this._issuer, this._proof);
 
   bool _context(int owner, int epoch) =>
-      !_retired && owner == _proof._owner && epoch == _proof._epoch &&
+      !_retired && _proof._possessionLive &&
+      owner == _proof._owner && epoch == _proof._epoch &&
       _issuer._unlocked &&
       _issuer._admissionGeneration == _proof._admissionGeneration &&
       _issuer._hasAdmissionContext(owner, _proof._authGeneration, epoch);
@@ -57,8 +74,23 @@ final class D1VaultAdmissionGuard {
   bool checkPending(int owner, int epoch) =>
       _claimed && _pending(owner, epoch);
 
+  // The runtime coordinator passes this one-shot capability only to its
+  // exact acquisition. The backend never receives claim/watch/activate.
+  D1PrfPossession takePrfPossession(int owner, int epoch) {
+    final possession = _proof._possession;
+    if (!checkPending(owner, epoch) || _onRetired == null ||
+        _possessionTaken || possession == null) {
+      throw const AppLockException('vault_prf_possession_refused');
+    }
+    _possessionTaken = true;
+    return possession;
+  }
+
+  void revokePrfPossession() => _proof._revokePossession();
+
   bool activate(int owner, int epoch) {
-    if (!checkPending(owner, epoch)) return false;
+    if (!checkPending(owner, epoch) ||
+        (_proof._possession != null && !_possessionTaken)) return false;
     _active = true;
     return true;
   }
@@ -76,6 +108,7 @@ final class D1VaultAdmissionGuard {
 
   void _retire() {
     _retired = true;
+    _proof._revokePossession();
     final callback = _onRetired;
     _onRetired = null;
     if (callback != null) {
@@ -393,8 +426,10 @@ class AppLockService extends ChangeNotifier {
   }
 
   void _retireAdmission() {
+    final pending = _pendingAdmission;
     _pendingAdmission = null;
     _admissionGeneration++;
+    pending?._revokePossession();
     final guard = _currentAdmissionGuard;
     _currentAdmissionGuard = null;
     guard?._retire();
@@ -442,6 +477,53 @@ class AppLockService extends ChangeNotifier {
     return proof;
   }
 
+  /// Isolated D1 PRF path. The legacy UI must already be unlocked; this
+  /// does not change legacy UI state or its counter. No legacy assertion,
+  /// fallback or automatic counter registration is performed for this ticket.
+  Future<D1VaultAdmissionProof> issuePrfVaultAdmissionProof(
+      D1PrfAcquirer prf) async {
+    _retireAdmission();
+    final owner = _authService?.boundNativeAccountId;
+    final generation = _authService?.verifiedNativeAdmissionGeneration;
+    final epoch = AuthService.authEpoch;
+    final credential = _credential;
+    if (owner == null || generation == null || credential == null ||
+        !_unlocked || !_hasAdmissionContext(owner, generation, epoch) ||
+        _proofInFlight) {
+      throw const AppLockException('vault_prf_possession_refused');
+    }
+    _beginProof();
+    final expected = _admissionGeneration;
+    final proofGeneration = _proofGeneration;
+    final started = _admissionElapsed;
+    bool pending() {
+      final now = _admissionElapsed;
+      return _admissionGeneration == expected &&
+          _isCurrentProof(proofGeneration, epoch) && _unlocked &&
+          identical(_credential, credential) &&
+          _hasAdmissionContext(owner, generation, epoch) &&
+          now >= started && now - started < _admissionLifetime;
+    }
+    D1PrfPossession? possession;
+    try {
+      if (!pending()) throw const AppLockException('vault_prf_possession_refused');
+      possession = await prf.acquire(credential, owner, pending);
+      if (!pending() || !possession.isLive) {
+        throw const AppLockException('vault_prf_possession_refused');
+      }
+      final proof = D1VaultAdmissionProof._(
+          owner, generation, epoch, expected, started, possession);
+      _pendingAdmission = proof;
+      possession = null; // ownership transferred to the one-shot proof
+      return proof;
+    } catch (_) {
+      possession?.revoke();
+      throw const AppLockException('vault_prf_possession_refused');
+    } finally {
+      _proofInFlight = false;
+    }
+  }
+
   /// Synchronous, one-shot validation. A wrong-owner attempt burns the ticket.
   /// This is only preadmission; an eventual async vault adapter must recheck
   /// identity/lock and durable lease at every relevant boundary.
@@ -452,10 +534,11 @@ class AppLockService extends ChangeNotifier {
     }
     _pendingAdmission = null;
     final now = _admissionElapsed;
-    if (owner != proof._owner || !_unlocked ||
+    if (owner != proof._owner || !_unlocked || !proof._possessionLive ||
         _admissionGeneration != proof._admissionGeneration ||
         !_hasAdmissionContext(owner, proof._authGeneration, proof._epoch) ||
         now < proof._issuedAt || now - proof._issuedAt >= _admissionLifetime) {
+      proof._revokePossession();
       throw const AppLockException('vault_admission_retired');
     }
     final guard = D1VaultAdmissionGuard._(this, proof);

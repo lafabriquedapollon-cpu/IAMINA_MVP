@@ -7,6 +7,8 @@ import 'dart:math';
 import '../core/domain/glucose_quantity_evidence.dart';
 import 'app_lock_service.dart';
 import 'auth_service.dart';
+import 'd1_prf_possession.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 typedef D1RuntimeIdentity = ({int owner, int epoch, int generation});
 
@@ -18,9 +20,12 @@ final class D1RuntimeAcquisition {
   final String acquisitionId;
   final bool Function() _pending;
   final bool Function() _session;
+  final D1PrfPossession Function() _takePrf;
+  final void Function() _revokePrf;
   final Completer<void> _cancelled = Completer<void>();
 
-  D1RuntimeAcquisition._(this.identity, this._pending, this._session)
+  D1RuntimeAcquisition._(this.identity, this._pending, this._session,
+      this._takePrf, this._revokePrf)
       : acquisitionId = _newId();
 
   static String _newId() {
@@ -34,8 +39,16 @@ final class D1RuntimeAcquisition {
   bool get isCancelled => _cancelled.isCompleted;
   Future<void> get cancelled => _cancelled.future;
 
+  D1PrfPossession takePrfPossession() {
+    if (!isPending) throw const D1RuntimeAdmissionException();
+    return _takePrf();
+  }
+
   void _cancel() {
-    if (!_cancelled.isCompleted) _cancelled.complete();
+    if (!_cancelled.isCompleted) {
+      _cancelled.complete();
+      _revokePrf();
+    }
   }
 }
 
@@ -137,7 +150,15 @@ final class D1RuntimeAdmission {
   final AuthService _auth;
   final AppLockService _lock;
   final D1DurableRuntimeBackend _backend;
-  D1RuntimeAdmission(this._auth, this._lock, this._backend);
+  final D1PrfAcquirer? _prf;
+  D1RuntimeAdmission(this._auth, this._lock, this._backend,
+      {required D1PrfAcquirer prf}) : _prf = prf;
+
+  // Retains the prior abstract contract tests only. Never compose this
+  // constructor into a real vault or product host.
+  @visibleForTesting
+  D1RuntimeAdmission.legacyFixture(this._auth, this._lock, this._backend)
+      : _prf = null;
 
   // The issuer's watcher invalidates local authority synchronously. Durable
   // retirement is asynchronous; failures are not treated as proof of release.
@@ -148,7 +169,10 @@ final class D1RuntimeAdmission {
       throw const D1RuntimeAdmissionException();
     }
     final identity = (owner: owner, epoch: AuthService.authEpoch, generation: generation);
-    final proof = await _lock.issueVaultAdmissionProof();
+    final prf = _prf;
+    final proof = prf == null
+        ? await _lock.issueVaultAdmissionProof()
+        : await _lock.issuePrfVaultAdmissionProof(prf);
     final guard = _lock.consumeVaultAdmissionProof(proof, owner: owner);
     D1RuntimeSession? session;
     D1DurableRuntimeLease? lease;
@@ -156,7 +180,9 @@ final class D1RuntimeAdmission {
         identity,
         () => _auth.verifiedNativeAdmissionGeneration == generation &&
             guard.checkPending(owner, identity.epoch),
-        () => guard.checkSession(owner, identity.epoch));
+        () => guard.checkSession(owner, identity.epoch),
+        () => guard.takePrfPossession(owner, identity.epoch),
+        guard.revokePrfPossession);
     bool matches(D1DurableRuntimeLease candidate) =>
         candidate.identity == identity &&
         candidate.acquisitionId == acquisition.acquisitionId;

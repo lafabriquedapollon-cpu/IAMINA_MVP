@@ -9,7 +9,8 @@ from playwright.sync_api import sync_playwright
 
 ROOT=Path(__file__).parent
 MODULES={name:(ROOT/name).read_bytes() for name in (
-    "d1_prf_counter_candidate.mjs","d1_prf_possession_candidate.mjs")}
+    "d1_prf_counter_candidate.mjs","d1_prf_possession_candidate.mjs",
+    "d1_prf_guard_bridge_candidate.mjs")}
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -67,7 +68,7 @@ SIGNED_PRF="""async()=>{
     const credential={version:1,credentialId:b64(id),
       publicKeySpki:b64(await crypto.subtle.exportKey('spki',pair.publicKey)),
       rpId:location.hostname,origin:location.origin,signCount:0};
-    let counter=1,output,requests=0;
+    let counter=1,output,requests=0,delay=null,omitPrf=false;
     try{
         Object.defineProperty(window,'PublicKeyCredential',{value:FixtureCredential,configurable:true});
         Object.defineProperty(navigator,'credentials',{configurable:true,value:{get:async({publicKey:p})=>{
@@ -85,8 +86,9 @@ SIGNED_PRF="""async()=>{
             const signature=der(new Uint8Array(await crypto.subtle.sign(
               {name:'ECDSA',hash:'SHA-256'},pair.privateKey,signed)));
             output=new Uint8Array(32).fill(37);
+            if(delay) await delay;
             return new FixtureCredential(id,{clientDataJSON:client,authenticatorData:auth,signature},
-              {enabled:true,results:{first:output.buffer}});
+              omitPrf?undefined:{enabled:true,results:{first:output.buffer}});
         }}});
         await prfCounter.registerPrfCounter(credential,pending);
         const derive=()=>prfCounter.derivePrfWithDurableCounter({credential,owner:900001,isPending:pending});
@@ -104,7 +106,47 @@ SIGNED_PRF="""async()=>{
         // Replay of the same signed counter must not release a key or advance IDB.
         try{await derive();return false;}catch(e){if(e.message!=='D1_PRF_POSSESSION_REFUSED')return false;}
         const after=await prfCounter.readPrfCounter(credential,pending);
-        return requests===3&&after.signCount===2&&after.revision===3&&output.every(x=>x===0);
+        if(!(requests===3&&after.signCount===2&&after.revision===3&&output.every(x=>x===0)))return false;
+        const {createPrfBridge}=await import('/d1_prf_guard_bridge_candidate.mjs');
+        const bridge=createPrfBridge(), foreign=createPrfBridge();
+        const refused=async fn=>{try{await fn();return false;}catch(e){return e.message==='D1_PRF_POSSESSION_REFUSED';}};
+        const acquire=()=>bridge.acquire(JSON.stringify(credential),900001,pending);
+        const tests={};
+        counter=3;
+        const token=await acquire();
+        tests.opaque=bridge.isLive(token)&&Object.isFrozen(token)&&Object.keys(token).length===0&&JSON.stringify(token)==='{}';
+        tests.forgery=!bridge.isLive({})&&!foreign.isLive(token);
+        bridge.revoke(token);bridge.revoke(token);
+        tests.revocation=!bridge.isLive(token);
+        counter=4;
+        const successor=await acquire();
+        bridge.revoke(token);
+        tests.successor=bridge.isLive(successor);
+        tests.replay=await refused(acquire);
+        counter=5;omitPrf=true;
+        tests.absent=await refused(acquire);
+        omitPrf=false;
+        current=false;
+        tests.cancelledBefore=await refused(acquire);
+        current=true;
+        let release;
+        delay=new Promise(resolve=>{release=resolve;});
+        let entered;
+        const oldCount=requests;
+        const request=acquire();
+        const handled=refused(()=>request);
+        // Wait for real fixture authenticator invocation, then retire.
+        for(let i=0;i<100&&requests===oldCount;i++)await new Promise(r=>setTimeout(r,5));
+        entered=requests===oldCount+1;
+        current=false;release();
+        tests.cancelledDuring=entered&&await handled;
+        current=true;delay=null;
+        const final=await prfCounter.readPrfCounter(credential,pending);
+        tests.noCounterOnRefusal=final.signCount===4&&final.revision===5;
+        bridge.revoke(successor);
+        tests.closed=!bridge.isLive(successor);
+        if(!Object.values(tests).every(x=>x===true))throw new Error('guard bridge '+JSON.stringify(tests));
+        return true;
     }finally{
         if(pubDescriptor)Object.defineProperty(window,'PublicKeyCredential',pubDescriptor);
         else delete window.PublicKeyCredential;
