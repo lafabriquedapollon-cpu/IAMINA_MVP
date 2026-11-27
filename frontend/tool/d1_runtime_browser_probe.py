@@ -26,6 +26,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+# Independent server-side observation for the UI qualification only.
+# A completed GET of the exact packaged fallback asset is real evidence even
+# if a WebKit/Playwright response callback is missed. Never trigger a fetch
+# from the test to satisfy the spontaneous engine-request requirement.
+_FONT_WITNESS_PATHS = {
+    "/assets/engine-font-fallback/notosanssymbols/v43/rP2up3q65FkAtHfwd-eIS2brbDN6gxP34F9jRRCe4W3gfQ8gb_VFRkzrbQ.woff2": "notosanssymbols",
+    "/assets/engine-font-fallback/notosansarabic/v28/nwpxtLGrOAZMl5nJ_wfgRg3DrWFZWsnVBJ_sS6tlqHHFlhQ5l3sQWIHPqzCfyGyvvnCBFQLaig.woff2": "notosansarabic",
+}
+
+
+class FontWitnessHandler(Handler):
+    def send_response(self, code, message=None):
+        self.response_status = code
+        super().send_response(code, message)
+
+    def end_headers(self):
+        if self.path in _FONT_WITNESS_PATHS:
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def do_GET(self):
+        self.response_status = None
+        family = _FONT_WITNESS_PATHS.get(self.path)
+        super().do_GET()
+        if family is not None and self.response_status == 200:
+            # Only after the handler has completed streaming the response.
+            self.server.font_witness.append(family)
+
+
 def open_context(browser_type, profile, locale, origin, extra_origin=None, trace=None, timezone_id=None):
     context = browser_type.launch_persistent_context(
         str(profile), headless=True, locale=locale,
@@ -2187,7 +2216,7 @@ UI_MOUNT = r"""async (arabic)=>{
 }"""
 
 
-def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
+def exercise_evidence_ui(browser_type, profile, locale, origin, width, height, font_witness):
     from PIL import Image
     from playwright.sync_api import expect
     proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
@@ -2447,10 +2476,24 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         stage="final-pageerror"
         assert not errors
         stage="final-local-font"
+        expected_font = "notosansarabic" if ar else "notosanssymbols"
+        # Bounded observation only; no retry, reload or synthetic font fetch.
+        for _ in range(20):
+            if expected_font in font_witness:
+                break
+            page.wait_for_timeout(100)
+        print("D1_D5_FONT_WITNESS "+json.dumps({
+            "engine":ENGINE,"locale":locale,"width":width,"expected":expected_font,
+            "browserResponses":sorted(set(local_fonts)),
+            "browserFailures":sorted(set(local_font_failures)),
+            "serverCompletedGets":sorted(set(font_witness)),
+        }),flush=True)
+        assert not blocked and not errors
         assert not local_font_failures
-        assert ("notosansarabic" if ar else "notosanssymbols") in local_fonts
+        assert expected_font in font_witness, "No completed spontaneous local font GET"
         return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
-                "viewport":[width,height],"frames":frames,"localFonts":sorted(set(local_fonts)),
+                "viewport":[width,height],"frames":frames,"localFonts":sorted(set(font_witness)),
+                "browserLocalFonts":sorted(set(local_fonts)),
                 "blockedRequests":len(blocked),"pageErrors":len(errors),"result":"PASS"}
     except Exception as failure:
         # Diagnostic metadata is limited to the synthetic form's known controls;
@@ -2586,30 +2629,42 @@ def run():
 
 
 def run_evidence_ui():
+    from contextlib import ExitStack
     assert ENGINE in ("chromium","webkit")
     assert os.environ["GITHUB_HEAD_REF"]=="phase2/d1-d5-convergence"
     records=[]
     proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
     proof.mkdir(parents=True,exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="d1-ui-") as root:
-        with http.server.ThreadingHTTPServer(("127.0.0.1",0),Handler) as server:
-            threading.Thread(target=server.serve_forever,daemon=True).start()
-            origin=f"http://127.0.0.1:{server.server_port}"
-            try:
-                with sync_playwright() as pw:
-                    browser_type=getattr(pw,ENGINE)
-                    for width,height in ((390,844),(430,932),(1280,860)):
-                        for locale in ("fr-FR","ar-MA"):
-                            try:
-                                record=exercise_evidence_ui(browser_type,Path(root)/f"ui-{locale}-{width}",locale,origin,width,height)
-                            except Exception as error:
-                                record={"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
-                                        "viewport":[width,height],"result":"FAIL","error":str(error)[:200]}
-                            records.append(record)
-                            print("D1_D5_UI "+json.dumps(record,ensure_ascii=False),flush=True)
-            finally:
-                server.shutdown()
-                (proof/f"conv-ui-{ENGINE}-matrix.json").write_text(json.dumps(records,ensure_ascii=False))
+    cases=[(width,height,locale) for width,height in ((390,844),(430,932),(1280,860))
+           for locale in ("fr-FR","ar-MA")]
+    with tempfile.TemporaryDirectory(prefix="d1-ui-") as root, ExitStack() as stack:
+        # Bind every origin before running any case, so no port can be reused.
+        servers=[stack.enter_context(http.server.ThreadingHTTPServer(
+            ("127.0.0.1",0),FontWitnessHandler)) for _ in cases]
+        assert len({server.server_port for server in servers})==len(cases)
+        try:
+            with sync_playwright() as pw:
+                browser_type=getattr(pw,ENGINE)
+                for (width,height,locale),server in zip(cases,servers):
+                    server.font_witness=[]
+                    thread=threading.Thread(target=server.serve_forever,daemon=True)
+                    thread.start()
+                    origin=f"http://127.0.0.1:{server.server_port}"
+                    try:
+                        try:
+                            record=exercise_evidence_ui(browser_type,Path(root)/f"ui-{locale}-{width}",locale,
+                                                        origin,width,height,server.font_witness)
+                        except Exception as error:
+                            record={"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                                    "viewport":[width,height],"result":"FAIL","error":str(error)[:200],
+                                    "serverCompletedFontGets":sorted(set(server.font_witness))}
+                        records.append(record)
+                        print("D1_D5_UI "+json.dumps(record,ensure_ascii=False),flush=True)
+                    finally:
+                        server.shutdown()
+                        thread.join(timeout=5)
+        finally:
+            (proof/f"conv-ui-{ENGINE}-matrix.json").write_text(json.dumps(records,ensure_ascii=False))
     assert len(records)==6 and all(r["result"]=="PASS" for r in records),"D1 D5 UI matrix failed"
     print("D1_D5_EVIDENCE_UI_PASS 6/6",flush=True)
 
