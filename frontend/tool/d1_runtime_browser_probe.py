@@ -2306,13 +2306,32 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height):
         result["pageErrorKinds"]=sorted(set(error_kind(e) for e in errors))
         return result
     def enter(value):
+        nonlocal stage
+        prefix=stage
+        stage=prefix+"-focus"
         tap("evidence-value")
         # Flutter Web's native text editing element may be inside a shadow root.
-        # The locator pierces open roots and checks actual focused input.
+        # Require exactly one focused editor before sending real keyboard events.
         native=page.locator("input:focus, textarea:focus")
         expect(native).to_have_count(1,timeout=10000)
-        native.fill(value,timeout=10000)
-        expect(native).to_have_value(value,timeout=10000)
+        stage=prefix+"-replace"
+        native.press("ControlOrMeta+a",timeout=10000)
+        native.press_sequentially(value,delay=60,timeout=10000)
+        stage=prefix+"-value"
+        try:
+            expect(native).to_have_count(1,timeout=10000)
+            expect(native).to_have_value(value,timeout=10000)
+        finally:
+            # Synthetic-only, bounded metadata: never print actual input text.
+            try:
+                current=native.input_value(timeout=1000) if native.count()==1 else None
+                print("D1_D5_INPUT_DIAG "+json.dumps({
+                    "engine":ENGINE,"locale":locale,"width":width,"stage":stage,
+                    "focusedCount":native.count(),"length":len(current) if current is not None else None,
+                    "matchesExpected":current==value,
+                }),flush=True)
+            except Exception:
+                pass
     try:
         page.set_viewport_size({"width":width,"height":height})
         semantics()
