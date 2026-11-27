@@ -200,58 +200,71 @@ void main() {
   ];
 
   testWidgets('H3 pagination keeps revision and rejects stale response', (tester) async {
-    // Keep the pager within the synthetic viewport, independent of the
-    // framework's default 800x600 and lazy ListView construction.
+    // A widget contract test, not a viewport test: avoid lazy sliver clipping.
+    // Real 390x844 pagination is independently required in both browser jobs.
     tester.view.devicePixelRatio=1;
-    tester.view.physicalSize=const Size(800,1000);
+    tester.view.physicalSize=const Size(800,2800);
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final offsets=<int>[];
     final revoke=ValueNotifier<int>(0);
     var locks=0;
-    var stale=false;
+    late Completer<Map<String,dynamic>> pending;
+    late Map<String,Object?> request;
     await tester.pumpWidget(MaterialApp(home:EvidenceUiCandidate(
       arabic:false,revoke:revoke,lock:(){locks++;},isCurrent:current,
-      call:(action,args) async {
+      call:(action,args) {
         expect(args['start'],evidenceStartSeconds);
         expect(args['end'],evidenceEndSeconds);
         expect(args['limit'],evidencePageSize);
-        if(action=='open')return result(args,7,pageRows(0,10));
+        if(action=='open')return Future.value(result(args,7,pageRows(0,10)));
         expect(action,'page');
         expect(args['revision'],7);
-        final offset=args['offset'] as int;
-        offsets.add(offset);
-        return result(args,stale?8:7,pageRows(offset,10));
+        offsets.add(args['offset'] as int);
+        request=Map<String,Object?>.of(args);
+        pending=Completer<Map<String,dynamic>>();
+        return pending.future;
       },
     )));
     await tester.tap(find.text('Ouvrir profil A'));
     await tester.pumpAndSettle();
     expect(find.text('Page 1'),findsOneWidget);
-    await tester.ensureVisible(find.byKey(const Key('evidence-next')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('evidence-next')).hitTestable(),findsOneWidget);
-    await tester.tap(find.byKey(const Key('evidence-next')));
-    await tester.pumpAndSettle();
+    expect(find.text('100.0 mmol/L'),findsOneWidget);
+    Future<void> navigate(String key,int offset,int revision) async {
+      final button=find.byKey(Key(key));
+      expect(button.hitTestable(),findsOneWidget);
+      expect(tester.widget<TextButton>(button).onPressed,isNotNull);
+      await tester.tap(button);
+      await tester.pump();
+      expect(offsets.last,offset);
+      expect(pending.isCompleted,isFalse);
+      final payload=result(request,revision,pageRows(offset,10));
+      // Verify the synthetic transport result before delivering it.
+      final parsed=EvidenceUiResult.fromJson(payload);
+      expect(parsed.offset,offset);
+      expect(parsed.revision,revision);
+      pending.complete(payload);
+      await tester.pump();
+      await tester.pumpAndSettle();
+    }
+    await navigate('evidence-next',10,7);
     expect(offsets,[10]);
     expect(locks,0);
     expect(find.text('Page 2'),findsOneWidget);
-    await tester.ensureVisible(find.byKey(const Key('evidence-prev')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('evidence-prev')).hitTestable(),findsOneWidget);
-    await tester.tap(find.byKey(const Key('evidence-prev')));
-    await tester.pumpAndSettle();
-    expect(find.text('Page 1'),findsOneWidget);
+    expect(find.text('110.0 mmol/L'),findsOneWidget);
+    expect(find.text('100.0 mmol/L'),findsNothing);
+    await navigate('evidence-prev',0,7);
     expect(offsets,[10,0]);
     expect(locks,0);
-    stale=true;
-    await tester.ensureVisible(find.byKey(const Key('evidence-next')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('evidence-next')).hitTestable(),findsOneWidget);
-    await tester.tap(find.byKey(const Key('evidence-next')));
-    await tester.pumpAndSettle();
+    expect(find.text('Page 1'),findsOneWidget);
+    expect(find.text('100.0 mmol/L'),findsOneWidget);
+    expect(find.text('110.0 mmol/L'),findsNothing);
+    await navigate('evidence-next',10,8);
     expect(offsets,[10,0,10]);
     expect(locks,1);
     expect(find.text('Coffre verrouillé'),findsOneWidget);
+    expect(find.text('100.0 mmol/L'),findsNothing);
+    expect(find.text('110.0 mmol/L'),findsNothing);
     await tester.pumpWidget(const SizedBox());revoke.dispose();
   });
 
