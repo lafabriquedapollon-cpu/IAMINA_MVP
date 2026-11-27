@@ -21,16 +21,16 @@ const _d1CredentialKey = 'iamina_d1_prf_credential_candidate_v1';
 const _tokenKey = 'iamina_native_access_token';
 const _bindingKey = 'iamina_native_account_binding_v1';
 const _credential = AppLockCredential(
-  credentialId: 'fixture-credential',
-  publicKeySpki: 'fixture-public-key',
+  credentialId: 'AQIDBA',
+  publicKeySpki: 'BQYHCA',
   rpId: 'patient.example',
   origin: 'https://patient.example',
   signCount: 4,
 );
 
 const _d1Credential = AppLockCredential(
-  credentialId: 'dedicated-d1-fixture',
-  publicKeySpki: 'dedicated-d1-public-key',
+  credentialId: 'CQoLDA',
+  publicKeySpki: 'DQ4PEA',
   rpId: 'patient.example',
   origin: 'https://patient.example',
   signCount: 2,
@@ -922,8 +922,8 @@ void main() {
   test('B2b.1 same legacy credential or public key cannot provision candidate', () async {
     for (final shared in <AppLockCredential>[
       _credential,
-      const AppLockCredential(credentialId: 'different-id',
-          publicKeySpki: 'fixture-public-key', rpId: 'patient.example',
+      const AppLockCredential(credentialId: 'ERITFA',
+          publicKeySpki: 'BQYHCA', rpId: 'patient.example',
           origin: 'https://patient.example', signCount: 2),
     ]) {
       FlutterSecureStorage.setMockInitialValues({
@@ -966,6 +966,25 @@ void main() {
     expect(f.authenticator.calls, 0);
     expect(AppLockCredential.decode((await store.read(key: _credentialKey))!).signCount, 900);
     await session.retire();
+  });
+
+  test('B2b.1 ambiguous legacy encoding fails closed before candidate assertion', () async {
+    const ambiguous = AppLockCredential(
+      credentialId: 'CQoLDA==', publicKeySpki: 'BQYHCA',
+      rpId: 'patient.example', origin: 'https://patient.example', signCount: 4,
+    );
+    FlutterSecureStorage.setMockInitialValues({
+      _credentialKey: ambiguous.encode(), _requiredKey: 'required',
+      _d1CredentialKey: _d1Credential.encode(),
+    });
+    final f = _Fixture();
+    final prf = _Prf();
+    await f.start(prf: prf);
+    expect(f.lock.recoveryRequired, isTrue);
+    final backend = _RuntimeBackend()..takePrf = true;
+    await expectLater(D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit(), _refusal);
+    expect(prf.calls, 0);
+    expect(backend.calls, 0);
   });
 
 }

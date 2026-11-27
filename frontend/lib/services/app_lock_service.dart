@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -202,6 +203,24 @@ class AppLockService extends ChangeNotifier {
   bool get recoveryRequired => _recoveryRequired;
   bool get needsSetup => _initialized && !_configured && !_explicitlySkipped && !_recoveryRequired;
 
+  // Enrollment emits unpadded canonical base64url. Reject ambiguity
+  // before comparing identities; the old verifier accepts padded forms.
+  static bool _canonicalD1Field(String value) {
+    if (value.isEmpty || value.length > 8192 ||
+        !RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(value)) return false;
+    try {
+      return base64Url.encode(base64Url.decode(base64Url.normalize(value)))
+          .replaceAll('=', '') == value;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static bool _canonicalD1Credential(AppLockCredential credential) =>
+      _canonicalD1Field(credential.credentialId) &&
+      _canonicalD1Field(credential.publicKeySpki) &&
+      credential.signCount <= 0xffffffff;
+
   Future<void> initialize() async {
     _retireAdmission();
     if (_disposed || _proofInFlight) {
@@ -226,12 +245,13 @@ class AppLockService extends ChangeNotifier {
           throw const AppLockException('vault_prf_provisioning_required');
         }
         final credential = AppLockCredential.decode(raw);
-        if (credential.signCount > 0xffffffff) {
+        if (!_canonicalD1Credential(credential)) {
           throw const AppLockException('vault_prf_provisioning_required');
         }
         if (legacyRaw != null && legacyRaw.isNotEmpty) {
           final legacy = AppLockCredential.decode(legacyRaw);
-          if (legacy.credentialId == credential.credentialId ||
+          if (!_canonicalD1Credential(legacy) ||
+              legacy.credentialId == credential.credentialId ||
               legacy.publicKeySpki == credential.publicKeySpki) {
             throw const AppLockException('vault_prf_provisioning_required');
           }
