@@ -122,6 +122,7 @@ class _ProbeAuthenticator implements AppLockAuthenticator {
 
 AuthService? _boundAuth;
 AppLockService? _boundLock;
+D1VaultAdmissionGuard? _boundGuard;
 
 Future<void> _boundLogin(int owner) async {
   _require(_owners.contains(owner), 'Synthetic owner required');
@@ -154,6 +155,7 @@ Future<JSFunction> _boundProof(int owner) async {
   final lock = _boundLock!;
   final ticket = await lock.issueVaultAdmissionProof();
   final guard = lock.consumeVaultAdmissionProof(ticket, owner: owner);
+  _boundGuard = guard;
   final adapter = D1AdmissionGuardAdapter(guard);
   return ((JSString phase, JSNumber id, JSNumber epoch, JSFunction? callback) {
     final o = id.toDartDouble, e = epoch.toDartDouble;
@@ -1025,6 +1027,7 @@ void main() {
           auth.verifiedNativeAdmissionGeneration == binding.identityGeneration &&
           AuthService.authEpoch == binding.epoch &&
           _boundLock?.isUnlocked == true &&
+          _boundGuard?.checkSession(binding.owner, binding.epoch) == true &&
           PatientVaultScope.nativeDjango(binding.owner).databaseName == binding.vault;
     }
     Future<Map<String, dynamic>> call(String action, Map<String, Object?> args) async {

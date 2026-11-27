@@ -2126,12 +2126,10 @@ UI_MOUNT = r"""async (arabic)=>{
         const target=args.owner;
         await window.d1BoundLogin(target);check(g);
         const proof=await window.d1BoundProof(target);check(g);
-        const authority=(phase,id,epoch,callback)=>proof(phase,id,epoch,phase==='watch'?()=>{
-          try{if(g===generation)clear();}finally{callback();}
-        }:callback);
         const epoch=window.d1BoundEpoch(), identityGeneration=window.d1BoundIdentityGeneration();
         if(!Number.isSafeInteger(identityGeneration)||identityGeneration<0)throw Error('Identity required');
-        const session=await api.admitBoundClinical(target,epoch,authority,secrets.get(target));
+        const session=await api.admitBoundClinical(target,epoch,proof,secrets.get(target),
+          ()=>{if(g===generation)lock();});
         if(g!==generation){await session.retire();throw Error('UI authority retired');}
         active=session;
         binding=Object.freeze({owner:target,epoch,identityGeneration,session:args.session,
@@ -2732,6 +2730,9 @@ _H2_MOUNT_WRAPPER = r"""
       mode=value;
     },
     ready:()=>savedB!==null,
+    // Test-only synthetic fixture credential, transferred by the harness
+    // to an independent document; never print or persist this value.
+    replacementSecret:()=>secrets.get(900002),
     held:()=>held&&pending!==null,
     delivered:()=>delivered,
     release:()=>{if(pending===null)throw Error('No held ACK');const resume=pending;pending=null;resume();}
@@ -2847,13 +2848,47 @@ def exercise_h2_ui(browser_type, profile, locale, origin):
         expect(page.get_by_text("7.83 mmol/L",exact=True)).to_be_visible(timeout=20000)
         expect(page.get_by_text("8.2 mmol/L",exact=True)).to_have_count(0)
         shot("A-readmitted")
-        click("Verrouiller","قفل")
+        stage="cross-owner-delete-dialog"
+        click("Supprimer","حذف")
+        expect(text("Confirmer la suppression","تأكيد الحذف")).to_be_visible()
+        stage="cross-owner-fence-replacement"
+        # A different document acquires a real committed B lease; do not
+        # invoke a lock or clinical operation in the old UI.
+        secret=page.evaluate("window.__h2Fixture.replacementSecret()")
+        second=ctx.new_page()
+        second.on("pageerror",lambda error: errors.append(str(error)[:300]))
+        second.goto(origin,wait_until="domcontentloaded")
+        second.wait_for_function("typeof window.d1BoundProof === 'function'",timeout=60000)
+        assert second.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secret})==2
+        page.bring_to_front()
         locked()
+        expect(text("Confirmer la suppression","تأكيد الحذف")).to_have_count(0)
+        expect(page.locator('[flt-semantics-identifier="evidence-value"]')).to_have_count(0)
+        assert second.evaluate("window.d1CrossSession.inspect()")["revision"]==2
+        assert second.evaluate(I5_CROSS_FENCE)==900002
+        shot("cross-owner-retired")
+        assert second.evaluate("window.d1CrossSession.retire()") is True
+        stage="same-owner-fence-replacement"
+        click("Ouvrir profil B","فتح الملف B")
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        # Even the same authenticated owner with a new durable lease must
+        # retire the previous visible session. No old-tab operation.
+        assert second.evaluate(I5_CROSS_OPEN,{"owner":900002,"secret":secret})==2
+        page.bring_to_front()
+        locked()
+        assert second.evaluate("window.d1CrossSession.inspect()")["revision"]==2
+        assert second.evaluate(I5_CROSS_FENCE)==900002
+        shot("same-owner-retired")
+        assert second.evaluate("window.d1CrossSession.retire()") is True
+        secret=None
+        second.close()
         stage="final-egress"
         assert not blocked and not errors
         return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
                 "viewport":[width,height],"wrongOwnerRefused":True,"lateAckSuppressed":True,
-                "durableReadmission":True,"blockedRequests":0,"pageErrors":0,"frames":frames,"result":"PASS"}
+                "durableReadmission":True,"crossOwnerUiRetired":True,"sameOwnerUiRetired":True,
+                "deleteDialogCleared":True,"newLeasePreserved":True,
+                "blockedRequests":0,"pageErrors":0,"frames":frames,"result":"PASS"}
     except Exception as error:
         try:
             page.screenshot(path=str(proof/f"h2-web-{ENGINE}-{locale}-failure.png"),timeout=5000)
@@ -2891,7 +2926,7 @@ def run_h2_ui():
                 server.shutdown()
                 (proof/f"h2-web-{ENGINE}-matrix.json").write_text(json.dumps(records))
     assert len(records)==2 and all(r["result"]=="PASS" for r in records),"H2 Web adversarial matrix failed"
-    print("H2_WEB_PASS 2/2 scenarios=4/4",flush=True)
+    print("H2_WEB_PASS 2/2 scenarios=8/8",flush=True)
 
 
 if __name__=="__main__":

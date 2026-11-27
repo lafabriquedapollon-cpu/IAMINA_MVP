@@ -599,17 +599,23 @@ export async function importScopedArchive(owner,epoch,proof,phrase,manifest,tran
 // Dart probe from a real consumed AppLockService ticket, not syntheticProof.
 // JS within a compromised origin could forge callbacks: this is NOT a
 // production security boundary. Only existing synthetic checkpoints qualify.
-export async function admitBound(owner,epoch,authority,phrase,{beforeLease,afterLease}={}){
+export async function admitBound(owner,epoch,authority,phrase,{beforeLease,afterLease,onRetired}={}){
   require(owners.has(owner)&&Number.isSafeInteger(epoch)&&epoch>0&&
     typeof authority==='function','Bound authority required');
   const check=phase=>require(authority(phase,owner,epoch,null)===true,'Bound authority retired');
+  require(onRetired===undefined||typeof onRetired==='function','Invalid retirement listener');
   check('claim');
   requirePossessionSecret(phrase);
   let bytes,session,retirement,stopMonitor,retired=false;
   const revoke=()=>{
+    const first=!retired;
     retired=true;
     stopMonitor?.();
     session?.retireLocal();
+    // Notify once for *every* retirement source, including durable fence
+    // replacement and read errors. A reentrant lock cannot resurrect the
+    // handle or notify twice. Listener failure cannot prevent durable CAS.
+    if(first){try{onRetired?.();}catch(_){/* authority already retired */}}
     if(!retirement)return Promise.resolve(false);
     return retryRetirement(retirement);
   };
@@ -688,8 +694,11 @@ export async function admitBound(owner,epoch,authority,phrase,{beforeLease,after
 
 // Isolated clinical-shaped entry point. The legacy admitBound export is
 // retained solely for synthetic fault injection and independent audit.
-export async function admitBoundClinical(owner,epoch,authority,phrase){
-  const internal=await admitBound(owner,epoch,authority,phrase);
+export async function admitBoundClinical(owner,epoch,authority,phrase,onRetired){
+  // Internal synthetic host observer only: no admission authority or test
+  // hooks are added to the clinical operation facade.
+  require(onRetired===undefined||typeof onRetired==='function','Invalid retirement listener');
+  const internal=await admitBound(owner,epoch,authority,phrase,{onRetired});
   try {
     return createClinicalSession(internal,()=>internal.revocationStatus()==='active'&&
       authority('session',owner,epoch,null)===true);
