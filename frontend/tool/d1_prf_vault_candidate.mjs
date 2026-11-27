@@ -38,6 +38,14 @@ const validEvidence=e=>sameKeys(e,['uuid','originalValue','unit','provenance'])&
 export function createPrfVault({lookup,fixtureProvision=false}) {
   const store=createAdmissionStore(DB);
   const leases=new WeakMap();
+  // Browser timers bound observable waits while JS is scheduled. A suspended
+  // browser cannot execute cleanup until resumed; pending checks still fence
+  // every continuation. Never interpret timeout as a durable ACK.
+  const bounded=(work,onTimeout,ms=5000)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{try{onTimeout();}finally{reject(fail());}},ms);
+    Promise.resolve(work).then(value=>{clearTimeout(timer);resolve(value);},
+      error=>{clearTimeout(timer);reject(error);});
+  });
   const getEntry=token=>{const e=lookup(token);require(e&&e.key&&owners.has(e.owner));return e;};
   const local=(l,sessionOnly=false)=>{
     require(!l.retired&&lookup(l.possession)===l.entry);
@@ -90,17 +98,36 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
       return true;
     } catch (_) {throw fail();}
   }
-  async function retireInternal(l) {
+  function retireInternal(l) {
     l.retired=true;
     l.key=null;
     l.entry.key=null;
-    if(!l.fence)return;
-    await store.transaction(l.identity.owner,true,(_r,f,db)=>{
-      require(validFence(f));
-      if(sameFence(f,l.fence))db.put({...f,active:false},'fence');
-    });
+    // An in-flight write sets l.fence in the transaction callback BEFORE
+    // the commit ACK; a queued retirement follows that transaction.
+    if(!l.fence)return Promise.resolve(true);
+    if(!l.retirement){
+      l.retirement=store.transaction(l.identity.owner,true,(_r,f,db)=>{
+        require(validFence(f));
+        if(sameFence(f,l.fence))db.put({...f,active:false},'fence');
+        else require(!f||f.acquisitionId!==l.fence.acquisitionId||f.active===false);
+        return true;
+      }).catch(error=>{l.retirement=null;throw error;});
+    }
+    return l.retirement;
   }
-  async function openLease(token,identityJson,pending,session) {
+  function startRetire(l){
+    const work=retireInternal(l);
+    work.catch(()=>{}); // caller may inspect/retry via waitRevocation
+    return work;
+  }
+  function revokeEntry(entry){
+    if(entry.lease)startRetire(entry.lease);
+  }
+  async function waitRevocation(entry){
+    if(!entry.lease)return true;
+    return bounded(retireInternal(entry.lease),()=>{});
+  }
+  async function openLeaseWork(token,identityJson,pending,session) {
     let l;
     try {
       const entry=getEntry(token),identity=Object.freeze(JSON.parse(identityJson));
@@ -115,8 +142,9 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
         check();require(validFence(f)&&validRecord(r,identity.owner,entry.binding));return r;
       });
       check();
-      l.key=await unwrap(record,entry);
-      check();
+      const unwrapped=await unwrap(record,entry);
+      check(); // do not republish a key after a late crypto result
+      l.key=unwrapped;
       await decode(record,l.key); // authenticate before publishing durable authority
       check();
       l.record=record;
@@ -133,7 +161,21 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
       leases.set(lease,l);
       return lease;
     } catch (_) {
-      if(l)try{await retireInternal(l);}catch(_cleanup){/* fail closed; successor CAS can replace fence */}
+      if(l)startRetire(l);
+      throw fail();
+    }
+  }
+  async function openLease(token,identityJson,pending,session){
+    const entry=lookup(token);
+    // No cleanup of a preexisting lease when a duplicate request is refused.
+    const old=entry?.lease;
+    try{return await bounded(openLeaseWork(token,identityJson,pending,session),()=>{
+      if(entry?.lease&&entry.lease!==old)startRetire(entry.lease);
+    });}catch(_){
+      if(entry?.lease&&entry.lease!==old){
+        const l=entry.lease;
+        try{await bounded(retireInternal(l),()=>{});}catch(_cleanup){}
+      }
       throw fail();
     }
   }
@@ -146,10 +188,11 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
     local(l,sessionOnly);return record;
   }
   async function verifyLease(token) {
-    try {const l=leases.get(token);require(l);await current(l);return true;}
-    catch (_) {return false;}
+    const l=leases.get(token);
+    try {require(l);await bounded(current(l),()=>startRetire(l));return true;}
+    catch (_) {if(l)startRetire(l);return false;}
   }
-  async function readEvidence(token,id) {
+  async function readEvidenceWork(token,id) {
     const l=leases.get(token);
     try {
       require(l&&typeof id==='string'&&uuidPattern.test(id));
@@ -160,14 +203,20 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
       local(l,true);
       return JSON.stringify(data.uuid===id?data:null);
     } catch (_) {
-      if(l)try{await retireInternal(l);}catch(_cleanup){}
+      if(l)startRetire(l);
       throw fail();
     }
   }
+  async function readEvidence(token,id) {
+    const l=leases.get(token);
+    try {require(l);return await bounded(readEvidenceWork(token,id),()=>startRetire(l));}
+    catch (_) {if(l)startRetire(l);throw fail();}
+  }
   async function retireLease(token) {
-    try {const l=leases.get(token);require(l);await retireInternal(l);return true;}
+    try {const l=leases.get(token);require(l);await bounded(retireInternal(l),()=>{});return true;}
     catch (_) {throw fail();}
   }
   return Object.freeze({openLease,verifyLease,readEvidence,retireLease,
+    revokeEntry,waitRevocation,
     ...(fixtureProvision?{provisionFixture}:{})});
 }

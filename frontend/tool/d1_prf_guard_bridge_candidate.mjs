@@ -7,6 +7,7 @@ import {createPrfVault} from './d1_prf_vault_candidate.mjs';
 
 export function createPrfBridge({fixtureProvision=false}={}) {
   const keys = new WeakMap();
+  const retired = new WeakMap();
   const require = value => {if(!value) throw new Error('D1_PRF_POSSESSION_REFUSED');};
   const isLive = token => !!token && typeof token === 'object' && !!keys.get(token)?.key;
   const revoke = token => {
@@ -14,7 +15,8 @@ export function createPrfBridge({fixtureProvision=false}={}) {
     if(!entry)return;
     keys.delete(token);
     entry.key=null;
-    if(entry.lease){entry.lease.retired=true;entry.lease.key=null;}
+    retired.set(token,entry);
+    vault.revokeEntry(entry);
   };
   async function acquire(credentialJson, owner, isPending, acquisitionId=null) {
     let token;
@@ -36,7 +38,13 @@ export function createPrfBridge({fixtureProvision=false}={}) {
     }
   }
   const vault=createPrfVault({lookup:token=>keys.get(token),fixtureProvision});
-  return Object.freeze({acquire,isLive,revoke,...vault});
+  const waitRevocation=async token=>{
+    const entry=retired.get(token);
+    require(entry);
+    return vault.waitRevocation(entry);
+  };
+  const {revokeEntry,waitRevocation:internalWait,...port}=vault;
+  return Object.freeze({acquire,isLive,revoke,waitRevocation,...port});
 }
 export function installPrfBridge({fixtureProvision=false}={}) {
   if(Object.hasOwn(globalThis,'iaminaD1PrfBridge'))

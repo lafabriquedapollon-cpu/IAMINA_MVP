@@ -1,5 +1,6 @@
 // Isolated Web candidate. No host imports or script installation in main.
 // B2b must compose the exact bridge with the durable vault in the same realm.
+import 'dart:async';
 import 'dart:js_interop';
 import 'dart:convert';
 import 'app_lock_authenticator.dart';
@@ -58,8 +59,18 @@ final class D1WebPrfAcquirer implements D1PrfAcquirer {
     _WebPossession? possession;
     try {
       if (!isPending()) throw const AppLockException('vault_prf_possession_refused');
-      final pending = (() => isPending().toJS).toJS;
-      final token = await _acquire(credential.encode().toJS, owner.toJS, pending, acquisitionId?.toJS).toDart;
+      // A suspended authenticator cannot keep AppLock proof-in-flight forever.
+      // The callback invalidates any late JS result before releasing the wait.
+      var expired = false;
+      final pending = (() => (!expired && isPending()).toJS).toJS;
+      final work = _acquire(credential.encode().toJS, owner.toJS, pending, acquisitionId?.toJS).toDart;
+      final token = await work.timeout(const Duration(seconds: 25),
+        onTimeout: () {
+          expired = true;
+          unawaited(work.then<void>((late) { _revoke(late); },
+              onError: (Object _, StackTrace __) {}));
+          throw const AppLockException('vault_prf_possession_refused');
+        });
       possession = _WebPossession(token);
       if (!isPending() || !possession.isLive) {
         throw const AppLockException('vault_prf_possession_refused');

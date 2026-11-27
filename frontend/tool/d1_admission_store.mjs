@@ -9,9 +9,10 @@ export function createAdmissionStore(DB) {
     return new Promise((resolve,reject)=>{
       const r=indexedDB.open(DB,1);
       r.onupgradeneeded=()=>r.result.createObjectStore(STORE);
-      r.onsuccess=()=>{const db=r.result;db.onversionchange=()=>db.close();resolve(db);};
+      let blocked=false;
+      r.onsuccess=()=>{const db=r.result;if(blocked){db.close();return;}db.onversionchange=()=>db.close();resolve(db);};
       r.onerror=()=>reject(new Error('Admission store unavailable'));
-      r.onblocked=()=>reject(new Error('Admission store blocked'));
+      r.onblocked=()=>{blocked=true;reject(new Error('Admission store blocked'));};
     });
   }
   // Read owner and global fence in one transaction. Callback must be synchronous.
