@@ -215,11 +215,11 @@ class DashboardTrendPainter extends CustomPainter {
           .withValues(alpha: .08)
       ..strokeWidth = 1;
     final axisStyle = TextStyle(
-      fontSize: 9.5,
+      fontSize: 11.5,
+      fontWeight: FontWeight.w600,
       fontFamily: locale.toLowerCase().startsWith('ar') ? 'NotoSansArabic' : 'Inter',
       fontFamilyFallback: kOfflineFontFallbacks,
-      color: (isDark ? Colors.white : const Color(0xFF42655D))
-          .withValues(alpha: .78),
+      color: isDark ? Colors.white : const Color(0xFF23483E),
     );
 
     final ticks = _axisTicks(minY, maxY);

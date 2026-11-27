@@ -288,6 +288,8 @@ void main() {
     expect(offsets,[10]);
     expect(locks,0);
     expect(find.text('Page 2'),findsOneWidget);
+    expect(find.text('Mesures 11–20'),findsOneWidget);
+    expect(find.text('Dernière page'),findsNothing);
     expect(find.text('110.0 mmol/L'),findsOneWidget);
     expect(find.text('100.0 mmol/L'),findsNothing);
     await navigate('evidence-prev',0,7);
@@ -359,11 +361,45 @@ void main() {
     }
     await mount((_)=>'2026-11-27T12:15:45+01:00');
     expect(find.text('2026-11-27T12:15:45+01:00'),findsOneWidget);
+    expect(find.text('27/11/2026 · 12:15:45'),findsOneWidget);
     await mount((_)=>'2026-11-27T12:15:45+00:00'); // wrong UTC instant
     expect(find.text('2026-11-27T11:15:45+00:00'),findsOneWidget);
+    expect(find.text('27/11/2026 · 11:15:45'),findsOneWidget);
     expect(find.text('2026-11-27T12:15:45+00:00'),findsNothing);
     await tester.pumpWidget(const SizedBox());revoke.dispose();
   });
+
+  for (final arabic in [false,true]) {
+    testWidgets('H6 readable date and locked refusal arabic=$arabic', (tester) async {
+      tester.view.devicePixelRatio=1;
+      tester.view.physicalSize=const Size(390,1000);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final revoke=ValueNotifier<int>(0);
+      final instant=DateTime.utc(2026,11,27,11,15,45).millisecondsSinceEpoch~/1000;
+      var refuse=false;
+      await tester.pumpWidget(MaterialApp(home:EvidenceUiCandidate(
+        arabic:arabic,revoke:revoke,lock:(){},isCurrent:current,
+        timestampProjection:(_)=>'2026-11-27T12:15:45+01:00',
+        call:(action,args) async {
+          if(refuse) throw StateError('synthetic refusal');
+          return result(args,1,[{...row(7.83),'loggedAtSeconds':instant}]);
+        })));
+      final open=find.text(arabic?'فتح الملف A':'Ouvrir profil A');
+      await tester.tap(open);await tester.pumpAndSettle();
+      expect(find.text('27/11/2026 · 12:15:45'),findsOneWidget);
+      expect(find.text('2026-11-27T12:15:45+01:00'),findsOneWidget);
+      revoke.value++;await tester.pumpAndSettle();
+      refuse=true;
+      await tester.tap(open);await tester.pumpAndSettle();
+      final message=find.text(arabic?'تم رفض الإدخال أو العملية.':'Saisie ou opération refusée.');
+      expect(message,findsOneWidget);
+      expect(tester.widget<Text>(message).style?.fontWeight,FontWeight.w600);
+      expect(find.text('7.83 mmol/L'),findsNothing);
+      expect(tester.takeException(),isNull);
+      await tester.pumpWidget(const SizedBox());revoke.dispose();
+    });
+  }
 
   // H5 complementary parser coverage. A single comma is decimal, never grouping.
   final validCases = <String,double>{

@@ -196,6 +196,30 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
     return formatEvidenceTimestamp(seconds,local:false);
   }
 
+  // Keep the exact validated ISO projection visible, including its offset.
+  Widget _dateDisplay(BuildContext context, int seconds) {
+    final iso = _time(seconds);
+    final readable = '${iso.substring(8,10)}/${iso.substring(5,7)}/${iso.substring(0,4)}'
+        ' · ${iso.substring(11,19)}';
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(readable, textDirection: TextDirection.ltr,
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+      Text(iso, textDirection: TextDirection.ltr,
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurface)),
+    ]);
+  }
+
+  Widget _refusal(BuildContext context, String identifier) => Semantics(
+    identifier: identifier, liveRegion: true,
+    child: Container(margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: Theme.of(context).colorScheme.errorContainer,
+        borderRadius: BorderRadius.circular(12)),
+      child: Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.'),
+        style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer,
+          fontWeight: FontWeight.w600))));
+
   @override
   void initState() {
     super.initState();
@@ -392,7 +416,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                   ]),
                   const SizedBox(height: 12),
                   if (_editingSeconds != null)
-                    Text(_time(_editingSeconds!), textDirection: TextDirection.ltr)
+                    _dateDisplay(context, _editingSeconds!)
                   else ...[
                     TextButton(key: const Key('evidence-time-toggle'), onPressed: _busy ? null : () {
                       setState(() {
@@ -414,13 +438,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                       visualDensity: VisualDensity.standard,
                       tapTargetSize: MaterialTapTargetSize.padded),
                     child: Text(tr('Enregistrer', 'حفظ')))),
-                  if (_error) Semantics(identifier: 'evidence-input-error', liveRegion: true,
-                    child: Container(margin: const EdgeInsets.only(top: 8),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(color: Theme.of(context).colorScheme.errorContainer,
-                        borderRadius: BorderRadius.circular(12)),
-                      child: Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.'),
-                        style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer)))),
+                  if (_error) _refusal(context, 'evidence-input-error'),
                   if (_editing != null) TextButton(onPressed: _busy ? null : () => setState(() {
                     _editing = null; _unit = null; _value.clear();
                     _editingSeconds=null; _customTime=false; _timestamp.clear();
@@ -432,7 +450,12 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                 style: Theme.of(context).textTheme.titleLarge),
               if (_rows.isEmpty) Text(tr('Aucune mesure explicite', 'لا توجد قياسات صريحة')),
               if (_offset>0 || _nextOffset!=null) ...[
-                Text(tr('Page', 'صفحة')+' '+(_offset~/evidencePageSize+1).toString()),
+                Text(tr('Page', 'صفحة')+' '+(_offset~/evidencePageSize+1).toString(),
+                  style: Theme.of(context).textTheme.titleSmall),
+                Text(tr('Mesures ${_offset+1}–${_offset+_rows.length}',
+                  'القياسات ${_offset+1}–${_offset+_rows.length}'),
+                  style: Theme.of(context).textTheme.bodyMedium),
+                if (_nextOffset==null) Text(tr('Dernière page', 'الصفحة الأخيرة')),
                 Wrap(spacing:8,children:[
                   TextButton(key:const Key('evidence-prev'),onPressed:_busy||_editing!=null||_offset==0?null:()=>_perform('page',{
                     'revision':_revision,'offset':_offset-evidencePageSize,
@@ -449,8 +472,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                     style: Theme.of(context).textTheme.titleMedium),
                   Text('${row['displayMgDl']} mg/dL · ${row['displayMmolL']} mmol/L',
                     textDirection: TextDirection.ltr),
-                  Text(_time(row['loggedAtSeconds'] as int),
-                    textDirection: TextDirection.ltr, style:Theme.of(context).textTheme.bodyMedium),
+                  _dateDisplay(context, row['loggedAtSeconds'] as int),
                   const SizedBox(height: 8),
                   Wrap(spacing: 12, runSpacing: 4, children: [
                     TextButton(style: TextButton.styleFrom(minimumSize: const Size(48,48), visualDensity: VisualDensity.standard), onPressed: _busy ? null : () {
@@ -485,7 +507,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                 ]),
               )),
             ],
-            if (_owner == null && _error) Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.')),
+            if (_owner == null && _error) _refusal(context, 'evidence-locked-error'),
             if (_busy) const LinearProgressIndicator(),
           ]),
         ))),

@@ -763,12 +763,12 @@ class _LegendItem extends StatelessWidget {
           Flexible(
             child: Text(
               label,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
+              softWrap: true,
               style: TextStyle(
-                fontSize: 10.2,
-                height: 1.25,
-                color: AminaVisualLanguage.secondary(context),
+                fontSize: 12,
+                height: 1.3,
+                fontWeight: FontWeight.w500,
+                color: AminaVisualLanguage.primaryText(context),
               ),
             ),
           ),

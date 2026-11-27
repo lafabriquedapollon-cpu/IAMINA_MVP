@@ -339,6 +339,32 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   }, timeout: const Timeout(Duration(seconds: 60)));
 
+  testWidgets('H6 legend text readable and untruncated FR/AR at Web widths', (tester) async {
+    addTearDown(() async { await tester.binding.setSurfaceSize(null); });
+    for (final locale in [const Locale('fr'),const Locale('ar')]) {
+      for (final width in [390.0,430.0,1280.0]) {
+        await tester.binding.setSurfaceSize(Size(width,844));
+        await tester.pumpWidget(MaterialApp(locale:locale,
+          localizationsDelegates:AppLocalizations.localizationsDelegates,
+          supportedLocales:AppLocalizations.supportedLocales,
+          home:const Scaffold(body:Padding(padding:EdgeInsets.all(16),
+            child:DashboardTrendLegend(unit:'mg/dL',low:null,high:null,
+              dailySummary:true,medicationCount:1)))));
+        await tester.pumpAndSettle();
+        final legend=find.byType(DashboardTrendLegend);
+        final labels=find.descendant(of:legend,matching:find.byType(Text));
+        expect(labels,findsNWidgets(4));
+        for (final label in tester.widgetList<Text>(labels)) {
+          expect(label.style?.fontSize,greaterThanOrEqualTo(12));
+          expect(label.maxLines,isNull);
+          expect(label.overflow,isNull);
+        }
+        expect(tester.takeException(),isNull);
+      }
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('actual section computes sample mean and never authorizes target', (tester) async {
     // Construct and open the DB inside the same real-async zone as seeding.
     // A DB constructed in FakeAsync can leave its internal completers there
