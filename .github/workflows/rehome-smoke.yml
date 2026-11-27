@@ -1372,13 +1372,14 @@ jobs:
             flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
             cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs tool/d1_admission_store.mjs tool/d1_clinical_session_candidate.mjs "$RUNNER_TEMP/d1-runtime-web/"
           fi
-      - name: Prepare licensed local engine fallback fonts (synthetic runtime only)
+      - name: Prepare licensed local engine fallback fonts (both isolated Web targets)
         if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/d1-font-venv"
           "$RUNNER_TEMP/d1-font-venv/bin/python" -m pip install --only-binary=:all: fonttools==4.63.0 brotli==1.2.0
           "$RUNNER_TEMP/d1-font-venv/bin/python" scripts/prepare_d1_runtime_fonts.py "$RUNNER_TEMP/d1-runtime-web" frontend/assets/fonts
+          "$RUNNER_TEMP/d1-font-venv/bin/python" scripts/prepare_d1_runtime_fonts.py frontend/build/web frontend/assets/fonts
       - name: Package exact source and synthetic build digest
         id: pack
         run: |
@@ -1498,6 +1499,12 @@ jobs:
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then export D1_CUTOVER_PROBE=1; fi
           D2_BROWSER_TARGET=chromium "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+      - name: H4 local font artifact and WebSocket refusal — chromium
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/h4_browser_guard_probe.py chromium frontend/build/web "$RUNNER_TEMP/d1-runtime-web"
       - name: D1 actual Drift encrypted checkpoint — chromium
         if: ${{ (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence') }}
         timeout-minutes: 12
@@ -1714,6 +1721,12 @@ jobs:
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install webkit
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then export D1_CUTOVER_PROBE=1; fi
           "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+      - name: H4 local font artifact and WebSocket refusal — webkit
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/h4_browser_guard_probe.py webkit frontend/build/web "$RUNNER_TEMP/d1-runtime-web"
       - name: D1 actual Drift encrypted checkpoint — webkit
         if: ${{ (github.head_ref == 'phase1/integration-web' || github.head_ref == 'phase1/ci-opt1-benchmark' || github.head_ref == 'phase2/d1-d5-convergence') }}
         timeout-minutes: 12

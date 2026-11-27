@@ -9,6 +9,7 @@ from pathlib import Path
 import threading
 
 from playwright.sync_api import sync_playwright, expect
+from h4_websocket_guard import attach_websocket_guard
 from PIL import Image
 
 WEB = Path("frontend/build/web").resolve()
@@ -121,6 +122,7 @@ def run():
                                             blocked.append(url.split("?")[0])
                                             r.abort()
                                     ctx.route("**/*", route)
+                                    attach_websocket_guard(ctx, blocked)
                                     if cutover:
                                         ctx.add_init_script("""(() => {
                                           window.__d1StorageAttempts = [];

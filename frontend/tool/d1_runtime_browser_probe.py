@@ -11,6 +11,7 @@ import tempfile
 import threading
 
 from playwright.sync_api import sync_playwright
+from h4_websocket_guard import attach_websocket_guard
 
 WEB = Path(os.environ["D1_RUNTIME_WEB"]).resolve()
 ENGINE = os.environ["D1_RUNTIME_ENGINE"]
@@ -42,6 +43,7 @@ def open_context(browser_type, profile, locale, origin, extra_origin=None, trace
             if trace is not None:
                 trace("blocked", r.request)
     context.route("**/*", route)
+    attach_websocket_guard(context, blocked)
     page = context.pages[0] if context.pages else context.new_page()
     def page_error(error):
         errors.append(str(error)[:300])
