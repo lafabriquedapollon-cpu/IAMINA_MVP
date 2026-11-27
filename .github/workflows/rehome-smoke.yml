@@ -1380,6 +1380,15 @@ jobs:
           "$RUNNER_TEMP/d1-font-venv/bin/python" -m pip install --only-binary=:all: --require-hashes -r scripts/h4-font-requirements.txt
           "$RUNNER_TEMP/d1-font-venv/bin/python" scripts/prepare_d1_runtime_fonts.py "$RUNNER_TEMP/d1-runtime-web" frontend/assets/fonts
           "$RUNNER_TEMP/d1-font-venv/bin/python" scripts/prepare_d1_runtime_fonts.py frontend/build/web frontend/assets/fonts
+      - name: Disable custom PWA startup in isolated convergence artifacts only
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_prepare_h4_isolated_bootstrap.py -v
+          python3 scripts/prepare_h4_isolated_bootstrap.py frontend/build/web "$RUNNER_TEMP/d1-runtime-web" frontend/web/flutter_bootstrap.js
+          node --check frontend/build/web/flutter_bootstrap.js
+          node --check "$RUNNER_TEMP/d1-runtime-web/flutter_bootstrap.js"
+          git diff --exit-code -- frontend/web/flutter_bootstrap.js
       - name: Package exact source and synthetic build digest
         id: pack
         run: |

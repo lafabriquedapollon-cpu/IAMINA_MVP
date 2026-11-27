@@ -25,7 +25,7 @@ def service_worker_script_request(path, headers):
     pathname = unquote(urlsplit(path).path).replace("\\", "/").lower()
     return (headers.get("Service-Worker", "").strip().lower() == "script"
             or headers.get("Sec-Fetch-Dest", "").strip().lower() == "serviceworker"
-            or pathname.rsplit("/",1)[-1] in ("flutter_service_worker.js", "service-worker.js", "sw.js"))
+            or pathname.rsplit("/",1)[-1] in ("flutter_service_worker.js", "iamina_service_worker.js", "service-worker.js", "sw.js"))
 
 
 class NoServiceWorkerScripts:

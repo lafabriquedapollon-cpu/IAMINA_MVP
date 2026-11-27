@@ -32,6 +32,8 @@ def fonts(app, runtime):
             assert (root / name).read_bytes()[:4] == b"wOF2", "Invalid WOFF2 signature"
             assert "SIL OPEN FONT LICENSE" in (root / Path(name).parent / "OFL.txt").read_text().upper()
         bootstrap = (target / "flutter_bootstrap.js").read_text()
+        assert bootstrap.count("// H4_ISOLATED_QUALIFICATION_NO_SW_STARTUP") == 1
+        assert "registerIaminaServiceWorker" not in bootstrap and "iamina_service_worker.js?release_probe=" not in bootstrap
         assert bootstrap.count("fontFallbackBaseUrl:new URL('assets/engine-font-fallback/',document.baseURI).href") == 1
         inventories.append(files)
     assert inventories[0] == inventories[1], "App and runtime fallback assets differ"
