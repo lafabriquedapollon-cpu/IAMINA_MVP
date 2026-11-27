@@ -2693,8 +2693,211 @@ def run_h1_ui():
     print("H1_WEB_PASS 6/6",flush=True)
 
 
+
+# Fault injection exists only in this synthetic Playwright fixture.
+# Wrap the actual bridge AFTER genuine admission/read or durable mutation.
+_H2_MOUNT_ANCHOR = "window.d1MountEvidenceUi(call,lock,cb=>{retired=cb;},arabic);"
+_H2_MOUNT_WRAPPER = r"""
+  let mode='normal', savedB=null, pending=null, held=false, delivered=false;
+  const wrapper=async(action,json)=>{
+    const args=JSON.parse(json);
+    const selected=mode;
+    const raw=await call(action,json);
+    const response=JSON.parse(raw);
+    if(selected==='recordB'&&action==='insert'&&args.owner===900002){
+      if(response.binding.owner!==900002||response.rows.length!==1)
+        throw Error('H2 invalid B fixture');
+      savedB=response;mode='normal';
+    }
+    if(selected==='wrongOwner'&&action==='open'&&args.owner===900001){
+      if(!savedB||response.binding.owner!==900001)throw Error('H2 fixture unavailable');
+      mode='normal';
+      // Genuine B rows and B owner/vault, but current A correlation coordinates.
+      return JSON.stringify({...response,rows:savedB.rows,binding:{
+        ...response.binding,owner:savedB.binding.owner,vault:savedB.binding.vault}});
+    }
+    if(selected==='holdAck'&&action==='insert'&&args.owner===900001){
+      if(response.binding.owner!==900001||response.rows.length!==1||
+         response.revision!==args.revision+1)throw Error('H2 invalid durable ACK');
+      mode='normal';held=true;
+      await new Promise(resolve=>{pending=resolve;});
+      delivered=true;
+    }
+    return raw;
+  };
+  window.__h2Fixture=Object.freeze({
+    setMode:value=>{
+      if(!['recordB','wrongOwner','holdAck'].includes(value)||mode!=='normal')
+        throw Error('Invalid fixture mode');
+      mode=value;
+    },
+    ready:()=>savedB!==null,
+    held:()=>held&&pending!==null,
+    delivered:()=>delivered,
+    release:()=>{if(pending===null)throw Error('No held ACK');const resume=pending;pending=null;resume();}
+  });
+  window.d1MountEvidenceUi(wrapper,lock,cb=>{retired=cb;},arabic);
+"""
+assert UI_MOUNT.count(_H2_MOUNT_ANCHOR)==1
+H2_UI_MOUNT=UI_MOUNT.replace(_H2_MOUNT_ANCHOR,_H2_MOUNT_WRAPPER)
+
+
+def exercise_h2_ui(browser_type, profile, locale, origin):
+    from PIL import Image
+    from playwright.sync_api import expect
+    width,height=390,844
+    proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
+    frames=[]
+    stage="navigation"
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+    ar=locale=="ar-MA"
+    def text(fr,arabic):
+        return page.get_by_text(arabic if ar else fr,exact=True).first
+    def click(fr,arabic):
+        target=text(fr,arabic)
+        expect(target).to_be_visible(timeout=20000)
+        target.click(timeout=20000)
+    def control(identifier):
+        target=page.locator(f'[flt-semantics-identifier="{identifier}"]')
+        expect(target).to_have_count(1,timeout=15000)
+        expect(target).to_be_visible(timeout=15000)
+        return target
+    def semantics():
+        page.wait_for_selector("flutter-view, flt-glass-pane",timeout=60000)
+        placeholder=page.locator("flt-semantics-placeholder")
+        if placeholder.count():
+            placeholder.evaluate("(el)=>el.click()")
+    def locked():
+        expect(text("Coffre verrouillé","المخزن مقفل")).to_be_visible(timeout=20000)
+        expect(page.get_by_text("7.83 mmol/L",exact=True)).to_have_count(0)
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_have_count(0)
+    def enter(value):
+        field=control("evidence-value")
+        field.scroll_into_view_if_needed(timeout=10000)
+        bounds=field.bounding_box(timeout=10000)
+        assert bounds and bounds["width"]>0 and bounds["height"]>0
+        page.mouse.click(bounds["x"]+bounds["width"]/2,bounds["y"]+bounds["height"]/2)
+        native=page.locator("input:focus, textarea:focus")
+        expect(native).to_have_count(1,timeout=10000)
+        native.press("ControlOrMeta+a",timeout=10000)
+        native.press_sequentially(value,delay=60,timeout=10000)
+        expect(native).to_have_value(value,timeout=10000)
+        control("evidence-mmoll").click(timeout=10000)
+        control("evidence-save").click(timeout=10000)
+    def shot(name):
+        path=proof/f"h2-web-{ENGINE}-{locale}-{name}.png"
+        page.screenshot(path=str(path),animations="disabled",timeout=15000)
+        with Image.open(path) as im:
+            rgb=im.convert("RGB")
+            assert rgb.size==(width,height)
+            assert len(rgb.getcolors(width*height) or [])>50
+        frames.append({"file":path.name,"sha256":hashlib.sha256(path.read_bytes()).hexdigest()})
+    try:
+        page.set_viewport_size({"width":width,"height":height})
+        semantics()
+        stage="mount"
+        page.evaluate(H2_UI_MOUNT,ar)
+        semantics()
+        locked()
+        stage="prepare-real-B"
+        click("Ouvrir profil B","فتح الملف B")
+        expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
+        page.evaluate("window.__h2Fixture.setMode('recordB')")
+        enter("8.2")
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        assert page.evaluate("window.__h2Fixture.ready()") is True
+        shot("B-before")
+        click("Verrouiller","قفل")
+        locked()
+        stage="wrong-owner-response"
+        page.evaluate("window.__h2Fixture.setMode('wrongOwner')")
+        click("Ouvrir profil A","فتح الملف A")
+        expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_be_visible(timeout=20000)
+        locked()
+        expect(text("Profil B","الملف B")).to_have_count(0)
+        shot("wrong-owner-refused")
+        stage="reopen-real-A"
+        click("Ouvrir profil A","فتح الملف A")
+        expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
+        page.evaluate("window.__h2Fixture.setMode('holdAck')")
+        enter("7.83")
+        stage="durable-ack-held"
+        page.wait_for_function("window.__h2Fixture.held()",timeout=20000)
+        expect(page.get_by_text("7.83 mmol/L",exact=True)).to_have_count(0)
+        stage="revoke-and-switch"
+        page.evaluate("window.d1BoundLock()")
+        locked()
+        click("Ouvrir profil B","فتح الملف B")
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        expect(text("Profil B","الملف B")).to_be_visible()
+        stage="deliver-stale-ack"
+        page.evaluate("window.__h2Fixture.release()")
+        page.wait_for_function("window.__h2Fixture.delivered()",timeout=10000)
+        # Flush the promise delivery and Flutter render frames, then inspect.
+        page.evaluate("()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))")
+        page.wait_for_timeout(350)
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_be_visible()
+        expect(page.get_by_text("7.83 mmol/L",exact=True)).to_have_count(0)
+        expect(text("Profil B","الملف B")).to_be_visible()
+        shot("late-A-ack-B-isolated")
+        stage="readmit-A-durable"
+        click("Verrouiller","قفل")
+        locked()
+        click("Ouvrir profil A","فتح الملف A")
+        expect(page.get_by_text("7.83 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        expect(page.get_by_text("8.2 mmol/L",exact=True)).to_have_count(0)
+        shot("A-readmitted")
+        click("Verrouiller","قفل")
+        locked()
+        stage="final-egress"
+        assert not blocked and not errors
+        return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                "viewport":[width,height],"wrongOwnerRefused":True,"lateAckSuppressed":True,
+                "durableReadmission":True,"blockedRequests":0,"pageErrors":0,"frames":frames,"result":"PASS"}
+    except Exception as error:
+        try:
+            page.screenshot(path=str(proof/f"h2-web-{ENGINE}-{locale}-failure.png"),timeout=5000)
+        except Exception:
+            pass
+        return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                "stage":stage,"errorType":type(error).__name__,"blockedRequests":len(blocked),
+                "pageErrors":len(errors),"result":"FAIL"}
+    finally:
+        ctx.close()
+
+
+def run_h2_ui():
+    assert ENGINE in ("chromium","webkit")
+    assert os.environ["GITHUB_HEAD_REF"]=="phase2/d1-d5-convergence"
+    proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
+    proof.mkdir(parents=True,exist_ok=True)
+    records=[]
+    with tempfile.TemporaryDirectory(prefix="h2-ui-") as root:
+        with http.server.ThreadingHTTPServer(("127.0.0.1",0),Handler) as server:
+            threading.Thread(target=server.serve_forever,daemon=True).start()
+            origin=f"http://127.0.0.1:{server.server_port}"
+            try:
+                with sync_playwright() as pw:
+                    browser_type=getattr(pw,ENGINE)
+                    for locale in ("fr-FR","ar-MA"):
+                        try:
+                            record=exercise_h2_ui(browser_type,Path(root)/f"h2-{locale}",locale,origin)
+                        except Exception as error:
+                            record={"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                                    "stage":"navigation","errorType":type(error).__name__,"result":"FAIL"}
+                        records.append(record)
+                        print("H2_WEB "+json.dumps(record),flush=True)
+            finally:
+                server.shutdown()
+                (proof/f"h2-web-{ENGINE}-matrix.json").write_text(json.dumps(records))
+    assert len(records)==2 and all(r["result"]=="PASS" for r in records),"H2 Web adversarial matrix failed"
+    print("H2_WEB_PASS 2/2 scenarios=4/4",flush=True)
+
+
 if __name__=="__main__":
-    if os.environ.get("H1_RUNTIME_UI_ONLY")=="1":
+    if os.environ.get("H2_RUNTIME_UI_ONLY")=="1":
+        run_h2_ui()
+    elif os.environ.get("H1_RUNTIME_UI_ONLY")=="1":
         run_h1_ui()
     elif os.environ.get("D1_RUNTIME_UI_ONLY")=="1":
         run_evidence_ui()
