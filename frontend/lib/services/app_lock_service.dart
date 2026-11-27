@@ -31,9 +31,10 @@ final class D1VaultAdmissionProof {
   }
 
   void _revokePossession() {
-    if (_possession == null || _possessionRevoked) return;
+    final possession = _possession;
+    if (possession == null || _possessionRevoked) return;
     _possessionRevoked = true;
-    try { _possession?.revoke(); } catch (_) { /* authority already revoked */ }
+    try { possession.revoke(); } catch (_) { /* authority already revoked */ }
   }
 }
 
