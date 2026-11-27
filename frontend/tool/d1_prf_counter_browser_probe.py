@@ -1,12 +1,14 @@
 """Real IndexedDB counter CAS on isolated loopback; synthetic credentials only."""
 import http.server
 import json
-import mimetypes
 import os
 from pathlib import Path
 import tempfile
 import threading
 from playwright.sync_api import sync_playwright
+from urllib.parse import urlsplit
+from h4_egress_guard import NoServiceWorkerScripts, static_request_allowed, attach_direct_transport_guard, service_worker_script_request
+from h4_websocket_guard import attach_websocket_guard
 
 ROOT=Path(__file__).parent
 MODULES={name:(ROOT/name).read_bytes() for name in (
@@ -17,30 +19,33 @@ INTEROP=os.environ.get("D1_PRF_INTEROP_JS")
 if INTEROP:
     MODULES["d1-prf-interop.js"]=Path(INTEROP).read_bytes()
 
-class Handler(http.server.BaseHTTPRequestHandler):
+class Handler(NoServiceWorkerScripts,http.server.SimpleHTTPRequestHandler):
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,directory=str(Path(INTEROP).resolve().parent if INTEROP else ROOT),**kwargs)
+
+    def end_headers(self):
+        self.send_header("Cache-Control","no-store")
+        super().end_headers()
+
     def do_GET(self):
-        if self.path=="/":
-            data,kind=b"<!doctype html><title>PRF counter synthetic</title>","text/html"
-        elif self.path[1:] in MODULES:
-            data,kind=MODULES[self.path[1:]],"text/javascript"
-        elif INTEROP and self.path=="/flutter-runtime.html":
-            data,kind=b'<!doctype html><html><head><base href="/"></head><body><script src="/flutter_bootstrap.js" async></script></body></html>',"text/html"
-        elif INTEROP and self.path.startswith("/"):
-            root=Path(INTEROP).resolve().parent
-            asset=(root/self.path[1:].split("?")[0]).resolve()
-            if not asset.is_relative_to(root) or not asset.is_file():
-                self.send_error(404)
-                return
-            data=asset.read_bytes()
-            kind="application/wasm" if asset.suffix==".wasm" else (mimetypes.guess_type(asset.name)[0] or "application/octet-stream")
-        else:
+        path=urlsplit(self.path).path
+        if service_worker_script_request(self.path,self.headers):
+            self.send_error(403)
+            return
+        if path=="/prf-synthetic.html" or path[1:] in MODULES:
+            data,kind=(b"<!doctype html><meta charset=utf-8><title>PRF counter synthetic</title>","text/html") if path=="/prf-synthetic.html" else (MODULES[path[1:]],"text/javascript")
+            self.send_response(200)
+            self.send_header("Content-Type",kind)
+            self.send_header("Content-Length",str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if not INTEROP:
             self.send_error(404)
             return
-        self.send_response(200)
-        self.send_header("Content-Type",kind)
-        self.send_header("Cache-Control","no-store")
-        self.end_headers()
-        self.wfile.write(data)
+        # Same index/bootstrap/static serving as the proven D1 Flutter probe.
+        super().do_GET()
+
     def log_message(self,*_):
         pass
 
@@ -407,8 +412,19 @@ def flutter_runtime_checks(ctx,origin,fixture):
     pages=[ctx.new_page(),ctx.new_page()]
     checks={}
     for p in pages:
-        p.goto(origin+"/flutter-runtime.html",wait_until="domcontentloaded")
-        p.wait_for_function("typeof window.d1PrfRuntimeRun==='function'",timeout=60000)
+        diagnostics=[]
+        p.on("pageerror",lambda e:diagnostics.append(("pageerror",str(e)[:500])))
+        p.on("console",lambda m:diagnostics.append(("console",m.type,m.text[:500])) if m.type in ("error","warning") else None)
+        p.on("requestfailed",lambda q:diagnostics.append(("requestfailed",urlsplit(q.url).path,q.failure)))
+        p.on("response",lambda response:diagnostics.append(("http",response.status,urlsplit(response.url).path)) if response.status>=400 else None)
+        try:
+            response=p.goto(origin+"/",wait_until="domcontentloaded")
+            assert response and response.status==200
+            p.wait_for_function("typeof window.d1PrfRuntimeRun==='function' && typeof window.d1Snapshot==='function'",timeout=60000)
+        except Exception:
+            print("D1_PRF_FLUTTER_BOOT_FAILURE "+json.dumps(diagnostics[-30:]),flush=True)
+            raise
+        print("D1_PRF_FLUTTER_BOOT_READY",flush=True)
         p.evaluate(INIT)
         assert p.evaluate(VAULT_RESTART,{**fixture,"onlyInstall":True}) is True
         assert p.evaluate("(c)=>d1PrfRuntimeRun('init',JSON.stringify(c))",fixture["credential"])=="PASS"
@@ -527,7 +543,7 @@ def flutter_runtime_checks(ctx,origin,fixture):
 
 def setup(ctx,origin):
     page=ctx.new_page()
-    assert page.goto(origin).status==200
+    assert page.goto(origin+"/prf-synthetic.html").status==200
     page.evaluate(INIT)
     return page
 
@@ -540,13 +556,15 @@ def run():
         origin=f"http://127.0.0.1:{server.server_port}"
         blocked=[]
         def route(r):
-            if r.request.url.startswith(origin+"/"): r.continue_()
-            else: blocked.append(r.request.url);r.abort()
+            if static_request_allowed(r.request,(origin,)): r.continue_()
+            else: blocked.append(urlsplit(r.request.url).path);r.abort()
         with sync_playwright() as pw:
             engine=getattr(pw,name)
             def launch():
                 ctx=engine.launch_persistent_context(tmp,headless=True,service_workers="block")
                 ctx.route("**/*",route)
+                attach_websocket_guard(ctx,blocked)
+                attach_direct_transport_guard(ctx,blocked)
                 return ctx
             checks=[]
             def check(label,result):
