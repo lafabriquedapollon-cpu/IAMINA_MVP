@@ -2917,6 +2917,9 @@ def exercise_h2_ui(browser_type, profile, locale, origin):
         expect(page.get_by_text("7.83 mmol/L",exact=True)).to_have_count(0)
         expect(page.get_by_text("8.2 mmol/L",exact=True)).to_have_count(0)
     def enter(value):
+        nonlocal stage
+        prefix=stage
+        stage=prefix+"-focus"
         field=control("evidence-value")
         field.scroll_into_view_if_needed(timeout=10000)
         bounds=field.bounding_box(timeout=10000)
@@ -2924,10 +2927,41 @@ def exercise_h2_ui(browser_type, profile, locale, origin):
         page.mouse.click(bounds["x"]+bounds["width"]/2,bounds["y"]+bounds["height"]/2)
         native=page.locator("input:focus, textarea:focus")
         expect(native).to_have_count(1,timeout=10000)
-        native.press("ControlOrMeta+a",timeout=10000)
+        # Use the same explicit native replacement path as CONV-02c.2.
+        # Preserve exact input, without force, retry or direct value injection.
+        stage=prefix+"-select"
+        native.select_text(timeout=10000)
+        expect(native).to_have_count(1,timeout=10000)
+        selection=native.evaluate("""el=>({
+            length:el.value.length,start:el.selectionStart,end:el.selectionEnd
+        })""")
+        print("H2_SELECTION_DIAG "+json.dumps({
+            "engine":ENGINE,"locale":locale,"stage":stage,"selection":selection,
+        }),flush=True)
+        assert selection["start"]==0 and selection["end"]==selection["length"],selection
+        stage=prefix+"-clear"
+        page.keyboard.press("Delete")
+        expect(native).to_have_count(1,timeout=10000)
+        expect(native).to_have_value("",timeout=10000)
+        stage=prefix+"-type"
         native.press_sequentially(value,delay=60,timeout=10000)
-        expect(native).to_have_value(value,timeout=10000)
+        try:
+            expect(native).to_have_count(1,timeout=10000)
+            expect(native).to_have_value(value,timeout=10000)
+        finally:
+            try:
+                observed=native.input_value(timeout=1000) if native.count()==1 else None
+                print("H2_INPUT_DIAG "+json.dumps({
+                    "engine":ENGINE,"locale":locale,"stage":stage,
+                    "focusedCount":native.count(),
+                    "length":len(observed) if observed is not None else None,
+                    "matchesExpected":observed==value,
+                }),flush=True)
+            except Exception:
+                pass
+        stage=prefix+"-unit"
         control("evidence-mmoll").click(timeout=10000)
+        stage=prefix+"-save"
         control("evidence-save").click(timeout=10000)
     def shot(name):
         path=proof/f"h2-web-{ENGINE}-{locale}-{name}.png"
