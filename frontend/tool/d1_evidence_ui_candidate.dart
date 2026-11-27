@@ -366,7 +366,8 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                       fontFamily: 'Inter', fontFamilyFallback: kOfflineFontFallbacks),
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     decoration: InputDecoration(labelText: tr('Valeur glycémique', 'قيمة السكر'),
-                      border: const OutlineInputBorder()))),
+                      helperText: tr('Décimales : 7,83 ou 7.83. Pas de milliers.', 'الكسور: ٧٫٨٣ أو 7.83. دون فصل الآلاف.'),
+                      helperMaxLines: 2, border: const OutlineInputBorder()))),
                   const SizedBox(height: 12),
                   Text(tr('Unité de saisie (obligatoire)', 'وحدة الإدخال (إلزامية)')),
                   Wrap(spacing: 12, runSpacing: 8, children: [

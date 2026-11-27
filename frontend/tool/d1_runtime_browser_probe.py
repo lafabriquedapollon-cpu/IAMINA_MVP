@@ -2432,9 +2432,23 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height, f
         stage="insert-unit"
         tap("evidence-mmoll")
         expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_have_count(0,timeout=10000)
+        # H5: real native entry and refusal with an explicit unit selected.
+        # No direct widget calls or synthetic storage mutations.
+        for index,bad in enumerate(("7e1","1,2.3","0")):
+            stage=f"h5-refuse-{index}"
+            enter(bad)
+            tap("evidence-save")
+            expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_be_visible(timeout=10000)
+            expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible()
+        stage="h5-localized-recovery"
+        enter("٧٫٨٣" if ar else "7,83")
         stage="insert-commit"
         tap("evidence-save")
         expect(page.get_by_text("7.83 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        print("H5_NATIVE_ENTRY_PASS "+json.dumps({
+            "engine":ENGINE,"locale":locale,"viewport":[width,height],
+            "refusals":3,"localizedRecovery":True,"originalValue":7.83,"originalUnit":"mmol/L"
+        }),flush=True)
         stage="insert-projection"
         expect(page.get_by_text("141 mg/dL · 7.8 mmol/L",exact=True)).to_be_visible(timeout=20000)
         page.wait_for_timeout(350)
