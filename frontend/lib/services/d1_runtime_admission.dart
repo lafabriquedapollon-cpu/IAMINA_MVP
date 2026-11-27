@@ -2,6 +2,7 @@
 // Durable possession, fencing and atomic authorization belong to the backend.
 // No production implementation is admitted by this file alone.
 import 'dart:async';
+import 'dart:math';
 
 import '../core/domain/glucose_quantity_evidence.dart';
 import 'app_lock_service.dart';
@@ -9,17 +10,50 @@ import 'auth_service.dart';
 
 typedef D1RuntimeIdentity = ({int owner, int epoch, int generation});
 
+// Only the coordinator can construct or cancel an acquisition. The backend
+// receives read-only authority checks, never the guard's claim/activate methods.
+// This is an in-process contract, not protection against compromised origin JS.
+final class D1RuntimeAcquisition {
+  final D1RuntimeIdentity identity;
+  final String acquisitionId;
+  final bool Function() _pending;
+  final bool Function() _session;
+  final Completer<void> _cancelled = Completer<void>();
+
+  D1RuntimeAcquisition._(this.identity, this._pending, this._session)
+      : acquisitionId = _newId();
+
+  static String _newId() {
+    final random = Random.secure();
+    return List.generate(32, (_) =>
+        random.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  bool get isPending => !_cancelled.isCompleted && _pending();
+  bool get isSessionCurrent => !_cancelled.isCompleted && _session();
+  bool get isCancelled => _cancelled.isCompleted;
+  Future<void> get cancelled => _cancelled.future;
+
+  void _cancel() {
+    if (!_cancelled.isCompleted) _cancelled.complete();
+  }
+}
+
 /// Trusted internal composition boundary. Implementations must acquire a
 /// possession-bound durable lease, never open a legacy DB or return raw keys.
 /// Each read must itself enforce the durable fence, including after async work.
 abstract interface class D1DurableRuntimeBackend {
   // On failure, the backend must clean up its own partial acquisition.
   // A mismatched lease must never be operated on by the coordinator.
-  Future<D1DurableRuntimeLease> acquire(D1RuntimeIdentity identity);
+  // Check acquisition.isPending inside the durable transaction, not merely
+  // before it; cancellation is a signal, never evidence of durable retirement.
+  Future<D1DurableRuntimeLease> acquire(D1RuntimeAcquisition acquisition);
 }
 
 abstract interface class D1DurableRuntimeLease {
   D1RuntimeIdentity get identity;
+  // Persist this ID with the fence; compare it on all reads and retire CAS.
+  String get acquisitionId;
   Future<bool> verifyCurrent();
   Future<GlucoseQuantityEvidence?> readEvidence(String uuid);
   // Must retire only this lease, be idempotent and never revoke its successor.
@@ -32,8 +66,7 @@ final class D1RuntimeAdmissionException implements Exception {
 
 /// A read-only first slice. No DB, key, transport or generic mutation escape.
 final class D1RuntimeSession {
-  final D1RuntimeIdentity _identity;
-  final D1VaultAdmissionGuard _guard;
+  final D1RuntimeAcquisition _acquisition;
   final D1DurableRuntimeLease _lease;
   bool _retired = false;
   Future<void>? _retirement;
@@ -42,11 +75,13 @@ final class D1RuntimeSession {
   // A failed durable retirement remains observable; never reopens the session.
   bool get durableRetirementFailed => _durableRetirementFailed;
 
-  D1RuntimeSession._(this._identity, this._guard, this._lease);
+  D1RuntimeSession._(this._acquisition, this._lease);
+
+  bool _matchesLease() => _lease.identity == _acquisition.identity &&
+      _lease.acquisitionId == _acquisition.acquisitionId;
 
   // Local authorization only; durable currency is checked on every read.
-  bool get isActive => !_retired &&
-      _guard.checkSession(_identity.owner, _identity.epoch);
+  bool get isActive => !_retired && _acquisition.isSessionCurrent;
 
   void _requireActive() {
     if (!isActive) throw const D1RuntimeAdmissionException();
@@ -54,7 +89,7 @@ final class D1RuntimeSession {
 
   Future<void> _verify() async {
     _requireActive();
-    if (_lease.identity != _identity || !await _lease.verifyCurrent()) {
+    if (!_matchesLease() || !await _lease.verifyCurrent() || !_matchesLease()) {
       throw const D1RuntimeAdmissionException();
     }
     _requireActive();
@@ -82,7 +117,12 @@ final class D1RuntimeSession {
 
   Future<void> retire() {
     _retired = true;
-    return _retirement ??= Future<void>.sync(_lease.retire).then<void>(
+    _acquisition._cancel();
+    return _retirement ??= Future<void>.sync(() {
+      // A foreign/stale handle cannot be used for cleanup either.
+      if (!_matchesLease()) throw const D1RuntimeAdmissionException();
+      return _lease.retire();
+    }).then<void>(
       (_) { _durableRetirementFailed = false; },
       onError: (Object _, StackTrace __) {
         _durableRetirementFailed = true;
@@ -112,34 +152,39 @@ final class D1RuntimeAdmission {
     final guard = _lock.consumeVaultAdmissionProof(proof, owner: owner);
     D1RuntimeSession? session;
     D1DurableRuntimeLease? lease;
-    var retired = false;
-    bool pending() => !retired &&
-        _auth.verifiedNativeAdmissionGeneration == generation &&
-        guard.checkPending(owner, identity.epoch);
+    final acquisition = D1RuntimeAcquisition._(
+        identity,
+        () => _auth.verifiedNativeAdmissionGeneration == generation &&
+            guard.checkPending(owner, identity.epoch),
+        () => guard.checkSession(owner, identity.epoch));
+    bool matches(D1DurableRuntimeLease candidate) =>
+        candidate.identity == identity &&
+        candidate.acquisitionId == acquisition.acquisitionId;
     try {
       if (!guard.claim(owner, identity.epoch) ||
           !guard.watchRetirement(owner, identity.epoch, () {
-            retired = true;
+            acquisition._cancel();
             final current = session;
             if (current != null) {
               unawaited(current.retire().catchError((Object _) {}));
             }
-          }) || !pending()) {
+          }) || !acquisition.isPending) {
         throw const D1RuntimeAdmissionException();
       }
-      lease = await _backend.acquire(identity);
-      if (!pending() || lease.identity != identity ||
-          !await lease.verifyCurrent() || !pending() ||
-          !guard.activate(owner, identity.epoch)) {
+      lease = await _backend.acquire(acquisition);
+      if (!acquisition.isPending || !matches(lease) ||
+          !await lease.verifyCurrent() || !acquisition.isPending ||
+          !matches(lease) || !guard.activate(owner, identity.epoch)) {
         throw const D1RuntimeAdmissionException();
       }
-      session = D1RuntimeSession._(identity, guard, lease);
+      session = D1RuntimeSession._(acquisition, lease);
       if (!session.isActive) throw const D1RuntimeAdmissionException();
       return session;
     } catch (_) {
+      acquisition._cancel();
       if (session != null) {
         await session.retire();
-      } else if (lease != null && lease.identity == identity) {
+      } else if (lease != null && matches(lease)) {
         await lease.retire();
       }
       throw const D1RuntimeAdmissionException();

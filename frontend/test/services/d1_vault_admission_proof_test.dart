@@ -111,7 +111,9 @@ const _runtimeUuid = 'ac123456-1234-4abc-8def-000000000001';
 final class _RuntimeLease implements D1DurableRuntimeLease {
   @override
   final D1RuntimeIdentity identity;
-  _RuntimeLease(this.identity);
+  @override
+  final String acquisitionId;
+  _RuntimeLease(this.identity, this.acquisitionId);
   bool current = true;
   int retireCalls = 0;
   int reads = 0;
@@ -139,15 +141,19 @@ final class _RuntimeLease implements D1DurableRuntimeLease {
 
 final class _RuntimeBackend implements D1DurableRuntimeBackend {
   int calls = 0;
-  final entered = Completer<D1RuntimeIdentity>();
+  var entered = Completer<D1RuntimeAcquisition>();
+  D1RuntimeAcquisition? lastAcquisition;
   Completer<D1DurableRuntimeLease>? delayed;
   _RuntimeLease? last;
   @override
-  Future<D1DurableRuntimeLease> acquire(D1RuntimeIdentity identity) async {
+  Future<D1DurableRuntimeLease> acquire(D1RuntimeAcquisition acquisition) async {
     calls++;
-    if (!entered.isCompleted) entered.complete(identity);
+    expect(acquisition.isPending, isTrue);
+    expect(acquisition.isSessionCurrent, isFalse);
+    lastAcquisition = acquisition;
+    if (!entered.isCompleted) entered.complete(acquisition);
     if (delayed != null) return delayed!.future;
-    return last = _RuntimeLease(identity);
+    return last = _RuntimeLease(acquisition.identity, acquisition.acquisitionId);
   }
 }
 
@@ -478,9 +484,12 @@ void main() {
     final backend = _RuntimeBackend()..delayed = Completer<D1DurableRuntimeLease>();
     final pending = D1RuntimeAdmission(f.auth, f.lock, backend).admit();
     final refused = expectLater(pending, throwsA(isA<D1RuntimeAdmissionException>()));
-    final identity = await backend.entered.future;
+    final acquisition = await backend.entered.future;
     f.lock.lock();
-    final lease = _RuntimeLease(identity);
+    expect(acquisition.isCancelled, isTrue);
+    expect(acquisition.isPending, isFalse);
+    await acquisition.cancelled;
+    final lease = _RuntimeLease(acquisition.identity, acquisition.acquisitionId);
     backend.delayed!.complete(lease);
     await refused;
     expect(lease.retireCalls, 1);
@@ -493,8 +502,9 @@ void main() {
     final backend = _RuntimeBackend()..delayed = Completer<D1DurableRuntimeLease>();
     final pending = D1RuntimeAdmission(f.auth, f.lock, backend).admit();
     final refused = expectLater(pending, throwsA(isA<D1RuntimeAdmissionException>()));
-    final identity = await backend.entered.future;
-    final foreign = _RuntimeLease((owner: _b, epoch: identity.epoch, generation: identity.generation));
+    final acquisition = await backend.entered.future;
+    final foreign = _RuntimeLease((owner: _b, epoch: acquisition.identity.epoch,
+        generation: acquisition.identity.generation), acquisition.acquisitionId);
     backend.delayed!.complete(foreign);
     await refused;
     expect(foreign.retireCalls, 0);
@@ -561,9 +571,9 @@ void main() {
     final backend = _RuntimeBackend()..delayed = Completer<D1DurableRuntimeLease>();
     final pending = D1RuntimeAdmission(f.auth, f.lock, backend).admit();
     final refused = expectLater(pending, throwsA(isA<D1RuntimeAdmissionException>()));
-    final identity = await backend.entered.future;
+    final acquisition = await backend.entered.future;
     f.elapsed = const Duration(seconds: 30);
-    final lease = _RuntimeLease(identity);
+    final lease = _RuntimeLease(acquisition.identity, acquisition.acquisitionId);
     backend.delayed!.complete(lease);
     await refused;
     expect(lease.retireCalls, 1);
@@ -584,5 +594,57 @@ void main() {
     expect(session.durableRetirementFailed, isFalse);
     expect(session.isActive, isFalse);
     expect(lease.retireCalls, 2);
+  });
+
+  test('CONV-03B2a.1 same identity replacement has distinct acquisition fence', () async {
+    final f = _Fixture();
+    await f.start();
+    final backend = _RuntimeBackend();
+    final admission = D1RuntimeAdmission(f.auth, f.lock, backend);
+    final first = await admission.admit();
+    final firstRequest = backend.lastAcquisition!;
+    final firstLease = backend.last!;
+    expect(firstRequest.isPending, isFalse);
+    expect(firstRequest.isSessionCurrent, isTrue);
+    final second = await admission.admit();
+    final secondRequest = backend.lastAcquisition!;
+    expect(secondRequest.identity, firstRequest.identity);
+    expect(secondRequest.acquisitionId, isNot(firstRequest.acquisitionId));
+    expect(secondRequest.acquisitionId, matches(RegExp(r'^[a-f0-9]{64}$')));
+    expect(firstRequest.isCancelled, isTrue);
+    await firstRequest.cancelled;
+    expect(first.isActive, isFalse);
+    expect(second.isActive, isTrue);
+    await first.retire();
+    expect(firstLease.retireCalls, 1);
+    expect(backend.last!.retireCalls, 0);
+    await second.retire();
+    expect(secondRequest.isCancelled, isTrue);
+    expect(secondRequest.isSessionCurrent, isFalse);
+  });
+
+  test('CONV-03B2a.1 same owner stale acquisition is never read or revoked', () async {
+    final f = _Fixture();
+    await f.start();
+    final backend = _RuntimeBackend();
+    final admission = D1RuntimeAdmission(f.auth, f.lock, backend);
+    final first = await admission.admit();
+    final oldLease = backend.last!;
+    final oldRequest = backend.lastAcquisition!;
+    backend.delayed = Completer<D1DurableRuntimeLease>();
+    backend.entered = Completer<D1RuntimeAcquisition>();
+    final pending = admission.admit();
+    final refused = expectLater(pending, throwsA(isA<D1RuntimeAdmissionException>()));
+    final next = await backend.entered.future.timeout(const Duration(seconds: 5));
+    expect(next.acquisitionId, isNot(oldRequest.acquisitionId));
+    expect(next.identity, oldRequest.identity);
+    expect(first.isActive, isFalse);
+    await first.retire();
+    expect(oldLease.retireCalls, 1);
+    backend.delayed!.complete(oldLease);
+    await refused;
+    expect(next.isCancelled, isTrue);
+    expect(oldLease.retireCalls, 1);
+    expect(oldLease.reads, 0);
   });
 }
