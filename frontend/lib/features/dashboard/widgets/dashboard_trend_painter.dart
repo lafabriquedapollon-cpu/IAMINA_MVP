@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/theme/amina_visual_language.dart';
+import '../../../core/theme/app_theme.dart' show kOfflineFontFallbacks;
 import '../../../data/drift/database.dart';
 
 // One elapsed-time projection shared by painting and hit testing.
@@ -215,6 +216,8 @@ class DashboardTrendPainter extends CustomPainter {
       ..strokeWidth = 1;
     final axisStyle = TextStyle(
       fontSize: 9.5,
+      fontFamily: locale.toLowerCase().startsWith('ar') ? 'NotoSansArabic' : 'Inter',
+      fontFamilyFallback: kOfflineFontFallbacks,
       color: (isDark ? Colors.white : const Color(0xFF42655D))
           .withValues(alpha: .78),
     );
