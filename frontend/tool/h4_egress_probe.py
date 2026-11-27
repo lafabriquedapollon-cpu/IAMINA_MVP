@@ -8,7 +8,7 @@ import threading
 from urllib.parse import urlsplit
 from contextlib import ExitStack
 from playwright.sync_api import sync_playwright
-from h4_egress_guard import attach_direct_transport_guard, static_request_allowed
+from h4_egress_guard import attach_direct_transport_guard, static_request_allowed, service_worker_script_request
 from h4_websocket_guard import attach_websocket_guard
 
 
@@ -37,21 +37,29 @@ def policy_cases():
 def exercise_egress(engine):
     hits=[]
     class Witness(http.server.BaseHTTPRequestHandler):
-        def respond(self, content=b"ok", kind="text/plain"):
+        def respond(self, content=b"ok", kind="text/plain", csp=None):
             self.send_response(200)
             self.send_header("Content-Type",kind)
             self.send_header("Access-Control-Allow-Origin","*")
             self.send_header("Cache-Control","no-store")
+            if csp is not None:
+                self.send_header("Content-Security-Policy", csp)
             self.end_headers()
             self.wfile.write(content)
         def do_GET(self):
             hits.append(("GET",self.path))
             if self.path=="/fixture":
                 self.respond(b"<!doctype html><title>H4 synthetic</title>","text/html")
+            elif self.path=="/fixture-sw-csp":
+                self.respond(b"<!doctype html><title>H4 SW CSP negative</title>","text/html", "worker-src 'none'")
             elif self.path=="/worker.js":
                 self.respond(b"onmessage=async e=>{try{const r=await fetch(e.data);postMessage(r.ok?'ok':'bad')}catch(_){postMessage('refused')}}","application/javascript")
             elif urlsplit(self.path).path=="/sw.js":
                 self.respond(b"self.addEventListener('install',()=>self.skipWaiting());","application/javascript")
+            elif urlsplit(self.path).path=="/service-worker.js":
+                assert service_worker_script_request(self.path,self.headers)
+                hits.append(("SW_DENY",self.path))
+                self.send_error(403)
             else:
                 self.respond()
         def do_POST(self):
@@ -136,9 +144,45 @@ def exercise_egress(engine):
                             assert ("GET","/sw.js?positive") in hits
                     finally:
                         positive.close()
+                    # Independent native negatives in synthetic loopback contexts.
+                    # Distinguish browser CSP from server rejection.
+                    if capabilities["serviceWorker"]:
+                        for mode in ("csp","server"):
+                            before=len(hits)
+                            control=browser.new_context(service_workers="allow")
+                            try:
+                                page=control.new_page()
+                                fixture="/fixture-sw-csp" if mode=="csp" else "/fixture"
+                                response=page.goto(origin+fixture)
+                                assert response.status==200
+                                if mode=="csp":
+                                    assert response.headers.get("content-security-policy")=="worker-src 'none'"
+                                path="/sw.js?csp-negative" if mode=="csp" else "/service-worker.js?server-negative"
+                                status=page.evaluate(sw_js,path)
+                                assert status=="refused",(mode,status)
+                                registrations=page.evaluate("async()=> (await navigator.serviceWorker.getRegistrations()).length")
+                                assert registrations==0,registrations
+                                assert page.evaluate("()=>navigator.serviceWorker.controller===null")
+                                page.wait_for_timeout(300)
+                            finally:
+                                control.close()
+                            observed=hits[before:]
+                            if mode=="csp":
+                                assert ("GET",path) not in observed,observed
+                            else:
+                                assert observed.count(("GET",path))==1,observed
+                                assert observed.count(("SW_DENY",path))==1,observed
+                            records.append({"case":"service-worker-"+mode,"positive":sw_positive,
+                                "negative":"refused","registrations":0,"controller":False,
+                                "scriptRequests":observed.count(("GET",path)),
+                                "serverDenials":observed.count(("SW_DENY",path)),
+                                "scriptDelivered":False})
+                            print("H4_SW_INDEPENDENT "+engine+" "+str(records[-1]),flush=True)
+                    else:
+                        records.extend({"case":"service-worker-"+mode,"result":"UNAVAILABLE"} for mode in ("csp","server"))
                     # Use a fresh context per negative to prevent false positives
                     # caused by a prior failure or existing service worker.
-                    for case in ("beacon","worker","service-worker","direct-transports"):
+                    for case in ("beacon","worker","direct-transports"):
                         blocked=[]
                         context=browser.new_context(service_workers="block")
                         before=len(hits)
@@ -167,24 +211,6 @@ def exercise_egress(engine):
                                 assert ("GET","/worker.js") in hits[before:]
                                 assert ("GET","/worker-negative") not in hits[before:]
                                 record={"case":case,"positive":"witness-hit","negative":"refused","upstreamHits":0}
-                            elif case=="service-worker":
-                                if not capabilities["serviceWorker"]:
-                                    assert page.evaluate("()=>!navigator.serviceWorker")
-                                    record={"case":case,"result":"UNAVAILABLE","positive":sw_positive}
-                                else:
-                                    status=page.evaluate(sw_js,"/sw.js?negative")
-                                    assert status=="guard-refused",status
-                                    wait_for(page,lambda:bool(blocked),"SW guard attempt missing")
-                                    assert blocked==["direct_transport:ServiceWorker.register"],blocked
-                                    registrations=page.evaluate("""async()=>await Promise.race([
-                                      navigator.serviceWorker.getRegistrations().then(r=>r.length),
-                                      new Promise(r=>setTimeout(()=>r('pending'),1500))
-                                    ])""")
-                                    assert registrations in (0,"pending"),registrations
-                                    assert page.evaluate("()=>navigator.serviceWorker.controller===null")
-                                    assert ("GET","/sw.js?negative") not in hits[before:]
-                                    record={"case":case,"positive":sw_positive,"negative":status,
-                                            "registrations":registrations,"controller":False,"upstreamHits":0}
                             else:
                                 observed=page.evaluate("""names=>{
                                   const rows=[];
@@ -215,9 +241,9 @@ def exercise_egress(engine):
             b.shutdown()
             for t in threads:
                 t.join(timeout=5)
-    assert len(records)==4
+    assert len(records)==5
     return {"policyCases":policy_cases(),"capabilities":capabilities,"cases":records,
             "limits":["document transport guard is not native network isolation",
                       "dedicated worker fetch tested; direct transport constructors in worker realms not covered",
-                      "document register guard plus context block; context option alone failed in R5; PWA lifecycle not qualified",
+                      "SW native CSP negative and independent static-server 403; browser context and JS guard alone failed R5/R6; PWA lifecycle not qualified",
                       "no proof of absent DNS, speculative traffic, browser process or extension egress"]}

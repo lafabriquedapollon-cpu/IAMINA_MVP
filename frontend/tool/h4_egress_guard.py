@@ -20,9 +20,27 @@ def static_request_allowed(request, allowed):
         return False
 
 
+def service_worker_script_request(path, headers):
+    """Server-side backstop; independent of Playwright interception."""
+    pathname = unquote(urlsplit(path).path).replace("\\", "/").lower()
+    return (headers.get("Service-Worker", "").strip().lower() == "script"
+            or headers.get("Sec-Fetch-Dest", "").strip().lower() == "serviceworker"
+            or pathname.rsplit("/",1)[-1] in ("flutter_service_worker.js", "service-worker.js", "sw.js"))
+
+
+class NoServiceWorkerScripts:
+    def send_head(self):
+        if service_worker_script_request(self.path, self.headers):
+            print("H4_STATIC_SW_SCRIPT_REFUSED", flush=True)
+            self.send_error(403)
+            return None
+        return super().send_head()
+
+
 DIRECT_GUARD = r"""(() => {
-  if(typeof globalThis.ServiceWorkerContainer?.prototype?.register==='function'){
-    Object.defineProperty(globalThis.ServiceWorkerContainer.prototype,'register',{
+  const sw=globalThis.navigator?.serviceWorker;
+  if(typeof sw?.register==='function'){
+    Object.defineProperty(sw,'register',{
       value:function(){
         if(typeof globalThis.__h4ReportTransport==='function'){
           Promise.resolve(globalThis.__h4ReportTransport('ServiceWorker.register')).catch(()=>{});

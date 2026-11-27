@@ -12,14 +12,14 @@ import threading
 
 from playwright.sync_api import sync_playwright
 from h4_websocket_guard import attach_websocket_guard
-from h4_egress_guard import static_request_allowed, attach_direct_transport_guard
+from h4_egress_guard import static_request_allowed, attach_direct_transport_guard, NoServiceWorkerScripts
 
 WEB = Path(os.environ["D1_RUNTIME_WEB"]).resolve()
 ENGINE = os.environ["D1_RUNTIME_ENGINE"]
 MARKER = "D1_I1_SYNTHETIC_NOT_PATIENT"
 
 
-class Handler(http.server.SimpleHTTPRequestHandler):
+class Handler(NoServiceWorkerScripts, http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB), **kwargs)
 
