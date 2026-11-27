@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import '../tool/d1_evidence_ui_candidate.dart';
 
@@ -66,6 +67,42 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       revoke.dispose();
     });
+
+  for (final arabic in [false,true]) {
+    testWidgets('H6 touch geometry and keyboard unit selection arabic=$arabic', (tester) async {
+      tester.view.devicePixelRatio=1;
+      tester.view.physicalSize=const Size(390,844);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final revoke=ValueNotifier<int>(0);
+      await tester.pumpWidget(MaterialApp(
+        theme:ThemeData(visualDensity:VisualDensity.compact,materialTapTargetSize:MaterialTapTargetSize.shrinkWrap),
+        home:EvidenceUiCandidate(arabic:arabic,revoke:revoke,lock:(){},isCurrent:current,
+          call:(action,args) async => result(args,1,[]))));
+      await tester.tap(find.text(arabic?'فتح الملف A':'Ouvrir profil A'));
+      await tester.pumpAndSettle();
+      for(final key in [const ValueKey('mg/dL'),const ValueKey('mmol/L'),const Key('evidence-save')]) {
+        final target=find.byKey(key);
+        await tester.ensureVisible(target);
+        await tester.pumpAndSettle();
+        final size=tester.getSize(target);
+        expect(size.width,greaterThanOrEqualTo(48),reason:key.toString());
+        expect(size.height,greaterThanOrEqualTo(48),reason:key.toString());
+        expect(target.hitTestable(),findsOneWidget);
+      }
+      await tester.ensureVisible(find.byKey(const Key('evidence-value')));
+      await tester.tap(find.byKey(const Key('evidence-value')));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      await tester.pumpAndSettle();
+      expect(tester.widget<ChoiceChip>(find.byKey(const ValueKey('mg/dL'))).selected,true);
+      expect(tester.widget<ChoiceChip>(find.byKey(const ValueKey('mmol/L'))).selected,false);
+      await tester.pumpWidget(const SizedBox());
+      revoke.dispose();
+    });
+  }
 
   testWidgets('late open result cannot populate revoked screen', (tester) async {
     final revoke=ValueNotifier<int>(0);

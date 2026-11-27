@@ -315,7 +315,14 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
       fontFamily: family, fontFamilyFallback: kOfflineFontFallbacks,
     );
     final typography = base.typography;
+    final touchStyle = TextButton.styleFrom(
+      minimumSize: const Size(48,48), visualDensity: VisualDensity.standard,
+      tapTargetSize: MaterialTapTargetSize.padded,
+    );
     return Theme(data: base.copyWith(
+      visualDensity: VisualDensity.standard,
+      materialTapTargetSize: MaterialTapTargetSize.padded,
+      textButtonTheme: TextButtonThemeData(style: base.textButtonTheme.style?.merge(touchStyle) ?? touchStyle),
       textTheme: local(base.textTheme),
       primaryTextTheme: local(base.primaryTextTheme),
       typography: typography.copyWith(
@@ -367,13 +374,17 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     decoration: InputDecoration(labelText: tr('Valeur glycémique', 'قيمة السكر'),
                       helperText: tr('Décimales : 7,83 ou 7.83. Pas de milliers.', 'الكسور: ٧٫٨٣ أو 7.83. دون فصل الآلاف.'),
-                      helperMaxLines: 2, border: const OutlineInputBorder()))),
+                      helperMaxLines: 2, helperStyle: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurface, fontSize: 13),
+                      border: const OutlineInputBorder()))),
                   const SizedBox(height: 12),
                   Text(tr('Unité de saisie (obligatoire)', 'وحدة الإدخال (إلزامية)')),
                   Wrap(spacing: 12, runSpacing: 8, children: [
                     for (final unit in ['mg/dL','mmol/L'])
                       Semantics(identifier: unit == 'mg/dL' ? 'evidence-mgdl' : 'evidence-mmoll',
                         child: ChoiceChip(key: ValueKey(unit), label: Text(unit), selected: _unit == unit,
+                          visualDensity: VisualDensity.standard,
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
                           materialTapTargetSize: MaterialTapTargetSize.padded,
                           onSelected: _busy ? null : (selected) => setState(() {
                             _unit = selected ? unit : null; _error = false;
@@ -399,12 +410,17 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                   const SizedBox(height: 12),
                   Semantics(identifier: 'evidence-save', child: FilledButton(
                     key: const Key('evidence-save'), onPressed: _busy ? null : _save,
-                    style: FilledButton.styleFrom(minimumSize: const Size(0,48)),
+                    style: FilledButton.styleFrom(minimumSize: const Size(48,48),
+                      visualDensity: VisualDensity.standard,
+                      tapTargetSize: MaterialTapTargetSize.padded),
                     child: Text(tr('Enregistrer', 'حفظ')))),
                   if (_error) Semantics(identifier: 'evidence-input-error', liveRegion: true,
-                    child: Padding(padding: const EdgeInsets.only(top: 8),
+                    child: Container(margin: const EdgeInsets.only(top: 8),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(color: Theme.of(context).colorScheme.errorContainer,
+                        borderRadius: BorderRadius.circular(12)),
                       child: Text(tr('Saisie ou opération refusée.', 'تم رفض الإدخال أو العملية.'),
-                        style: TextStyle(color: Theme.of(context).colorScheme.error)))),
+                        style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer)))),
                   if (_editing != null) TextButton(onPressed: _busy ? null : () => setState(() {
                     _editing = null; _unit = null; _value.clear();
                     _editingSeconds=null; _customTime=false; _timestamp.clear();
@@ -437,7 +453,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                     textDirection: TextDirection.ltr, style:Theme.of(context).textTheme.bodyMedium),
                   const SizedBox(height: 8),
                   Wrap(spacing: 12, runSpacing: 4, children: [
-                    TextButton(style: TextButton.styleFrom(minimumSize: const Size(44,44)), onPressed: _busy ? null : () {
+                    TextButton(style: TextButton.styleFrom(minimumSize: const Size(48,48), visualDensity: VisualDensity.standard), onPressed: _busy ? null : () {
                       setState(() {
                         _confirmDelete = null; _editing = row['uuid'] as String; _unit = row['originalUnit'] as String;
                         _value.text = row['originalValue'].toString();
@@ -446,7 +462,7 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                       });
                       _valueFocus.requestFocus();
                     }, child: Text(tr('Modifier', 'تعديل'))),
-                    TextButton(style: TextButton.styleFrom(minimumSize: const Size(44,44),
+                    TextButton(style: TextButton.styleFrom(minimumSize: const Size(48,48), visualDensity: VisualDensity.standard,
                       foregroundColor: Theme.of(context).colorScheme.error), onPressed: _busy ? null : () => setState(() {
                       _confirmDelete = row['uuid'] as String;
                     }), child: Text(tr('Supprimer', 'حذف'))),
@@ -454,7 +470,11 @@ class _EvidenceUiCandidateState extends State<EvidenceUiCandidate> {
                   if (_confirmDelete == row['uuid']) ...[
                     Text(tr('Confirmer la suppression de cette mesure ?', 'هل تريد تأكيد حذف هذا القياس؟')),
                     Wrap(spacing: 8, children: [
-                      FilledButton(onPressed: _busy ? null : () => _perform('delete', {
+                      FilledButton(style: FilledButton.styleFrom(
+                        minimumSize: const Size(48,48), visualDensity: VisualDensity.standard,
+                        backgroundColor: Theme.of(context).colorScheme.errorContainer,
+                        foregroundColor: Theme.of(context).colorScheme.onErrorContainer),
+                        onPressed: _busy ? null : () => _perform('delete', {
                         'revision': _revision, 'uuid': row['uuid'],
                       }), child: Text(tr('Confirmer la suppression', 'تأكيد الحذف'))),
                       TextButton(onPressed: _busy ? null : () => setState(() {

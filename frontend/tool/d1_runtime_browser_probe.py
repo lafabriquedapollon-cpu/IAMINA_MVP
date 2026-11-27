@@ -2421,6 +2421,16 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height, f
         stage="open"
         click("Ouvrir profil A","فتح الملف A")
         expect(text("Aucune mesure explicite","لا توجد قياسات صريحة")).to_be_visible(timeout=20000)
+        stage="h6-touch-geometry"
+        sizes={}
+        for identifier in ("evidence-mgdl","evidence-mmoll","evidence-save"):
+            node=control(identifier)
+            node.scroll_into_view_if_needed(timeout=10000)
+            rect=node.bounding_box(timeout=10000)
+            assert rect and rect["width"]>=47.5 and rect["height"]>=47.5,(identifier,rect)
+            sizes[identifier]={"width":rect["width"],"height":rect["height"]}
+        print("H6_TOUCH_PASS "+json.dumps({"engine":ENGINE,"locale":locale,
+            "viewport":[width,height],"sizes":sizes}),flush=True)
         stage="insert-native-input"
         enter("7.83")
         stage="insert-no-unit-click"
