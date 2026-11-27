@@ -5,6 +5,7 @@ patient data, no external host, no claim of native process/worker UDP isolation.
 """
 import http.server
 import threading
+from urllib.parse import urlsplit
 from contextlib import ExitStack
 from playwright.sync_api import sync_playwright
 from h4_egress_guard import attach_direct_transport_guard, static_request_allowed
@@ -49,7 +50,7 @@ def exercise_egress(engine):
                 self.respond(b"<!doctype html><title>H4 synthetic</title>","text/html")
             elif self.path=="/worker.js":
                 self.respond(b"onmessage=async e=>{try{const r=await fetch(e.data);postMessage(r.ok?'ok':'bad')}catch(_){postMessage('refused')}}","application/javascript")
-            elif self.path=="/sw.js":
+            elif urlsplit(self.path).path=="/sw.js":
                 self.respond(b"self.addEventListener('install',()=>self.skipWaiting());","application/javascript")
             else:
                 self.respond()
@@ -88,7 +89,10 @@ def exercise_egress(engine):
         sw_js="""async path=>{
           if(!navigator.serviceWorker)return 'unavailable';
           return await Promise.race([
-            navigator.serviceWorker.register(path).then(()=> 'registered',()=> 'refused'),
+            navigator.serviceWorker.register(path).then(()=> 'registered',e=> {
+              console.info('H4_SW_REGISTER_ERROR '+e.name);
+              return 'refused';
+            }),
             new Promise(r=>setTimeout(()=>r('pending'),2500))
           ]);
         }"""
@@ -114,7 +118,19 @@ def exercise_egress(engine):
                         wait_for(page,lambda:("POST","/beacon-positive") in hits,"Beacon witness unavailable")
                         assert page.evaluate(worker_js,upstream+"/worker-positive")=="ok"
                         assert ("GET","/worker-positive") in hits
+                        page.on("console",lambda msg: print(msg.text,flush=True)
+                                if msg.text.startswith("H4_SW_REGISTER_ERROR ") else None)
+                        if capabilities["serviceWorker"]:
+                            # Independent MIME check, distinct URL from the actual registration.
+                            mime=page.evaluate("""async()=> {
+                              const r=await fetch('/sw.js?mime-check');
+                              return {status:r.status,mime:r.headers.get('content-type'),
+                                      script:(await r.text()).includes('self.skipWaiting()')};
+                            }""")
+                            assert mime=={"status":200,"mime":"application/javascript","script":True},mime
+                            assert ("GET","/sw.js?mime-check") in hits
                         sw_positive=page.evaluate(sw_js,"/sw.js?positive") if capabilities["serviceWorker"] else "unavailable"
+                        print("H4_SW_POSITIVE "+engine+" "+sw_positive,flush=True)
                         if capabilities["serviceWorker"]:
                             assert sw_positive=="registered", sw_positive
                             assert ("GET","/sw.js?positive") in hits
@@ -186,6 +202,7 @@ def exercise_egress(engine):
                                 record={"case":case,"observed":observed,"scope":"document constructors only; no native UDP or worker transport assertion"}
                             page.wait_for_timeout(300)
                             records.append({**record,"attempts":list(blocked)})
+                            print("H4_EGRESS_CASE "+engine+" "+case+" "+str(records[-1]),flush=True)
                         finally:
                             context.close()
                         assert blocked==records[-1]["attempts"],"Late unexpected attempt"
