@@ -2556,8 +2556,109 @@ def run_evidence_ui():
     print("D1_D5_EVIDENCE_UI_PASS 6/6",flush=True)
 
 
+def exercise_h1_ui(browser_type, profile, locale, origin, width, height):
+    from PIL import Image
+    proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
+    frames=[]
+    stage="navigation"
+    ctx,page,blocked,errors=open_context(browser_type,profile,locale,origin)
+    try:
+        page.set_viewport_size({"width":width,"height":height})
+        stage="mount"
+        page.evaluate("""ar=>{
+          window.__h1Fixture=null;
+          window.d1MountH1Trend(ar, value=>{window.__h1Fixture=JSON.parse(value);});
+        }""", locale=="ar-MA")
+        page.wait_for_function("window.__h1Fixture !== null", timeout=20000)
+        initial=page.evaluate("window.__h1Fixture")
+        assert initial["selections"]==[]
+        left,top,w,h=(initial[k] for k in ("left","top","width","height"))
+        assert 0<=left and 0<=top and left+w<=width+1 and top+h<=height+1
+        assert w>100 and abs(h-250)<1
+        def shot(name):
+            path=proof/f"h1-web-{ENGINE}-{locale}-{width}-{name}.png"
+            page.screenshot(path=str(path),animations="disabled",timeout=15000)
+            with Image.open(path) as im:
+                rgb=im.convert("RGB")
+                assert rgb.size==(width,height)
+                assert len(rgb.getcolors(width*height) or [])>50
+            frames.append({"file":path.name,"sha256":hashlib.sha256(path.read_bytes()).hexdigest()})
+        def tap(day):
+            # Independent expected elapsed-time geometry; no JS event injection.
+            page.mouse.click(left+46+(w-56)*day/7,top+100)
+        def selected(expected):
+            page.wait_for_function("(expected)=>JSON.stringify(window.__h1Fixture.selections)===JSON.stringify(expected)",arg=expected,timeout=10000)
+        shot("initial")
+        stage="day1"
+        tap(.5)
+        selected([1])
+        stage="day2"
+        tap(1.5)
+        selected([1,4])
+        stage="empty-day"
+        tap(2.5)
+        stage="day5"
+        tap(4.5)
+        selected([1,4,6])
+        stage="axis-margin"
+        page.mouse.click(left+10,top+100)
+        # Flush frames; then a positive click proves the event queue continued.
+        page.wait_for_timeout(150)
+        tap(.5)
+        selected([1,4,6,1])
+        shot("selected")
+        stage="egress-and-errors"
+        assert not blocked and not errors
+        return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                "viewport":[width,height],"selections":[1,4,6,1],"blockedRequests":0,
+                "pageErrors":0,"frames":frames,"result":"PASS"}
+    except Exception as error:
+        path=proof/f"h1-web-{ENGINE}-{locale}-{width}-failure.png"
+        try:
+            page.screenshot(path=str(path),timeout=5000)
+        except Exception:
+            pass
+        return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
+                "viewport":[width,height],"stage":stage,"errorType":type(error).__name__,
+                "blockedRequests":len(blocked),"pageErrors":len(errors),"result":"FAIL"}
+    finally:
+        ctx.close()
+
+
+def run_h1_ui():
+    assert ENGINE in ("chromium","webkit")
+    assert os.environ["GITHUB_HEAD_REF"]=="phase2/d1-d5-convergence"
+    proof=Path(os.environ["RUNNER_TEMP"])/"d2-browser-proof"
+    proof.mkdir(parents=True,exist_ok=True)
+    records=[]
+    with tempfile.TemporaryDirectory(prefix="h1-ui-") as root:
+        with http.server.ThreadingHTTPServer(("127.0.0.1",0),Handler) as server:
+            threading.Thread(target=server.serve_forever,daemon=True).start()
+            origin=f"http://127.0.0.1:{server.server_port}"
+            try:
+                with sync_playwright() as pw:
+                    browser_type=getattr(pw,ENGINE)
+                    for width,height in ((390,844),(430,932),(1280,860)):
+                        for locale in ("fr-FR","ar-MA"):
+                            try:
+                                record=exercise_h1_ui(browser_type,Path(root)/f"h1-{locale}-{width}",locale,origin,width,height)
+                            except Exception as error:
+                                record={"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,
+                                        "locale":locale,"viewport":[width,height],"stage":"navigation",
+                                        "errorType":type(error).__name__,"result":"FAIL"}
+                            records.append(record)
+                            print("H1_WEB "+json.dumps(record),flush=True)
+            finally:
+                server.shutdown()
+                (proof/f"h1-web-{ENGINE}-matrix.json").write_text(json.dumps(records))
+    assert len(records)==6 and all(r["result"]=="PASS" for r in records),"H1 Web matrix failed"
+    print("H1_WEB_PASS 6/6",flush=True)
+
+
 if __name__=="__main__":
-    if os.environ.get("D1_RUNTIME_UI_ONLY")=="1":
+    if os.environ.get("H1_RUNTIME_UI_ONLY")=="1":
+        run_h1_ui()
+    elif os.environ.get("D1_RUNTIME_UI_ONLY")=="1":
         run_evidence_ui()
     else:
         run()

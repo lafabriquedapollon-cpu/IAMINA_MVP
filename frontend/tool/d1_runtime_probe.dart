@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:typed_data';
 import 'd1_evidence_ui_candidate.dart';
+import 'package:amina/features/dashboard/widgets/dashboard_trend_view.dart';
+import 'package:amina/l10n/app_localizations.dart';
 import 'package:amina/core/theme/amina_visual_language.dart';
 import 'package:amina/core/theme/app_theme.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -26,6 +28,9 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:sqlite3/wasm.dart';
+
+@JS('d1MountH1Trend')
+external set _mountH1TrendFn(JSFunction function);
 
 @JS('d1MountEvidenceUi')
 external set _mountEvidenceUiFn(JSFunction function);
@@ -854,6 +859,85 @@ Future<Uint8List> _changeEvidence(Uint8List input, int owner, String uuid,
   }
 }
 
+// Synthetic-only H1 fixture. The production graph/gesture code is used without
+// opening a vault or authenticating any user. Report only fixture IDs and layout.
+class _H1TrendFixture extends StatefulWidget {
+  final bool arabic;
+  final JSFunction report;
+  const _H1TrendFixture({required this.arabic, required this.report});
+
+  @override
+  State<_H1TrendFixture> createState() => _H1TrendFixtureState();
+}
+
+class _H1TrendFixtureState extends State<_H1TrendFixture> {
+  final _plot = GlobalKey();
+  final _selections = <int>[];
+  final _start = DateTime.utc(2026, 11, 1);
+  final _end = DateTime.utc(2026, 11, 8);
+
+  List<LogEntryData> get _rows => [
+    for (final (id, value, day) in [
+      (6, 210.0, 5), (3, 160.0, 1), (5, 150.0, 2),
+      (1, 80.0, 1), (4, 90.0, 2), (2, 120.0, 1),
+    ])
+      LogEntryData(
+        id: id, createdAt: DateTime.utc(2026, 11, day, 12),
+        loggedAt: id == 4 ? null : DateTime.utc(2026, 11, day, 12),
+        bloodSugar: value, source: 'manual', syncStatus: 'pending',
+        clientUuid: 'h1-synthetic-$id', isSick: false, isStressed: false,
+        isTired: false, isActive: false, ramadanMode: false,
+        syncAttempts: 0, errorSync: false,
+      ),
+  ];
+
+  void _reportAfterLayout() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final box = _plot.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.hasSize) return;
+      final offset = box.localToGlobal(Offset.zero);
+      widget.report.callAsFunction(null, jsonEncode({
+        'left': offset.dx, 'top': offset.dy,
+        'width': box.size.width, 'height': box.size.height,
+        'selections': List<int>.of(_selections),
+      }).toJS);
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _reportAfterLayout();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(body: SafeArea(child: Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text(widget.arabic ? 'اختبار الرسم الزمني' : 'Qualification temporelle H1'),
+        SizedBox(key: _plot, height: 250, child: DashboardTrendPlot(
+          logs: _rows, medications: [
+            MedicationEventData(id: 1, label: 'fixture',
+              takenAt: DateTime.utc(2026, 11, 3, 12), createdAt: _end),
+          ],
+          start: _start, end: _end, low: null, high: null,
+          selectedLogId: _selections.isEmpty ? -1 : _selections.last,
+          unit: 'mg/dL', locale: widget.arabic ? 'ar-MA' : 'fr-FR',
+          dailySummary: true, onSelect: (id) {
+            setState(() => _selections.add(id));
+            _reportAfterLayout();
+          },
+        )),
+        const DashboardTrendLegend(unit: 'mg/dL', low: null, high: null,
+          dailySummary: true, medicationCount: 1),
+        Text('H1: ${_selections.join(", ")}'),
+      ]),
+    )));
+  }
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   _boundLoginFn = ((JSNumber owner) =>
@@ -909,6 +993,24 @@ void main() {
       _fullInspect(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
   _inspectFn = ((JSUint8Array bytes, JSNumber owner) =>
       _inspect(bytes.toDart, owner.toDartInt).then((value) => value.toJS).toJS).toJS;
+  _mountH1TrendFn = ((JSBoolean arabic, JSFunction report) {
+    final ar = arabic.toDart;
+    final base = AminaVisualLanguage.harmonize(AminaTheme.light);
+    final family = ar ? 'NotoSansArabic' : 'Inter';
+    runApp(MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: base.copyWith(
+        textTheme: base.textTheme.apply(fontFamily: family,
+          fontFamilyFallback: kOfflineFontFallbacks),
+        primaryTextTheme: base.primaryTextTheme.apply(fontFamily: family,
+          fontFamilyFallback: kOfflineFontFallbacks),
+      ),
+      locale: Locale(ar ? 'ar' : 'fr'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: _H1TrendFixture(arabic: ar, report: report),
+    ));
+  }).toJS;
   _mountEvidenceUiFn = ((JSFunction operation, JSFunction lock, JSFunction subscribe, JSBoolean arabic) {
     final revoke = ValueNotifier<int>(0);
     subscribe.callAsFunction(null, (() { revoke.value++; }).toJS);
