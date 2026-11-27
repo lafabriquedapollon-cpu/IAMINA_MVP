@@ -251,8 +251,18 @@ SIGNED_PRF="""async()=>{
         lifecycleChecks.foreignCredentialGrant=await no(()=>provision(pA,pending,wrong));
         const foreign=createFixtureFreshAuthority();
         lifecycleChecks.foreignIssuerGrant=await no(()=>provision(pA,pending,foreign.issue(900001,credential)));
-        vaultChecks.explicitProvision=await provision(pA,pending,grantA)&&await provision(pB,pending,grantB);
-        vault.revoke(pA);vault.revoke(pB);
+        // A cancelled request does not consume an untouched grant.
+        const cancelled=await getToken(900001);
+        lifecycleChecks.cancelledFresh=await no(()=>provision(cancelled,()=>false,fresh.issue(900001,credential)));
+        vault.revoke(cancelled);
+        // Concurrent, separately authorized first-create requests share the
+        // same durable owner slot. Exactly one atomic record+marker commit.
+        const pA2=await getToken(900001),grantA2=fresh.issue(900001,credential);
+        const outcomesA=await Promise.allSettled([provision(pA,pending,grantA),provision(pA2,pending,grantA2)]);
+        lifecycleChecks.oneFreshWinner=outcomesA.filter(x=>x.status==='fulfilled'&&x.value===true).length===1&&
+          outcomesA.filter(x=>x.status==='rejected'&&x.reason.message==='D1_PRF_VAULT_REFUSED').length===1;
+        vaultChecks.explicitProvision=lifecycleChecks.oneFreshWinner&&await provision(pB,pending,grantB);
+        vault.revoke(pA);vault.revoke(pA2);vault.revoke(pB);
         const dup=await getToken(900001);
         lifecycleChecks.consumedGrant=await no(()=>provision(dup,pending,grantA));
         vaultChecks.noReprovision=await no(()=>provision(dup,pending,fresh.issue(900001,credential)));vault.revoke(dup);
@@ -741,7 +751,7 @@ def run():
                 assert len(authority)==7 and all(v is True for v in authority.values())
                 print("D1_PRF_SINGLE_AUTHORITY_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(authority),count=len(authority))),flush=True)
                 lifecycle=a.evaluate("window.lifecycleChecks")
-                assert len(lifecycle)==10 and all(v is True for v in lifecycle.values()),lifecycle
+                assert len(lifecycle)==12 and all(v is True for v in lifecycle.values()),lifecycle
                 print("D1_PRF_LIFECYCLE_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(lifecycle),count=len(lifecycle))),flush=True)
                 vault=a.evaluate("window.vaultChecks")
                 assert len(vault)==19 and all(v is True for v in vault.values())
