@@ -17,7 +17,7 @@ export function createAdmissionStore(DB) {
   }
   // Read owner and global fence in one transaction. Callback must be synchronous.
   // Writes and the fence check share one strict readwrite transaction.
-  async function transaction(owner,write,fn) {
+  async function transaction(owner,write,fn,withLifecycle=false) {
     const db=await connect();
     try{
       return await new Promise((resolve,reject)=>{
@@ -31,14 +31,18 @@ export function createAdmissionStore(DB) {
         }
         const store=tx.objectStore(STORE);
         const ownerReq=store.get('owner:'+owner), fenceReq=store.get('fence');
+        const lifecycleReq=withLifecycle?store.get('lifecycle:'+owner):null;
         let ready=0;
         const done=()=>{
-          if(++ready!==2)return;
+          if(++ready!==(withLifecycle?3:2))return;
           try{
-            result=fn(ownerReq.result??null,fenceReq.result??null,store);
+            // Lifecycle callers distinguish absent keys from stored null.
+            result=withLifecycle?fn(ownerReq.result,fenceReq.result,store,lifecycleReq.result):
+              fn(ownerReq.result??null,fenceReq.result??null,store);
           }catch(e){failure=e;tx.abort();}
         };
         ownerReq.onsuccess=done;fenceReq.onsuccess=done;
+        if(lifecycleReq)lifecycleReq.onsuccess=done;
       });
     }finally{db.close();}
   }
@@ -53,5 +57,5 @@ export function createAdmissionStore(DB) {
       });
     }finally{db.close();}
   }
-  return Object.freeze({transaction,readFence});
+  return Object.freeze({transaction,readFence,transactionWithLifecycle:(owner,write,fn)=>transaction(owner,write,fn,true)});
 }

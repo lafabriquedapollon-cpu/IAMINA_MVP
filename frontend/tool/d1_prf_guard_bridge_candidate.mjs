@@ -5,7 +5,7 @@
 import {derivePrfWithDurableCounter} from './d1_prf_counter_candidate.mjs';
 import {createPrfVault} from './d1_prf_vault_candidate.mjs';
 
-export function createPrfBridge({fixtureProvision=false}={}) {
+export function createPrfBridge({fixtureAuthority=null}={}) {
   const keys = new WeakMap();
   const retired = new WeakMap();
   const require = value => {if(!value) throw new Error('D1_PRF_POSSESSION_REFUSED');};
@@ -37,7 +37,7 @@ export function createPrfBridge({fixtureProvision=false}={}) {
       throw new Error('D1_PRF_POSSESSION_REFUSED');
     }
   }
-  const vault=createPrfVault({lookup:token=>keys.get(token),fixtureProvision});
+  const vault=createPrfVault({lookup:token=>keys.get(token),fixtureAuthority});
   const waitRevocation=async token=>{
     const entry=retired.get(token);
     require(entry);
@@ -46,10 +46,10 @@ export function createPrfBridge({fixtureProvision=false}={}) {
   const {revokeEntry,waitRevocation:internalWait,...port}=vault;
   return Object.freeze({acquire,isLive,revoke,waitRevocation,...port});
 }
-export function installPrfBridge({fixtureProvision=false}={}) {
+export function installPrfBridge({fixtureAuthority=null}={}) {
   if(Object.hasOwn(globalThis,'iaminaD1PrfBridge'))
     throw new Error('D1_PRF_POSSESSION_REFUSED');
-  const {provisionFixture,...port}=createPrfBridge({fixtureProvision});
+  const {provisionFixture,...port}=createPrfBridge({fixtureAuthority});
   Object.defineProperty(globalThis,'iaminaD1PrfBridge',{
     value:Object.freeze(port),writable:false,configurable:false,
   });

@@ -14,7 +14,7 @@ ROOT=Path(__file__).parent
 MODULES={name:(ROOT/name).read_bytes() for name in (
     "d1_prf_counter_candidate.mjs","d1_prf_possession_candidate.mjs",
     "d1_prf_guard_bridge_candidate.mjs","d1_prf_vault_candidate.mjs",
-    "d1_admission_store.mjs")}
+    "d1_admission_store.mjs","d1_prf_lifecycle_candidate.mjs")}
 INTEROP=os.environ.get("D1_PRF_INTEROP_JS")
 if INTEROP:
     MODULES["d1-prf-interop.js"]=Path(INTEROP).read_bytes()
@@ -167,10 +167,12 @@ SIGNED_PRF="""async()=>{
         tests.closed=!bridge.isLive(successor);
         if(!Object.values(tests).every(x=>x===true))throw new Error('guard bridge '+JSON.stringify(tests));
         window.guardBridgeChecks=tests;
+        const {createFixtureFreshAuthority}=await import('/d1_prf_lifecycle_candidate.mjs');
+        const fresh=createFixtureFreshAuthority();
         let provisionDart;
         if(typeof window.d1PrfInteropRun==='function'){
             const {installPrfBridge}=await import('/d1_prf_guard_bridge_candidate.mjs');
-            provisionDart=installPrfBridge({fixtureProvision:true});
+            provisionDart=installPrfBridge({fixtureAuthority:fresh.consume});
             window.d1PrfInteropPending=()=>current;
             const runDart=()=>window.d1PrfInteropRun(JSON.stringify(credential),900001);
             const dartChecks={};
@@ -226,7 +228,7 @@ SIGNED_PRF="""async()=>{
         window.authorityChecks=authority;
         const vaultChecks={};
         const vault=typeof provisionDart==='function'?window.iaminaD1PrfBridge:
-          createPrfBridge({fixtureProvision:true});
+          createPrfBridge({fixtureAuthority:fresh.consume});
         const provision=provisionDart??vault.provisionFixture;
         const getToken=async(owner,n=null)=>{counter++;return vault.acquire(JSON.stringify(credential),owner,pending,
           n===null?null:n.toString(16).padStart(64,'0'));};
@@ -239,10 +241,24 @@ SIGNED_PRF="""async()=>{
         vaultChecks.missingRefused=await no(()=>vault.openLease(missing,identity(900001,1),phase,session));
         vault.revoke(missing);
         const pA=await getToken(900001),pB=await getToken(900002);
-        vaultChecks.explicitProvision=await provision(pA,pending)&&await provision(pB,pending);
+        const lifecycleChecks={};
+        lifecycleChecks.noGrant=await no(()=>provision(pA,pending));
+        lifecycleChecks.bearerNotGrant=await no(()=>provision(pA,pending,'synthetic-bearer'));
+        lifecycleChecks.forgedGrant=await no(()=>provision(pA,pending,{}));
+        const grantA=fresh.issue(900001,credential),grantB=fresh.issue(900002,credential);
+        lifecycleChecks.foreignOwnerGrant=await no(()=>provision(pA,pending,grantB));
+        const wrong=fresh.issue(900001,{...credential,credentialId:'AQIDBA'});
+        lifecycleChecks.foreignCredentialGrant=await no(()=>provision(pA,pending,wrong));
+        const foreign=createFixtureFreshAuthority();
+        lifecycleChecks.foreignIssuerGrant=await no(()=>provision(pA,pending,foreign.issue(900001,credential)));
+        vaultChecks.explicitProvision=await provision(pA,pending,grantA)&&await provision(pB,pending,grantB);
         vault.revoke(pA);vault.revoke(pB);
         const dup=await getToken(900001);
-        vaultChecks.noReprovision=await no(()=>provision(dup,pending));vault.revoke(dup);
+        lifecycleChecks.consumedGrant=await no(()=>provision(dup,pending,grantA));
+        vaultChecks.noReprovision=await no(()=>provision(dup,pending,fresh.issue(900001,credential)));vault.revoke(dup);
+        lifecycleChecks.normalPortNoProvision=!Object.hasOwn(createPrfBridge(),'provisionFixture');
+        const normal=typeof provisionDart==='function'?window.iaminaD1PrfBridge:createPrfBridge();
+        lifecycleChecks.installedNoProvision=!Object.hasOwn(normal,'provisionFixture');
         const a=await getToken(900001,2);
         vaultChecks.wrongOwner=await no(()=>vault.openLease(a,identity(900002,2),phase,session));
         vaultChecks.wrongAcquisition=await no(()=>vault.openLease(a,identity(900001,3),phase,session));
@@ -287,6 +303,10 @@ SIGNED_PRF="""async()=>{
             tx.onabort=()=>{db.close();reject(tx.error);};};
         });
         const rows=storedRows.filter(r=>r.cipher);
+        const markers=storedRows.filter(r=>r.state==='sealed');
+        lifecycleChecks.atomicMarkers=markers.length===2&&rows.every(r=>markers.some(m=>m.owner===r.owner&&m.binding===r.binding&&m.version===1));
+        if(!Object.values(lifecycleChecks).every(x=>x===true))throw new Error('lifecycle '+JSON.stringify(lifecycleChecks));
+        window.lifecycleChecks=lifecycleChecks;
         vaultChecks.encryptedAtRest=rows.length===2&&rows.every(r=>r.wrapped.length===40&&
           r.iv.length===12&&r.cipher.length>16&&!Object.hasOwn(r,'originalValue')&&!Object.hasOwn(r,'key')&&
           !new TextDecoder().decode(r.cipher).includes('originalValue'));
@@ -643,6 +663,9 @@ def run():
                 authority=a.evaluate("window.authorityChecks")
                 assert len(authority)==7 and all(v is True for v in authority.values())
                 print("D1_PRF_SINGLE_AUTHORITY_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(authority),count=len(authority))),flush=True)
+                lifecycle=a.evaluate("window.lifecycleChecks")
+                assert len(lifecycle)==10 and all(v is True for v in lifecycle.values()),lifecycle
+                print("D1_PRF_LIFECYCLE_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(lifecycle),count=len(lifecycle))),flush=True)
                 vault=a.evaluate("window.vaultChecks")
                 assert len(vault)==19 and all(v is True for v in vault.values())
                 print("D1_PRF_VAULT_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(vault),count=len(vault))),flush=True)

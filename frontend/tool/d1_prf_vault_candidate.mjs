@@ -3,6 +3,7 @@
 // Trusted same-origin composition; no resistance to compromised origin JS
 // or rollback of an entire browser profile.
 import {createAdmissionStore} from './d1_admission_store.mjs';
+import {assertFresh,createLifecycle,assertExisting} from './d1_prf_lifecycle_candidate.mjs';
 
 const DB='iamina-d1-admission-prf-vault-candidate-v1';
 const owners=new Set([900001,900002]);
@@ -35,7 +36,7 @@ const validEvidence=e=>sameKeys(e,['uuid','originalValue','unit','provenance'])&
   e.originalValue>0&&['mg/dL','mmol/L'].includes(e.unit)&&
   e.provenance==='userEntered'&&Number.isFinite(e.originalValue*(e.unit==='mmol/L'?18.01559:1));
 
-export function createPrfVault({lookup,fixtureProvision=false}) {
+export function createPrfVault({lookup,fixtureAuthority=null}) {
   const store=createAdmissionStore(DB);
   const leases=new WeakMap();
   // Browser timers bound observable waits while JS is scheduled. A suspended
@@ -67,11 +68,12 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
     } finally {plain?.fill(0);}
   }
   // Explicit synthetic setup, never present in the normal installed port.
-  async function provisionFixture(token,isPending) {
+  async function provisionFixture(token,isPending,grant) {
     try {
-      require(fixtureProvision&&typeof isPending==='function'&&isPending()===true);
+      require(typeof fixtureAuthority==='function'&&typeof isPending==='function'&&isPending()===true);
       const entry=getEntry(token);
-      require(!entry.used&&entry.acquisitionId==null);entry.used=true;
+      require(!entry.used&&entry.acquisitionId==null&&fixtureAuthority(grant,entry.owner,entry.binding)===true);
+      entry.used=true;
       const check=()=>require(lookup(token)===entry&&isPending()===true);
       const binding=entry.binding,owner=entry.owner,revision=1;
       let temporary=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt','decrypt']);
@@ -90,9 +92,12 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
         additionalData:aad(owner,binding,revision),tagLength:128},key,plain));}
       finally {plain.fill(0);}
       check();
-      await store.transaction(owner,true,(record,fence,db)=>{
-        check();require(record===null&&fence===null);
+      await store.transactionWithLifecycle(owner,true,(record,fence,db,lifecycle)=>{
+        check();assertFresh(owner,binding,record,lifecycle,fence);
+        // Either both durable writes commit or neither does. No reset/delete
+        // path, including cancellation after commit.
         db.add({owner,binding,revision,wrapped,iv,cipher},'owner:'+owner);
+        db.add(createLifecycle(owner,binding),'lifecycle:'+owner);
       });
       check();
       return true;
@@ -138,8 +143,9 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
       l={possession:token,entry,identity,pending,session,retired:false,key:null,fence:null,record:null};
       entry.lease=l;
       const check=()=>checkPending(l);
-      const record=await store.transaction(identity.owner,false,(r,f)=>{
-        check();require(validFence(f)&&validRecord(r,identity.owner,entry.binding));return r;
+      const record=await store.transactionWithLifecycle(identity.owner,false,(r,f,_db,lifecycle)=>{
+        check();assertExisting(identity.owner,entry.binding,r,lifecycle);
+        require(validFence(f===undefined?null:f)&&f!==null&&validRecord(r,identity.owner,entry.binding));return r;
       });
       check();
       const unwrapped=await unwrap(record,entry);
@@ -148,9 +154,10 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
       await decode(record,l.key); // authenticate before publishing durable authority
       check();
       l.record=record;
-      await store.transaction(identity.owner,true,(r,f,db)=>{
-        check();require(validFence(f)&&sameRecord(r,record));
-        require(f===null||f.acquisitionId!==identity.acquisitionId);
+      await store.transactionWithLifecycle(identity.owner,true,(r,f,db,lifecycle)=>{
+        check();assertExisting(identity.owner,entry.binding,r,lifecycle);
+        require(f!==null&&validFence(f===undefined?null:f)&&sameRecord(r,record));
+        require(f===undefined||f.acquisitionId!==identity.acquisitionId);
         const serial=(f?.serial??0)+1;require(positive(serial));
         const next={...identity,serial,active:true,binding:entry.binding,revision:record.revision};
         l.fence=next;
@@ -181,8 +188,9 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
   }
   async function current(l,sessionOnly=false) {
     local(l,sessionOnly);
-    const record=await store.transaction(l.identity.owner,false,(r,f)=>{
+    const record=await store.transactionWithLifecycle(l.identity.owner,false,(r,f,_db,lifecycle)=>{
       local(l,sessionOnly);
+      assertExisting(l.identity.owner,l.entry.binding,r,lifecycle);
       require(validFence(f)&&sameFence(f,l.fence)&&sameRecord(r,l.record));return r;
     });
     local(l,sessionOnly);return record;
@@ -218,5 +226,5 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
   }
   return Object.freeze({openLease,verifyLease,readEvidence,retireLease,
     revokeEntry,waitRevocation,
-    ...(fixtureProvision?{provisionFixture}:{})});
+    ...(typeof fixtureAuthority==='function'?{provisionFixture}:{})});
 }
