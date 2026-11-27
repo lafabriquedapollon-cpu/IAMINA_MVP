@@ -16,7 +16,7 @@ import 'package:amina/core/domain/glucose_quantity_storage_envelope.dart';
 import 'package:amina/core/domain/glucose_display_projection.dart';
 import 'package:amina/data/drift/patient_vault_scope.dart';
 import 'package:amina/data/drift/patient_treatment_declaration_store.dart';
-import 'package:drift/drift.dart';
+import 'package:drift/drift.dart' hide Column;
 import 'package:drift/wasm.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show listEquals;
