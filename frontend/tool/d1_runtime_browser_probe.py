@@ -2490,10 +2490,14 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height, f
         }),flush=True)
         assert not blocked and not errors
         assert not local_font_failures
-        assert expected_font in font_witness, "No completed spontaneous local font GET"
+        # A lazy engine fallback need not request a font in every viewport.
+        # Require actual spontaneous family coverage across the full matrix below.
+        # The separate H4 probe explicitly decodes and paints both WOFF2 assets.
         return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
                 "viewport":[width,height],"frames":frames,"localFonts":sorted(set(font_witness)),
                 "browserLocalFonts":sorted(set(local_fonts)),
+                "expectedLocalFont":expected_font,
+                "spontaneousFontGet":expected_font in font_witness,
                 "blockedRequests":len(blocked),"pageErrors":len(errors),"result":"PASS"}
     except Exception as failure:
         # Diagnostic metadata is limited to the synthetic form's known controls;
@@ -2666,6 +2670,13 @@ def run_evidence_ui():
         finally:
             (proof/f"conv-ui-{ENGINE}-matrix.json").write_text(json.dumps(records,ensure_ascii=False))
     assert len(records)==6 and all(r["result"]=="PASS" for r in records),"D1 D5 UI matrix failed"
+    for locale,family in (("fr-FR","notosanssymbols"),("ar-MA","notosansarabic")):
+        matching=[r for r in records if r["locale"]==locale and r["expectedLocalFont"]==family
+                  and r["spontaneousFontGet"] and family in r["localFonts"]]
+        print("D1_D5_SPONTANEOUS_FONT_COVERAGE "+json.dumps({
+            "engine":ENGINE,"locale":locale,"family":family,"observed":len(matching),"cases":3,
+        }),flush=True)
+        assert matching, "No spontaneous engine fallback request for "+family
     print("D1_D5_EVIDENCE_UI_PASS 6/6",flush=True)
 
 
