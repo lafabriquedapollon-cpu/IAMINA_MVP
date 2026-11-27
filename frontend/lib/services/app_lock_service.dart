@@ -33,7 +33,7 @@ final class D1VaultAdmissionProof {
   void _revokePossession() {
     if (_possession == null || _possessionRevoked) return;
     _possessionRevoked = true;
-    _possession.revoke();
+    try { _possession?.revoke(); } catch (_) { /* authority already revoked */ }
   }
 }
 
@@ -517,7 +517,7 @@ class AppLockService extends ChangeNotifier {
       possession = null; // ownership transferred to the one-shot proof
       return proof;
     } catch (_) {
-      possession?.revoke();
+      try { possession?.revoke(); } catch (_) { /* never publish a ticket */ }
       throw const AppLockException('vault_prf_possession_refused');
     } finally {
       _proofInFlight = false;

@@ -154,7 +154,11 @@ final class _RuntimeBackend implements D1DurableRuntimeBackend {
     expect(acquisition.isPending, isTrue);
     expect(acquisition.isSessionCurrent, isFalse);
     lastAcquisition = acquisition;
-    if (takePrf) possession = acquisition.takePrfPossession();
+    if (takePrf) {
+      possession = acquisition.takePrfPossession();
+      expect(acquisition.takePrfPossession,
+          throwsA(isA<D1RuntimeAdmissionException>()));
+    }
     if (!entered.isCompleted) entered.complete(acquisition);
     if (delayed != null) return delayed!.future;
     return last = _RuntimeLease(acquisition.identity, acquisition.acquisitionId);
@@ -803,6 +807,49 @@ void main() {
     await refused;
     expect(late.isLive, isFalse);
     expect(backend.calls, 0);
+  });
+
+  test('B2a.3b identity transition before PRF ACK destroys the late handle', () async {
+    final f = _Fixture();
+    await f.start();
+    await f.lock.unlock();
+    final prf = _Prf()..delayed = Completer<D1PrfPossession>();
+    final backend = _RuntimeBackend()..takePrf = true;
+    final result = D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit();
+    final refused = expectLater(result, _refusal);
+    await prf.entered.future;
+    f.pendingLogin = Completer<http.Response>();
+    final transition = f.auth.signInWithEmail('b@example.invalid', 'fixture');
+    expect(prf.pending!(), isFalse);
+    final late = _PrfPossession();
+    prf.delayed!.complete(late);
+    await refused;
+    expect(late.isLive, isFalse);
+    expect(backend.calls, 0);
+    f.pendingLogin!.complete(_login(_b));
+    await transition;
+  });
+
+  test('B2a.3b lock after handle handoff before durable lease ACK', () async {
+    final f = _Fixture();
+    await f.start();
+    await f.lock.unlock();
+    final prf = _Prf();
+    final backend = _RuntimeBackend()
+      ..takePrf = true
+      ..delayed = Completer<D1DurableRuntimeLease>();
+    final pending = D1RuntimeAdmission(f.auth, f.lock, backend, prf: prf).admit();
+    final refused = expectLater(pending, throwsA(isA<D1RuntimeAdmissionException>()));
+    final request = await backend.entered.future;
+    expect(backend.possession!.isLive, isTrue);
+    f.lock.lock();
+    expect(request.isCancelled, isTrue);
+    expect(backend.possession!.isLive, isFalse);
+    final lease = _RuntimeLease(request.identity, request.acquisitionId);
+    backend.delayed!.complete(lease);
+    await refused;
+    expect(lease.retireCalls, 1);
+    expect(lease.reads, 0);
   });
 
 }

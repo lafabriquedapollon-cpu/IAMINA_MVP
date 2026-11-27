@@ -1379,6 +1379,12 @@ jobs:
             flutter build web --release --no-pub --no-web-resources-cdn --target=tool/d1_runtime_probe.dart --output="$RUNNER_TEMP/d1-runtime-web"
             cp tool/d1_archive_candidate.mjs tool/d1_checkpoint_candidate.mjs tool/d1_durable_mutation_candidate.mjs tool/d1_admission_candidate.mjs tool/d1_possession_candidate.mjs tool/d1_checkpoint_crypto.mjs tool/d1_admission_store.mjs tool/d1_clinical_session_candidate.mjs "$RUNNER_TEMP/d1-runtime-web/"
           fi
+      - name: Compile isolated D1 PRF Dart interop probe
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          dart compile js tool/d1_prf_interop_probe.dart -o "$RUNNER_TEMP/d1-runtime-web/d1-prf-interop.js"
       - name: Prepare licensed local engine fallback fonts (both isolated Web targets)
         if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
         run: |
@@ -1515,6 +1521,12 @@ jobs:
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then export D1_CUTOVER_PROBE=1; fi
           D2_BROWSER_TARGET=chromium "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+      - name: D1 PRF actual Dart interop — chromium
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          D1_PRF_ENGINE=chromium D1_PRF_INTEROP_JS="$RUNNER_TEMP/d1-runtime-web/d1-prf-interop.js" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_prf_counter_browser_probe.py
       - name: H4 local font artifact and expanded egress refusal — chromium
         if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
         timeout-minutes: 5
@@ -1740,6 +1752,12 @@ jobs:
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install webkit
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then export D1_CUTOVER_PROBE=1; fi
           "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
+      - name: D1 PRF actual Dart interop — webkit
+        if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          D1_PRF_ENGINE=webkit D1_PRF_INTEROP_JS="$RUNNER_TEMP/d1-runtime-web/d1-prf-interop.js" "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d1_prf_counter_browser_probe.py
       - name: H4 local font artifact and expanded egress refusal — webkit
         if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
         timeout-minutes: 5

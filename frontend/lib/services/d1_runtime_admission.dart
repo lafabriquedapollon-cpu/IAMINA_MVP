@@ -41,7 +41,8 @@ final class D1RuntimeAcquisition {
 
   D1PrfPossession takePrfPossession() {
     if (!isPending) throw const D1RuntimeAdmissionException();
-    return _takePrf();
+    try { return _takePrf(); }
+    catch (_) { throw const D1RuntimeAdmissionException(); }
   }
 
   void _cancel() {
@@ -176,13 +177,19 @@ final class D1RuntimeAdmission {
     final guard = _lock.consumeVaultAdmissionProof(proof, owner: owner);
     D1RuntimeSession? session;
     D1DurableRuntimeLease? lease;
-    final acquisition = D1RuntimeAcquisition._(
-        identity,
-        () => _auth.verifiedNativeAdmissionGeneration == generation &&
-            guard.checkPending(owner, identity.epoch),
-        () => guard.checkSession(owner, identity.epoch),
-        () => guard.takePrfPossession(owner, identity.epoch),
-        guard.revokePrfPossession);
+    late final D1RuntimeAcquisition acquisition;
+    try {
+      acquisition = D1RuntimeAcquisition._(
+          identity,
+          () => _auth.verifiedNativeAdmissionGeneration == generation &&
+              guard.checkPending(owner, identity.epoch),
+          () => guard.checkSession(owner, identity.epoch),
+          () => guard.takePrfPossession(owner, identity.epoch),
+          guard.revokePrfPossession);
+    } catch (_) {
+      guard.revokePrfPossession();
+      throw const D1RuntimeAdmissionException();
+    }
     bool matches(D1DurableRuntimeLease candidate) =>
         candidate.identity == identity &&
         candidate.acquisitionId == acquisition.acquisitionId;

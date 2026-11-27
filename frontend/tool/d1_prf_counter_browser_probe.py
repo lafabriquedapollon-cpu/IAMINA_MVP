@@ -11,6 +11,9 @@ ROOT=Path(__file__).parent
 MODULES={name:(ROOT/name).read_bytes() for name in (
     "d1_prf_counter_candidate.mjs","d1_prf_possession_candidate.mjs",
     "d1_prf_guard_bridge_candidate.mjs")}
+INTEROP=os.environ.get("D1_PRF_INTEROP_JS")
+if INTEROP:
+    MODULES["d1-prf-interop.js"]=Path(INTEROP).read_bytes()
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -146,6 +149,26 @@ SIGNED_PRF="""async()=>{
         bridge.revoke(successor);
         tests.closed=!bridge.isLive(successor);
         if(!Object.values(tests).every(x=>x===true))throw new Error('guard bridge '+JSON.stringify(tests));
+        window.guardBridgeChecks=tests;
+        if(typeof window.d1PrfInteropRun==='function'){
+            const {installPrfBridge}=await import('/d1_prf_guard_bridge_candidate.mjs');
+            installPrfBridge();
+            window.d1PrfInteropPending=()=>current;
+            const runDart=()=>window.d1PrfInteropRun(JSON.stringify(credential),900001);
+            const dartChecks={};
+            counter=5;
+            dartChecks.realInteropHandle=await runDart()==='PASS';
+            counter=6;omitPrf=true;
+            dartChecks.realInteropAbsent=await runDart()==='REFUSED';
+            omitPrf=false;
+            current=false;
+            dartChecks.realInteropRetired=await runDart()==='REFUSED';
+            current=true;
+            const dartAfter=await prfCounter.readPrfCounter(credential,pending);
+            dartChecks.realInteropDurableAck=dartAfter.signCount===5&&dartAfter.revision===6;
+            if(!Object.values(dartChecks).every(x=>x===true))throw new Error('Dart bridge '+JSON.stringify(dartChecks));
+            window.dartBridgeChecks=dartChecks;
+        }
         return true;
     }finally{
         if(pubDescriptor)Object.defineProperty(window,'PublicKeyCredential',pubDescriptor);
@@ -232,7 +255,17 @@ def run():
                     const after=await prfCounter.readPrfCounter(c,pending);
                     return after.revision===3&&after.signCount===6;
                 }"""))
+                if INTEROP:
+                    a.add_script_tag(url=origin+"/d1-prf-interop.js")
+                    a.wait_for_function("typeof window.d1PrfInteropRun==='function'")
                 check("signed_prf_durable_ack_and_replay",a.evaluate(SIGNED_PRF))
+                guard=a.evaluate("window.guardBridgeChecks")
+                assert len(guard)==10 and all(v is True for v in guard.values())
+                print("D1_PRF_GUARD_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(guard),count=len(guard))),flush=True)
+                if INTEROP:
+                    dart=a.evaluate("window.dartBridgeChecks")
+                    assert len(dart)==4 and all(v is True for v in dart.values())
+                    print("D1_PRF_DART_INTEROP_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(dart),count=len(dart))),flush=True)
                 check("zero_external_requests",not blocked)
             finally: ctx.close()
         print("D1_PRF_COUNTER_PASS "+json.dumps(dict(source=sha,engine=name,checks=checks,count=len(checks))),flush=True)
