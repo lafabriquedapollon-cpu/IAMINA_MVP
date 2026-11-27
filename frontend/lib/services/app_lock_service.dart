@@ -549,7 +549,7 @@ class AppLockService extends ChangeNotifier {
   /// advance the counter. Legacy UI stays locked: the D1 guard, not the
   /// historical UI flag, owns admission. No fallback or implicit provisioning.
   Future<D1VaultAdmissionProof> issuePrfVaultAdmissionProof(
-      D1PrfAcquirer prf) async {
+      D1PrfAcquirer prf, {String? acquisitionId}) async {
     _retireAdmission();
     final owner = _authService?.boundNativeAccountId;
     final generation = _authService?.verifiedNativeAdmissionGeneration;
@@ -575,7 +575,8 @@ class AppLockService extends ChangeNotifier {
     D1PrfPossession? possession;
     try {
       if (!pending()) throw const AppLockException('vault_prf_possession_refused');
-      possession = await prf.acquire(credential, owner, pending);
+      possession = await prf.acquire(credential, owner, pending,
+          acquisitionId: acquisitionId);
       if (!pending() || !possession.isLive) {
         throw const AppLockException('vault_prf_possession_refused');
       }

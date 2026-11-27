@@ -31,7 +31,7 @@ Future<JSString> _vaultProbe(JSString credential, JSNumber owner) async {
   bool pending = true, active = false;
   final possession = await acquirer.acquire(
       AppLockCredential.decode(credential.toDart), owner.toDartInt,
-      () => pending && _pending().toDart);
+      () => pending && _pending().toDart, acquisitionId: List.filled(64,'d').join());
   D1WebPrfLease? lease;
   try {
     lease = await acquirer.openBoundLease(possession, owner: owner.toDartInt,

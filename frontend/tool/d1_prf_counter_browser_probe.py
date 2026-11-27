@@ -212,13 +212,14 @@ SIGNED_PRF="""async()=>{
         const vault=typeof provisionDart==='function'?window.iaminaD1PrfBridge:
           createPrfBridge({fixtureProvision:true});
         const provision=provisionDart??vault.provisionFixture;
-        const getToken=async(owner)=>{counter++;return vault.acquire(JSON.stringify(credential),owner,pending);};
+        const getToken=async(owner,n=null)=>{counter++;return vault.acquire(JSON.stringify(credential),owner,pending,
+          n===null?null:n.toString(16).padStart(64,'0'));};
         const identity=(owner,n)=>JSON.stringify({owner,epoch:1,generation:1,acquisitionId:n.toString(16).padStart(64,'0')});
         const evidenceId='ac123456-1234-4abc-8def-000000000001';
         const no=async fn=>{try{await fn();return false;}catch(e){return e.message==='D1_PRF_VAULT_REFUSED';}};
         let active=false,waiting=true;
         const phase=()=>waiting,session=()=>active;
-        const missing=await getToken(900001);
+        const missing=await getToken(900001,1);
         vaultChecks.missingRefused=await no(()=>vault.openLease(missing,identity(900001,1),phase,session));
         vault.revoke(missing);
         const pA=await getToken(900001),pB=await getToken(900002);
@@ -226,8 +227,9 @@ SIGNED_PRF="""async()=>{
         vault.revoke(pA);vault.revoke(pB);
         const dup=await getToken(900001);
         vaultChecks.noReprovision=await no(()=>provision(dup,pending));vault.revoke(dup);
-        const a=await getToken(900001);
+        const a=await getToken(900001,2);
         vaultChecks.wrongOwner=await no(()=>vault.openLease(a,identity(900002,2),phase,session));
+        vaultChecks.wrongAcquisition=await no(()=>vault.openLease(a,identity(900001,3),phase,session));
         const lA=await vault.openLease(a,identity(900001,2),phase,session);
         vaultChecks.opaqueLease=Object.isFrozen(lA)&&Object.keys(lA).length===0&&!await vault.verifyLease({});
         vaultChecks.pendingVerify=await vault.verifyLease(lA);
@@ -235,14 +237,14 @@ SIGNED_PRF="""async()=>{
         // Pending read retires the lease: admission is not a read authority.
         vaultChecks.pendingReadRefused=await no(()=>vault.readEvidence(lA,evidenceId));
         vault.revoke(a);
-        const a2=await getToken(900001);
+        const a2=await getToken(900001,4);
         const lA2=await vault.openLease(a2,identity(900001,4),phase,session);
         waiting=false;active=true;
         const aValue=JSON.parse(await vault.readEvidence(lA2,evidenceId));
         vaultChecks.aEvidence=aValue.originalValue===7.83&&aValue.unit==='mmol/L';
         vaultChecks.missingRow=await vault.readEvidence(lA2,'ac123456-1234-4abc-8def-000000000002')==='null';
         waiting=true;active=false;
-        const b=await getToken(900002),lB=await vault.openLease(b,identity(900002,5),phase,session);
+        const b=await getToken(900002,5),lB=await vault.openLease(b,identity(900002,5),phase,session);
         waiting=false;active=true;
         vaultChecks.oldFence=!await vault.verifyLease(lA2)&&await no(()=>vault.readEvidence(lA2,evidenceId));
         await vault.retireLease(lA2);
@@ -253,7 +255,7 @@ SIGNED_PRF="""async()=>{
         vaultChecks.revoked=!await vault.verifyLease(lB)&&await no(()=>vault.readEvidence(lB,evidenceId));
         await vault.retireLease(lB);
         waiting=true;active=false;
-        const a3=await getToken(900001),lA3=await vault.openLease(a3,identity(900001,6),phase,session);
+        const a3=await getToken(900001,6),lA3=await vault.openLease(a3,identity(900001,6),phase,session);
         waiting=false;active=true;
         vaultChecks.reopenA=JSON.parse(await vault.readEvidence(lA3,evidenceId)).originalValue===7.83;
         await vault.retireLease(lA3);vault.revoke(a3);
@@ -280,8 +282,9 @@ SIGNED_PRF="""async()=>{
             if(outcome!=='PASS')throw new Error('Dart vault '+outcome);
             window.vaultDartPass=true;
         }
-        // Keep credential and simulated signer alive in the page for later
-        // restart checks via persisted encrypted bytes, not exported keys.
+        // Synthetic signing key only, held by test harness across browser
+        // restart. Neither the PRF wrapping key nor the data key is exported.
+        window.vaultRestartFixture={credential,counter,signer:await crypto.subtle.exportKey('jwk',pair.privateKey)};
         return true;
     }finally{
         if(pubDescriptor)Object.defineProperty(window,'PublicKeyCredential',pubDescriptor);
@@ -379,7 +382,7 @@ def run():
                 assert len(authority)==7 and all(v is True for v in authority.values())
                 print("D1_PRF_SINGLE_AUTHORITY_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(authority),count=len(authority))),flush=True)
                 vault=a.evaluate("window.vaultChecks")
-                assert len(vault)==17 and all(v is True for v in vault.values())
+                assert len(vault)==18 and all(v is True for v in vault.values())
                 print("D1_PRF_VAULT_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(vault),count=len(vault))),flush=True)
                 if INTEROP:
                     assert a.evaluate("window.vaultDartPass") is True

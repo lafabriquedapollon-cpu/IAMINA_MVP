@@ -17,7 +17,6 @@ const bytes=(x,n)=>x instanceof Uint8Array&&x.length===n;
 const sameBytes=(a,b)=>a instanceof Uint8Array&&b instanceof Uint8Array&&
   a.length===b.length&&a.every((v,i)=>v===b[i]);
 const sameKeys=(x,keys)=>x&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));
-const credentialBinding=c=>JSON.stringify([c.credentialId,c.publicKeySpki,c.rpId,c.origin]);
 const aad=(owner,binding,revision)=>enc.encode(JSON.stringify(['IAMINA-D1-PRF-VAULT-V1',owner,binding,revision]));
 const validIdentity=i=>sameKeys(i,['owner','epoch','generation','acquisitionId'])&&
   owners.has(i.owner)&&uint(i.epoch)&&positive(i.generation)&&
@@ -64,7 +63,7 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
     try {
       require(fixtureProvision&&typeof isPending==='function'&&isPending()===true);
       const entry=getEntry(token);
-      require(!entry.used);entry.used=true;
+      require(!entry.used&&entry.acquisitionId==null);entry.used=true;
       const check=()=>require(lookup(token)===entry&&isPending()===true);
       const binding=entry.binding,owner=entry.owner,revision=1;
       let temporary=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt','decrypt']);
@@ -94,6 +93,7 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
   async function retireInternal(l) {
     l.retired=true;
     l.key=null;
+    l.entry.key=null;
     if(!l.fence)return;
     await store.transaction(l.identity.owner,true,(_r,f,db)=>{
       require(validFence(f));
@@ -104,10 +104,12 @@ export function createPrfVault({lookup,fixtureProvision=false}) {
     let l;
     try {
       const entry=getEntry(token),identity=Object.freeze(JSON.parse(identityJson));
-      require(validIdentity(identity)&&identity.owner===entry.owner&&!entry.used&&
+      require(validIdentity(identity)&&identity.owner===entry.owner&&
+        identity.acquisitionId===entry.acquisitionId&&!entry.used&&
         typeof pending==='function'&&typeof session==='function'&&pending()===true&&session()===false);
       entry.used=true;
       l={possession:token,entry,identity,pending,session,retired:false,key:null,fence:null,record:null};
+      entry.lease=l;
       const check=()=>checkPending(l);
       const record=await store.transaction(identity.owner,false,(r,f)=>{
         check();require(validFence(f)&&validRecord(r,identity.owner,entry.binding));return r;

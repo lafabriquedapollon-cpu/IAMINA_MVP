@@ -9,18 +9,25 @@ export function createPrfBridge({fixtureProvision=false}={}) {
   const keys = new WeakMap();
   const require = value => {if(!value) throw new Error('D1_PRF_POSSESSION_REFUSED');};
   const isLive = token => !!token && typeof token === 'object' && keys.has(token);
-  const revoke = token => {if(isLive(token)) keys.delete(token);};
-  async function acquire(credentialJson, owner, isPending) {
+  const revoke = token => {
+    const entry=keys.get(token);
+    if(!entry)return;
+    keys.delete(token);
+    entry.key=null;
+    if(entry.lease){entry.lease.retired=true;entry.lease.key=null;}
+  };
+  async function acquire(credentialJson, owner, isPending, acquisitionId=null) {
     let token;
     try {
-      require(typeof isPending==='function' && isPending()===true);
+      require(typeof isPending==='function' && isPending()===true &&
+        (acquisitionId==null || (typeof acquisitionId==='string'&&/^[0-9a-f]{64}$/.test(acquisitionId))));
       const credential=JSON.parse(credentialJson);
       const key=await derivePrfWithDurableCounter({credential,owner,isPending});
       require(isPending()===true && key instanceof CryptoKey &&
         !key.extractable && key.algorithm.name==='AES-KW');
       token=Object.freeze(Object.create(null));
       keys.set(token,{key,owner,binding:JSON.stringify([credential.credentialId,
-        credential.publicKeySpki,credential.rpId,credential.origin]),used:false});
+        credential.publicKeySpki,credential.rpId,credential.origin]),acquisitionId,used:false});
       require(isPending()===true);
       return token;
     } catch (_) {

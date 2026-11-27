@@ -7,7 +7,7 @@ import 'd1_prf_possession.dart';
 
 @JS('iaminaD1PrfBridge.acquire')
 external JSPromise<JSObject> _acquire(JSString credential, JSNumber owner,
-    JSFunction pending);
+    JSFunction pending, JSString? acquisitionId);
 @JS('iaminaD1PrfBridge.isLive')
 external JSBoolean _isLive(JSObject token);
 @JS('iaminaD1PrfBridge.revoke')
@@ -54,12 +54,12 @@ final class D1WebPrfAcquirer implements D1PrfAcquirer {
 
   @override
   Future<D1PrfPossession> acquire(AppLockCredential credential, int owner,
-      bool Function() isPending) async {
+      bool Function() isPending, {String? acquisitionId}) async {
     _WebPossession? possession;
     try {
       if (!isPending()) throw const AppLockException('vault_prf_possession_refused');
       final pending = (() => isPending().toJS).toJS;
-      final token = await _acquire(credential.encode().toJS, owner.toJS, pending).toDart;
+      final token = await _acquire(credential.encode().toJS, owner.toJS, pending, acquisitionId?.toJS).toDart;
       possession = _WebPossession(token);
       if (!isPending() || !possession.isLive) {
         throw const AppLockException('vault_prf_possession_refused');

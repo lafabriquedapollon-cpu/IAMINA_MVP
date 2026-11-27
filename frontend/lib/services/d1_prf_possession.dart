@@ -12,5 +12,5 @@ abstract interface class D1PrfAcquirer {
   // Only resolves after verified PRF and the credential-global durable CAS.
   // Must recheck isPending around async work and discard late results.
   Future<D1PrfPossession> acquire(AppLockCredential credential, int owner,
-      bool Function() isPending);
+      bool Function() isPending, {String? acquisitionId});
 }

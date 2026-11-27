@@ -24,9 +24,8 @@ final class D1RuntimeAcquisition {
   final void Function() _revokePrf;
   final Completer<void> _cancelled = Completer<void>();
 
-  D1RuntimeAcquisition._(this.identity, this._pending, this._session,
-      this._takePrf, this._revokePrf)
-      : acquisitionId = _newId();
+  D1RuntimeAcquisition._(this.identity, this.acquisitionId,
+      this._pending, this._session, this._takePrf, this._revokePrf);
 
   static String _newId() {
     final random = Random.secure();
@@ -170,17 +169,18 @@ final class D1RuntimeAdmission {
       throw const D1RuntimeAdmissionException();
     }
     final identity = (owner: owner, epoch: AuthService.authEpoch, generation: generation);
+    final acquisitionId = D1RuntimeAcquisition._newId();
     final prf = _prf;
     final proof = prf == null
         ? await _lock.issueVaultAdmissionProof()
-        : await _lock.issuePrfVaultAdmissionProof(prf);
+        : await _lock.issuePrfVaultAdmissionProof(prf, acquisitionId: acquisitionId);
     final guard = _lock.consumeVaultAdmissionProof(proof, owner: owner);
     D1RuntimeSession? session;
     D1DurableRuntimeLease? lease;
     late final D1RuntimeAcquisition acquisition;
     try {
       acquisition = D1RuntimeAcquisition._(
-          identity,
+          identity, acquisitionId,
           () => _auth.verifiedNativeAdmissionGeneration == generation &&
               guard.checkPending(owner, identity.epoch),
           () => guard.checkSession(owner, identity.epoch),

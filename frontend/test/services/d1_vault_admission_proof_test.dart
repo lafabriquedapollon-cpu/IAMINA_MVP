@@ -189,12 +189,14 @@ final class _Prf implements D1PrfAcquirer {
   bool Function()? pending;
   AppLockCredential? credential;
   int? owner;
+  String? acquiredId;
   final entered = Completer<void>();
   Completer<D1PrfPossession>? delayed;
   _PrfPossession? last;
   @override
   Future<D1PrfPossession> acquire(AppLockCredential c, int o,
-      bool Function() isPending) async {
+      bool Function() isPending, {String? acquisitionId}) async {
+    acquiredId = acquisitionId;
     calls++;
     credential = c;
     owner = o;
@@ -710,6 +712,7 @@ void main() {
     expect(prf.credential!.credentialId, _d1Credential.credentialId);
     expect(prf.credential!.signCount, _d1Credential.signCount);
     expect(backend.possession, same(prf.last));
+    expect(prf.acquiredId, backend.lastAcquisition!.acquisitionId);
     expect(backend.possession!.isLive, isTrue);
     expect(session.isActive, isTrue);
     expect(f.lock.isUnlocked, isFalse);
