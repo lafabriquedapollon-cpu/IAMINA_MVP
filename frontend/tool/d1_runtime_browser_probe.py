@@ -2384,22 +2384,31 @@ def exercise_evidence_ui(browser_type, profile, locale, origin, width, height, f
         # Require exactly one focused editor before sending real keyboard events.
         native=page.locator("input:focus, textarea:focus")
         expect(native).to_have_count(1,timeout=10000)
-        # R11: replace platform-dependent select-all shortcuts with explicit
-        # native selection. No value assignment, force, retry or event dispatch.
-        stage=prefix+"-select"
-        native.select_text(timeout=10000)
-        expect(native).to_have_count(1,timeout=10000)
-        selection=native.evaluate("""el=>({
-            length:el.value.length,start:el.selectionStart,end:el.selectionEnd
-        })""")
-        print("D1_D5_SELECTION_DIAG "+json.dumps({
+        # B1-R1: clear through a bounded native keyboard plan rather than
+        # relying on select-all, which can collapse during Flutter focus.
+        # Read the actual selection after two paint frames; no DOM mutation.
+        stage=prefix+"-clear-plan"
+        selection=native.evaluate("""async el=>{
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+            return {length:el.value.length,start:el.selectionStart,end:el.selectionEnd};
+        }""")
+        length,start,end=(selection[k] for k in ("length","start","end"))
+        assert isinstance(start,int) and isinstance(end,int) and 0<=start<=end<=length<=64,selection
+        print("D1_D5_CLEAR_PLAN "+json.dumps({
             "engine":ENGINE,"locale":locale,"width":width,"stage":stage,
             "selection":selection,
         }),flush=True)
-        assert selection["start"]==0 and selection["end"]==selection["length"],selection
+        # Delete the selected range once, then its prefix and suffix.
+        # Each key has a precise expected length; no retries or value writes.
+        plan=(["Backspace"] if end>start else [])+["Backspace"]*start+["Delete"]*(length-end)
+        lengths=([length-(end-start)] if end>start else [])+list(range(length-(end-start)-1,length-end-1,-1))+list(range(length-end-1,-1,-1))
+        assert len(plan)==len(lengths)
         stage=prefix+"-replace"
-        # Use the focused browser editor and a real keyboard deletion.
-        page.keyboard.press("Delete")
+        for key,expected_length in zip(plan,lengths):
+            expect(native).to_have_count(1,timeout=10000)
+            page.keyboard.press(key)
+            observed=native.evaluate("el=>el.value.length")
+            assert observed==expected_length,{"key":key,"expectedLength":expected_length,"observedLength":observed}
         stage=prefix+"-empty"
         try:
             expect(native).to_have_count(1,timeout=10000)
