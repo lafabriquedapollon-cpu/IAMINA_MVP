@@ -9,6 +9,7 @@ import sys
 import threading
 from playwright.sync_api import sync_playwright
 from h4_websocket_guard import attach_websocket_guard
+from h4_egress_probe import exercise_egress
 
 
 def sha(path):
@@ -209,7 +210,8 @@ def main():
     inventory = fonts(Path(app), Path(runtime))
     result = {"source": source, "engine": engine, "font_assets": inventory,
               "font_render": render_local_fonts(engine, Path(app), Path(runtime), inventory, proof),
-              "websocket_negative": websocket_negative(engine), "result": "PASS",
+              "websocket_negative": websocket_negative(engine),
+              "egress": exercise_egress(engine), "result": "PASS",
               "scope": "synthetic harness; explicit browser decoder separate from spontaneous Flutter fallback; not universal network containment"}
     (proof / f"h4-r1-{engine}.json").write_text(json.dumps(result, indent=2))
     print("H4_R1_PASS " + json.dumps(result), flush=True)

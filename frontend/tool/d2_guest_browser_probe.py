@@ -10,6 +10,7 @@ import threading
 
 from playwright.sync_api import sync_playwright, expect
 from h4_websocket_guard import attach_websocket_guard
+from h4_egress_guard import static_request_allowed, attach_direct_transport_guard
 from PIL import Image
 
 WEB = Path("frontend/build/web").resolve()
@@ -116,13 +117,14 @@ def run():
                                             legacy_requests.append(url.split("?")[0])
                                             r.abort()
                                             return
-                                        if url.startswith(origin + "/") and "/api/" not in url:
+                                        if static_request_allowed(r.request, (origin,)):
                                             r.continue_()
                                         else:
                                             blocked.append(url.split("?")[0])
                                             r.abort()
                                     ctx.route("**/*", route)
                                     attach_websocket_guard(ctx, blocked)
+                                    attach_direct_transport_guard(ctx, blocked)
                                     if cutover:
                                         ctx.add_init_script("""(() => {
                                           window.__d1StorageAttempts = [];

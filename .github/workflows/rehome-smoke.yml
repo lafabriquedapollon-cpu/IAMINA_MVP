@@ -1377,7 +1377,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/d1-font-venv"
-          "$RUNNER_TEMP/d1-font-venv/bin/python" -m pip install --only-binary=:all: fonttools==4.63.0 brotli==1.2.0
+          "$RUNNER_TEMP/d1-font-venv/bin/python" -m pip install --only-binary=:all: --require-hashes -r scripts/h4-font-requirements.txt
           "$RUNNER_TEMP/d1-font-venv/bin/python" scripts/prepare_d1_runtime_fonts.py "$RUNNER_TEMP/d1-runtime-web" frontend/assets/fonts
           "$RUNNER_TEMP/d1-font-venv/bin/python" scripts/prepare_d1_runtime_fonts.py frontend/build/web frontend/assets/fonts
       - name: Package exact source and synthetic build digest
@@ -1499,7 +1499,7 @@ jobs:
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install --with-deps chromium
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then export D1_CUTOVER_PROBE=1; fi
           D2_BROWSER_TARGET=chromium "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
-      - name: H4 local font artifact and WebSocket refusal — chromium
+      - name: H4 local font artifact and expanded egress refusal — chromium
         if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
         timeout-minutes: 5
         run: |
@@ -1721,7 +1721,7 @@ jobs:
           "$RUNNER_TEMP/d2-browser-venv/bin/python" -m playwright install webkit
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then export D1_CUTOVER_PROBE=1; fi
           "$RUNNER_TEMP/d2-browser-venv/bin/python" frontend/tool/d2_guest_browser_probe.py
-      - name: H4 local font artifact and WebSocket refusal — webkit
+      - name: H4 local font artifact and expanded egress refusal — webkit
         if: ${{ github.head_ref == 'phase2/d1-d5-convergence' }}
         timeout-minutes: 5
         run: |

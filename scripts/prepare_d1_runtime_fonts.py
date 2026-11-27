@@ -1,4 +1,4 @@
-"""Prepare actual local engine fallback fonts in the isolated runtime artifact.
+"""Prepare actual local engine fallback fonts in the isolated Web artifacts.
 
 No downloads, no patient build changes; source fonts are the pinned OFL assets.
 """
@@ -26,6 +26,12 @@ def prepare(runtime, source):
     assert original.count(old) == 1 and "fontFallbackBaseUrl" not in original
     fallback = runtime / "assets/engine-font-fallback"
     assert not fallback.exists()
+    outputs = {
+        "NotoSansSymbols": ("a2a392332ee13e6413150f3cabd1f9fe76718442a1e8a8a3a027e413702a1333",
+                            "b118dd41337806a5d4797052c77caf3bd096aed783e5eb21b4d11154351e1ac0"),
+        "NotoSansArabic": ("d383af9d4bce176d3d619bdc9b35c8d494ac15e410ce7efafc4ed9621bbc3d19",
+                           "07fc70bfeb985cc1a87a8587d0a0c80bab11c86c9dc3fd95b6f0cb332f983e96"),
+    }
     for name, family, digest, relative, license_name in FONTS:
         src = runtime / "assets/assets/fonts" / (name + ".ttf")
         assert hashlib.sha256(src.read_bytes()).hexdigest() == digest
@@ -44,6 +50,8 @@ def prepare(runtime, source):
             assert converted.flavor == "woff2"
             assert converted["name"].getDebugName(1) == family
             assert converted.getBestCmap() == cmap
+        assert hashlib.sha256(target.read_bytes()).hexdigest() == outputs[name][0], "WOFF2 output drift"
+        assert hashlib.sha256(license_file.read_bytes()).hexdigest() == outputs[name][1], "OFL drift"
         shutil.copyfile(license_file, target.parent / "OFL.txt")
         print("D1_LOCAL_ENGINE_FONT", name, len(cmap),
               hashlib.sha256(target.read_bytes()).hexdigest(), flush=True)
