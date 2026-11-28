@@ -3222,12 +3222,30 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
         page.mouse.click(bounds["x"]+bounds["width"]/2,bounds["y"]+bounds["height"]/2)
         native=page.locator("input:focus, textarea:focus")
         expect(native).to_have_count(1,timeout=10000)
-        # Native replacement, as in H2: verify selection and clearing before typing.
-        native.select_text(timeout=10000)
-        expect(native).to_have_count(1,timeout=10000)
-        selection=native.evaluate("el=>({length:el.value.length,start:el.selectionStart,end:el.selectionEnd})")
-        print("H3_SELECTION_DIAG "+json.dumps({"engine":ENGINE,"locale":locale,"field":identifier,"selection":selection}),flush=True)
-        assert selection["start"]==0 and selection["end"]==selection["length"],selection
+        # Flutter may publish a late caret update after the pointer focus event.
+        # Wait across render frames, then select and verify the unchanged native
+        # input. Only selection may be repeated; never retry a mutation or test.
+        settle="()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))"
+        observe="""async el=>{
+          const read=()=>({focused:document.activeElement===el,length:el.value.length,
+            start:el.selectionStart,end:el.selectionEnd});
+          const before=read();
+          await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r())));
+          const after=read();
+          return {...after,stable:JSON.stringify(before)===JSON.stringify(after)};
+        }"""
+        page.evaluate(settle)
+        for attempt in range(1,4):
+            expect(native).to_have_count(1,timeout=10000)
+            native.select_text(timeout=10000)
+            selection=native.evaluate(observe)
+            selected=(selection["focused"] and selection["stable"] and
+                      selection["start"]==0 and selection["end"]==selection["length"])
+            print("H3_SELECTION_DIAG "+json.dumps({"engine":ENGINE,"locale":locale,
+                "field":identifier,"attempt":attempt,"selection":selection}),flush=True)
+            if selected:
+                break
+        assert selected,selection
         page.keyboard.press("Delete")
         expect(native).to_have_count(1,timeout=10000)
         expect(native).to_have_value("",timeout=10000)
