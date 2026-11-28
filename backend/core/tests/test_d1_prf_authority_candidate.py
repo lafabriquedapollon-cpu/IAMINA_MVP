@@ -287,7 +287,7 @@ import {webcrypto} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 const p=JSON.parse(readFileSync(0,'utf8'));
 Object.defineProperty(globalThis,'crypto',{value:webcrypto});
-Object.defineProperty(globalThis,'CryptoKey',{value:webcrypto.CryptoKey});
+if(typeof globalThis.CryptoKey!=='function')throw Error('Native CryptoKey unavailable');
 Object.defineProperty(globalThis,'location',{value:new URL(p.origin)});
 const {createSignedProvisioningAuthority}=await import(p.module);
 const key=await crypto.subtle.importKey('spki',Buffer.from(p.spki,'base64'),
