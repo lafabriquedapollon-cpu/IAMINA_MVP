@@ -14,7 +14,8 @@ ROOT=Path(__file__).parent
 MODULES={name:(ROOT/name).read_bytes() for name in (
     "d1_prf_counter_candidate.mjs","d1_prf_possession_candidate.mjs",
     "d1_prf_guard_bridge_candidate.mjs","d1_prf_vault_candidate.mjs",
-    "d1_admission_store.mjs","d1_prf_lifecycle_candidate.mjs")}
+    "d1_admission_store.mjs","d1_prf_lifecycle_candidate.mjs",
+    "d1_prf_provision_authority_candidate.mjs","d1_prf_provision_authority_probe.mjs")}
 INTEROP=os.environ.get("D1_PRF_INTEROP_JS")
 if INTEROP:
     MODULES["d1-prf-interop.js"]=Path(INTEROP).read_bytes()
@@ -384,6 +385,11 @@ VAULT_RESTART="""async(fixture)=>{
           prfMode==='absent'?{enabled:false}:{enabled:true,results:{first:new Uint8Array(32).fill(prfMode==='changed'?38:37).buffer}});
     }}});
     const {createPrfBridge,installPrfBridge}=await import('/d1_prf_guard_bridge_candidate.mjs');
+    if(fixture.signedProvisioning){
+      await prfCounter.registerPrfCounter(credential,()=>true);
+      const {exerciseSignedProvisioning}=await import('/d1_prf_provision_authority_probe.mjs');
+      return exerciseSignedProvisioning(credential);
+    }
     if(fixture.onlyInstall){
       installPrfBridge();
       return true;
@@ -677,10 +683,10 @@ def run():
             else: blocked.append(urlsplit(r.request.url).path);r.abort()
         with sync_playwright() as pw:
             engine=getattr(pw,name)
-            def launch():
+            def launch(profile=tmp):
                 # Match the proven D1 Flutter browser configuration instead of
                 # inheriting a runner-dependent locale (e.g. POSIX/C).
-                ctx=engine.launch_persistent_context(tmp,headless=True,locale="fr-FR",
+                ctx=engine.launch_persistent_context(profile,headless=True,locale="fr-FR",
                     viewport={"width":390,"height":844},service_workers="block")
                 ctx.route("**/*",route)
                 attach_websocket_guard(ctx,blocked)
@@ -777,8 +783,16 @@ def run():
                 if INTEROP:
                     runtime=flutter_runtime_checks(ctx,origin,restart_fixture)
                     print("D1_PRF_FLUTTER_RUNTIME_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(runtime),count=len(runtime))),flush=True)
-                check("zero_external_requests",not blocked)
             finally: ctx.close()
+            with tempfile.TemporaryDirectory(prefix="d1-prf-signed-provision-") as profile:
+                ctx=launch(profile)
+                try:
+                    a=setup(ctx,origin)
+                    signed=a.evaluate(VAULT_RESTART,{**restart_fixture,"onlyInstall":True,"signedProvisioning":True})
+                    assert len(signed)==26 and all(v is True for v in signed.values()),signed
+                    print("D1_PRF_SIGNED_PROVISION_PASS "+json.dumps(dict(source=sha,engine=name,checks=list(signed),count=len(signed))),flush=True)
+                finally: ctx.close()
+            check("zero_external_requests",not blocked)
         print("D1_PRF_COUNTER_PASS "+json.dumps(dict(source=sha,engine=name,checks=checks,count=len(checks))),flush=True)
         server.shutdown()
 

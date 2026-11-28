@@ -26,7 +26,7 @@ export function assertExisting(owner,binding,record,lifecycle){
   require(owners.has(owner)&&validBinding(binding)&&(keys(lifecycle,['version','owner','binding','state'])||
     (keys(lifecycle,['version','owner','binding','state','operationId'])&&validOperation(lifecycle.operationId)))&&
     lifecycle.version===1&&lifecycle.owner===owner&&lifecycle.binding===binding&&lifecycle.state==='sealed'&&
-    record&&record.owner===owner&&record.binding===binding);
+    record&&record.owner===owner&&record.binding===binding&&record.operationId===lifecycle.operationId);
 }
 // Synthetic issuer only. The closure is deliberately not installed globally,
 // and can issue only for the two fixture owners. Caller of consume cannot

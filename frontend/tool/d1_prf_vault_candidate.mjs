@@ -18,7 +18,9 @@ const bytes=(x,n)=>x instanceof Uint8Array&&x.length===n;
 const sameBytes=(a,b)=>a instanceof Uint8Array&&b instanceof Uint8Array&&
   a.length===b.length&&a.every((v,i)=>v===b[i]);
 const sameKeys=(x,keys)=>x&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));
-const aad=(owner,binding,revision)=>enc.encode(JSON.stringify(['IAMINA-D1-PRF-VAULT-V1',owner,binding,revision]));
+const aad=(owner,binding,revision,operationId)=>enc.encode(JSON.stringify(
+  operationId===undefined?['IAMINA-D1-PRF-VAULT-V1',owner,binding,revision]:
+    ['IAMINA-D1-PRF-VAULT-PROVISION-V1',owner,binding,revision,operationId]));
 const validIdentity=i=>sameKeys(i,['owner','epoch','generation','acquisitionId'])&&
   owners.has(i.owner)&&uint(i.epoch)&&positive(i.generation)&&
   typeof i.acquisitionId==='string'&&/^[0-9a-f]{64}$/.test(i.acquisitionId);
@@ -26,10 +28,11 @@ const validFence=f=>f===null||(sameKeys(f,['owner','epoch','generation','acquisi
   validIdentity({owner:f.owner,epoch:f.epoch,generation:f.generation,acquisitionId:f.acquisitionId})&&
   positive(f.serial)&&typeof f.active==='boolean'&&typeof f.binding==='string'&&f.revision===1);
 const sameFence=(a,b)=>a&&b&&Object.keys(b).every(k=>a[k]===b[k])&&Object.keys(a).length===Object.keys(b).length;
-const validRecord=(r,owner,binding)=>sameKeys(r,['owner','binding','revision','wrapped','iv','cipher'])&&
+const validRecord=(r,owner,binding)=>(sameKeys(r,['owner','binding','revision','wrapped','iv','cipher'])||
+  (sameKeys(r,['owner','binding','revision','wrapped','iv','cipher','operationId'])&&typeof r.operationId==='string'&&/^[0-9a-f]{64}$/.test(r.operationId)))&&
   r.owner===owner&&r.binding===binding&&r.revision===1&&bytes(r.wrapped,40)&&
   bytes(r.iv,12)&&r.cipher instanceof Uint8Array&&r.cipher.length>=17&&r.cipher.length<=4096;
-const sameRecord=(a,b)=>validRecord(a,b.owner,b.binding)&&a.revision===b.revision&&
+const sameRecord=(a,b)=>validRecord(a,b.owner,b.binding)&&a.revision===b.revision&&a.operationId===b.operationId&&
   sameBytes(a.wrapped,b.wrapped)&&sameBytes(a.iv,b.iv)&&sameBytes(a.cipher,b.cipher);
 const validEvidence=e=>sameKeys(e,['uuid','originalValue','unit','provenance'])&&
   uuidPattern.test(e.uuid)&&typeof e.originalValue==='number'&&Number.isFinite(e.originalValue)&&
@@ -61,7 +64,7 @@ export function createPrfVault({lookup,fixtureAuthority=null,signedAuthority=nul
     let plain;
     try {
       plain=new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv:record.iv,
-        additionalData:aad(record.owner,record.binding,record.revision),tagLength:128},key,record.cipher));
+        additionalData:aad(record.owner,record.binding,record.revision,record.operationId),tagLength:128},key,record.cipher));
       const data=JSON.parse(dec.decode(plain));
       require(validEvidence(data));
       return data;
@@ -94,14 +97,15 @@ export function createPrfVault({lookup,fixtureAuthority=null,signedAuthority=nul
         unit:owner===900001?'mmol/L':'mg/dL',provenance:'userEntered'}));
       let cipher;
       try {cipher=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,
-        additionalData:aad(owner,binding,revision),tagLength:128},key,plain));}
+        additionalData:aad(owner,binding,revision,authorization.operationId??undefined),tagLength:128},key,plain));}
       finally {plain.fill(0);}
       check();
       await store.transactionWithLifecycle(owner,true,(record,fence,db,lifecycle)=>{
         check();assertFresh(owner,binding,record,lifecycle,fence);
         // Either both durable writes commit or neither does. No reset/delete
         // path, including cancellation after commit.
-        db.add({owner,binding,revision,wrapped,iv,cipher},'owner:'+owner);
+        db.add({owner,binding,revision,wrapped,iv,cipher,
+          ...(authorization.operationId===null?{}:{operationId:authorization.operationId})},'owner:'+owner);
         db.add(createLifecycle(owner,binding,authorization.operationId),'lifecycle:'+owner);
       });
       check();
