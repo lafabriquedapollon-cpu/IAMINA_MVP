@@ -697,3 +697,96 @@ def test_physical_invalid_assertion_consumed_across_workers(durable_physical_ses
 def test_physical_guard_refuses_ci_database(durable_physical_session):
     with pytest.raises(Refused):
         check_lab_database()
+
+
+# Physical same-origin composition: the operator explicitly authorizes an
+# unbound synthetic slot; signed assertion proves possession, no attestation.
+from core.d1_physical_lab_web import PhysicalLab, OWNER, MODULES, STATIC, post_body
+
+
+def test_physical_hosted_composition(durable_physical_session,settings):
+    from django.db import connection
+    from core.d1_prf_authority_candidate import TABLE
+    guard,adapter,ctx,auth,proof=durable_physical_session
+    with connection.cursor() as cur:
+        cur.execute(f"UPDATE {SESSION_TABLE} SET context='' WHERE owner=%s",[OWNER])
+        cur.execute(f"UPDATE {TABLE} SET state='unknown',binding='' WHERE owner=%s",[OWNER])
+    lab=PhysicalLab(HTTPS_ORIGIN,adapter.authority._key,guard)
+    q=lab.enroll_begin()
+    c=json.dumps({"type":"webauthn.create","origin":HTTPS_ORIGIN,"challenge":q["create"]}).encode()
+    cid=b"test-credential"
+    ca=sha256(RP_ID.encode()).digest()+bytes([0x45])+bytes(4)+bytes(16)+len(cid).to_bytes(2,"big")+cid+b"\xa1"
+    a=signed_assertion(q["prove"],auth)
+    spki=b64(auth.public_key().public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo))
+    payload=dict(challenge=q["create"],credentialId=b64(cid),publicKeySpki=spki,creationClient=b64(c),
+        creationAuth=b64(ca),assertionClient=b64(a["client_data"]),assertionAuth=b64(a["authenticator_data"]),
+        signature=b64(a["signature"]))
+    assert lab.enroll_finish(payload)=={"enrolled":True,"signCount":0}
+    with pytest.raises(Refused):
+        lab.enroll_finish(payload)
+    with pytest.raises(Refused):
+        lab.enroll_begin()
+    ch=durable_begin(lab.sessions,ctx,proof)
+    sid=durable_finish(lab.sessions,ctx,ch,auth)
+    body,sig=packet(sid,proof)
+    e=lab.sessions.claim(OWNER,sid,body,bytes.fromhex(sig),dispatch=lab.dispatch)
+    assert row(ctx)[0]=="reserved"
+    with pytest.raises(Refused):
+        lab.sessions.claim(OWNER,sid,body,bytes.fromhex(sig),dispatch=lab.dispatch)
+    body,sig=packet(sid,proof,"redeem",e)
+    assert lab.sessions.claim(OWNER,sid,body,bytes.fromhex(sig),dispatch=lab.dispatch)=={"redeemed":True}
+    body,sig=packet(sid,proof)
+    with pytest.raises(Refused):
+        lab.sessions.claim(OWNER,sid,body,bytes.fromhex(sig),dispatch=lab.dispatch)
+    assert row(ctx)[0]=="redeemed"
+
+
+@pytest.mark.parametrize("variant",["operator","origin","host","scheme","cross_site"])
+def test_physical_http_boundary(settings,variant):
+    settings.PHYSICAL_LAB_ORIGIN=HTTPS_ORIGIN
+    settings.PHYSICAL_LAB_OPERATOR_HASH=sha256(b"a"*64).hexdigest()
+    settings.ALLOWED_HOSTS=[RP_ID]
+    headers=dict(secure=True,HTTP_HOST=RP_ID,HTTP_ORIGIN=HTTPS_ORIGIN,
+        HTTP_SEC_FETCH_SITE="same-origin",HTTP_X_D1_OPERATOR="a"*64)
+    assert post_body(RequestFactory().generic("POST","/physical/begin",b"{}",
+        content_type="application/json",**headers))==b"{}"
+    key,val={"operator":("HTTP_X_D1_OPERATOR","b"*64),"origin":("HTTP_ORIGIN","https://foreign.test"),
+        "host":("HTTP_HOST","foreign.test"),"scheme":("secure",False),
+        "cross_site":("HTTP_SEC_FETCH_SITE","cross-site")}[variant]
+    headers[key]=val
+    with pytest.raises(Exception):
+        post_body(RequestFactory().generic("POST","/physical/begin",b"{}",
+            content_type="application/json",**headers))
+
+
+def test_physical_packaged_candidate_modules_exact():
+    root=Path(__file__).resolve().parents[3]/"frontend/tool"
+    for name in MODULES-{"physical.mjs","physical_transport.mjs"}:
+        assert (STATIC/name).read_bytes()==(root/name).read_bytes()
+
+
+@pytest.mark.parametrize("variant",["valid","production","wrong_project","wrong_host","wrong_role","tls_unverified"])
+def test_physical_preview_settings_gate(monkeypatch,variant):
+    import runpy
+    host="iamina-d1-6-safari-django-preview-20261113-84yi058tz.vercel.app"
+    config={
+        "VERCEL":"1","VERCEL_ENV":"preview","VERCEL_PROJECT_ID":"prj_hnlWE6QdXtWvYVfwe2JVAqIKPUiP",
+        "IAMINA_PHYSICAL_E2E":"synthetic-v1","IAMINA_D1_SAFARI_LAB_ONLY":"synthetic-preview-v1",
+        "IAMINA_ENV":"development","VERCEL_URL":host,"IAMINA_PHYSICAL_OPERATOR_SHA256":"a"*64,
+        "IAMINA_PHYSICAL_ISSUER_PKCS8":"a"*180,"SECRET_KEY":"test-only-secret-"+"x"*32,
+        "DATABASE_URL":"postgresql://d1_safari_runtime:unused@ep-frosty-tooth-b921hjv8-pooler.c-7.eu-central-1.aws.neon.tech/iamina925_empty?sslmode=verify-full&sslrootcert=system",
+    }
+    if variant=="production":config["VERCEL_ENV"]="production"
+    elif variant=="wrong_project":config["VERCEL_PROJECT_ID"]="wrong"
+    elif variant=="wrong_host":config["VERCEL_URL"]="iamina-certified.vercel.app"
+    elif variant=="wrong_role":config["DATABASE_URL"]=config["DATABASE_URL"].replace("d1_safari_runtime","iamina925_empty_owner")
+    elif variant=="tls_unverified":config["DATABASE_URL"]=config["DATABASE_URL"].replace("verify-full","require")
+    for k,v in config.items():monkeypatch.setenv(k,v)
+    if variant=="valid":
+        module=runpy.run_module("amina.physical_lab_settings")
+        assert module["ALLOWED_HOSTS"]==[host]
+        assert module["ROOT_URLCONF"]=="core.d1_physical_lab_web" and module["INSTALLED_APPS"]==[]
+        assert module["DATABASES"]["default"]["OPTIONS"]["sslmode"]=="verify-full"
+    else:
+        with pytest.raises(ValueError,match="Physical lab configuration refused"):
+            runpy.run_module("amina.physical_lab_settings")

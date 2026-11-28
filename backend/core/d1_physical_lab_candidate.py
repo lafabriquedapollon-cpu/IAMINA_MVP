@@ -32,7 +32,7 @@ def check_lab_database():
     cfg = connection.settings_dict
     require(connection.vendor == "postgresql" and cfg["HOST"] == LAB_HOST
             and cfg["NAME"] == LAB_DB and cfg["USER"] == LAB_ROLE
-            and cfg.get("OPTIONS", {}).get("sslmode") in ("require","verify-ca","verify-full"))
+            and cfg.get("OPTIONS", {}).get("sslmode") == "verify-full")
     with connection.cursor() as cur:
         cur.execute("SELECT current_database(), current_user, current_setting('server_version_num')::integer")
         name, role, version = cur.fetchone()
@@ -132,7 +132,7 @@ class DurablePhysicalSessions:
         require(result is not None)
         return result
 
-    def claim(self,owner,sid,body,signature):
+    def claim(self,owner,sid,body,signature,*,dispatch=None):
         """Consume a signed request ID durably before dispatching to the authority.
 
         A crash after claim may lose the response; never reset inventory or reissue.
@@ -157,5 +157,15 @@ class DurablePhysicalSessions:
                 raise Refused("D1_PRF_AUTHORIZATION_REFUSED") from None
             s["seen"].append(data["requestId"])
             cur.execute(f"UPDATE {SESSION_TABLE} SET session=%s WHERE owner=%s",[canonical(s),owner])
-            return ctx,data
-        return self._locked(owner,work)
+            if dispatch is None:
+                return ctx,data
+            try:
+                # Keep the replay consumption even when the authority refuses.
+                # Database failures roll back the whole transaction.
+                with transaction.atomic():
+                    return dispatch(ctx,data)
+            except Refused:
+                return None
+        result=self._locked(owner,work)
+        require(result is not None)
+        return result
