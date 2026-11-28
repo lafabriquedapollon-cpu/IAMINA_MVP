@@ -462,3 +462,147 @@ def test_https_authority_rejects_other_db(https_candidate,monkeypatch):
         with pytest.raises(Refused):
             adapter.authority.reserve(ctx)
     assert row(ctx) == ("fresh",None,None)
+
+
+
+# P2b.1: real TLS sockets, pinned ephemeral test certificate and PG16.
+# No DNS override, public bind, browser, or physical authenticator claim.
+import http.client
+import socket
+import ssl
+from datetime import datetime, timedelta, timezone
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+
+
+class LocalQualificationHTTPS(http.client.HTTPSConnection):
+    def connect(self):
+        raw = socket.create_connection(("127.0.0.1", self.port), self.timeout)
+        try:
+            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+        except BaseException:
+            raw.close()
+            raise
+
+
+class QualificationTLSHandler(QuietHandler):
+    def get_environ(self):
+        env = super().get_environ()
+        assert isinstance(self.connection, ssl.SSLSocket)
+        assert self.connection.version() in ("TLSv1.2", "TLSv1.3")
+        env["HTTPS"] = "on"
+        return env
+
+
+@pytest.fixture
+def tls_candidate(https_candidate, tmp_path):
+    adapter, ctx, auth, proof = https_candidate
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, RP_ID)])
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now-timedelta(minutes=2)).not_valid_after(now+timedelta(minutes=20))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(RP_ID)]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True,path_length=0), critical=True)
+            .sign(key,hashes.SHA256()))
+    cert_file, key_file = tmp_path/"cert.pem", tmp_path/"key.pem"
+    cert_file.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_file.touch(mode=0o600)
+    key_file.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
+    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_tls.minimum_version = ssl.TLSVersion.TLSv1_2
+    server_tls.load_cert_chain(str(cert_file),str(key_file))
+    trusted = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    trusted.minimum_version = ssl.TLSVersion.TLSv1_2
+    trusted.load_verify_locations(cafile=str(cert_file))
+    assert trusted.check_hostname and trusted.verify_mode == ssl.CERT_REQUIRED
+    committed, release = threading.Event(), threading.Event()
+    state = {"drop":False,"requests":0}
+    def app(environ,start_response):
+        try:
+            state["requests"] += 1
+            req = WSGIRequest(environ)
+            res = adapter(req)
+            if state["drop"] and res.status_code == 200 and json.loads(res.content) == {"redeemed":True}:
+                committed.set()
+                # Commit happened; withhold response until client times out.
+                assert release.wait(8)
+            start_response(f"{res.status_code} {'OK' if res.status_code==200 else 'Forbidden'}",list(res.items()))
+            return [res.content]
+        finally:
+            connections.close_all()
+    server = make_server("127.0.0.1",0,app,handler_class=QualificationTLSHandler)
+    server.socket = server_tls.wrap_socket(server.socket,server_side=True)
+    thread = threading.Thread(target=server.serve_forever,daemon=True)
+    thread.start()
+    try:
+        yield adapter,ctx,auth,proof,server.server_port,trusted,state,committed,release
+    finally:
+        release.set()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+        assert not thread.is_alive()
+
+
+def tls_packet(port, tls, sid, body, proof, *, timeout=5, host=RP_ID):
+    conn = LocalQualificationHTTPS(host,port,context=tls,timeout=timeout)
+    try:
+        conn.connect()
+        assert conn.sock.version() in ("TLSv1.2","TLSv1.3")
+        conn.request("POST",PATH,body,headers={
+            "Host":RP_ID,"Origin":HTTPS_ORIGIN,"Sec-Fetch-Site":"same-origin",
+            "Content-Type":"application/json","X-D1-Session":sid,"X-D1-Proof":proof,
+        })
+        response = conn.getresponse()
+        assert response.getheader("Cache-Control") == "no-store"
+        assert response.getheader("Access-Control-Allow-Origin") is None
+        return response.status,json.loads(response.read())
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("lost_ack",[False,True])
+def test_https_actual_tls_pg_roundtrip(tls_candidate,lost_ack):
+    adapter,ctx,auth,proof,port,tls,state,committed,release = tls_candidate
+    challenge = adapter.begin(ctx,proof.public_key())
+    sid = adapter.finish(challenge,**signed_assertion(challenge,auth))
+    def send_tls(action="reserve",payload=None,**kwargs):
+        return tls_packet(port,tls,sid,*packet(sid,proof,action,payload),**kwargs)
+    code,e = send_tls()
+    assert code == 200 and row(ctx)[0] == "reserved"
+    assert send_tls()[0] == 403
+    assert send_tls("status",{"operationId":e["ticket"]["operationId"]}) == (200,{"state":"reserved"})
+    if lost_ack:
+        state["drop"] = True
+        try:
+            with pytest.raises(TimeoutError):
+                send_tls("redeem",e,timeout=2)
+            assert committed.wait(5)
+            assert row(ctx)[0] == "redeemed"
+        finally:
+            release.set()
+    else:
+        assert send_tls("redeem",e) == (200,{"redeemed":True})
+    assert send_tls("status",{"operationId":e["ticket"]["operationId"]}) == (200,{"state":"redeemed"})
+    assert send_tls("redeem",e)[0] == 403
+    assert send_tls()[0] == 403
+    assert row(ctx)[0] == "redeemed"
+    print("D1_PRF_TLS_PG_PASS "+json.dumps({"lostAck":lost_ack,"verifiedTLS":True,
+        "terminalRedemption":True,"noReissue":True}),flush=True)
+
+
+@pytest.mark.parametrize("variant",["untrusted_certificate","wrong_hostname"])
+def test_https_actual_tls_rejects_peer(tls_candidate,variant):
+    adapter,ctx,auth,proof,port,tls,state,_,_ = tls_candidate
+    c = adapter.begin(ctx,proof.public_key())
+    sid = adapter.finish(c,**signed_assertion(c,auth))
+    if variant == "untrusted_certificate":
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    host = "foreign.test" if variant == "wrong_hostname" else RP_ID
+    assert tls.check_hostname and tls.verify_mode == ssl.CERT_REQUIRED
+    with pytest.raises(ssl.SSLCertVerificationError):
+        tls_packet(port,tls,sid,*packet(sid,proof),host=host)
+    assert state["requests"] == 0 and row(ctx) == ("fresh",None,None)
