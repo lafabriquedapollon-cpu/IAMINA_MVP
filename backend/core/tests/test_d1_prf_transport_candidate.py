@@ -216,12 +216,15 @@ def test_browser_pg_transport(authority,lost_ack):
                       "sid":sid,"lost":lost_ack,"expected":ctx.fields(origin)})
                 assert len(result)==7 and all(result.values()), result
                 assert not blocked
-                assert row(ctx)[0] == "redeemed"
-                if lost_ack:
-                    assert committed.is_set()
-                print("D1_PRF_HTTP_BROWSER_PASS "+json.dumps({"lostAck":lost_ack,"checks":result}),flush=True)
             finally:
                 browser.close()
+        # sync_playwright owns an asyncio loop in this thread until exit.
+        # Keep Django's async safety guard enabled and check the committed
+        # database state only after that loop has been closed.
+        assert row(ctx)[0] == "redeemed"
+        if lost_ack:
+            assert committed.is_set()
+        print("D1_PRF_HTTP_BROWSER_PASS "+json.dumps({"lostAck":lost_ack,"checks":result}),flush=True)
     finally:
         server.shutdown()
         thread.join(timeout=5)
