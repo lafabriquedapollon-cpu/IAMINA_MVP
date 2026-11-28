@@ -1667,6 +1667,9 @@ jobs:
           if [[ "$GITHUB_HEAD_REF" = phase1/integration-web || "$GITHUB_HEAD_REF" = phase1/ci-opt1-benchmark || "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             python -m pytest -q core/tests/test_d1_test_access.py
           fi
+          if [[ "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
+            python -m pytest -q core/tests/test_d1_prf_authority_candidate.py
+          fi
 
   # Mandatory full OPFS restoration on a supporting platform; Linux must
   # independently attest supported restoration or exact fail-closed capability.

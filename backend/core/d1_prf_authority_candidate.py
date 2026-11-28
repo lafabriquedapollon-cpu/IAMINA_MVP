@@ -7,6 +7,7 @@ Only the test harness creates/populates the dedicated table. Missing inventory
 is never evidence of a fresh account. A reserved or redeemed slot is terminal
 for new issuance, including after expiry or a lost response.
 """
+import base64
 import json
 import re
 import secrets
@@ -43,6 +44,21 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+def canonical_b64(value):
+    if not B64.fullmatch(value):
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        return bool(raw) and base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") == value
+    except (ValueError, TypeError):
+        return False
+
+
+def stored_ticket(ticket):
+    # Wire JSON object key order is not authority; signed field order is fixed.
+    return canonical({k: ticket[k] for k in TICKET_FIELDS})
+
+
 def ticket_bytes(ticket):
     require(type(ticket) is dict and set(ticket) == set(TICKET_FIELDS))
     return canonical([ticket[k] for k in TICKET_FIELDS]).encode("utf-8")
@@ -72,7 +88,7 @@ class VerifiedContext:
         try:
             b = json.loads(self.binding)
             require(type(b) is list and len(b) == 4 and all(type(x) is str and x for x in b))
-            require(all(B64.fullmatch(x) for x in b[:2]) and b[2] == urlsplit(origin).hostname
+            require(all(canonical_b64(x) for x in b[:2]) and b[2] == urlsplit(origin).hostname
                     and b[3] == origin and canonical(b) == self.binding)
         except (ValueError, TypeError, UnicodeError):
             raise Refused("D1_PRF_AUTHORIZATION_REFUSED") from None
@@ -127,7 +143,7 @@ class ProvisionAuthority:
             r, s = decode_dss_signature(der)
             sig = r.to_bytes(32, "big") + s.to_bytes(32, "big")
             cur.execute(f"UPDATE {TABLE} SET state = 'reserved', ticket = %s, signature = %s WHERE owner = %s",
-                        [canonical(ticket), sig, ctx.owner])
+                        [stored_ticket(ticket), sig, ctx.owner])
             require(cur.rowcount == 1)
             return {"ticket": ticket, "signature": sig}
 
@@ -149,7 +165,7 @@ class ProvisionAuthority:
 
         def work(cur, row, now):
             state, binding, stored, sig = row
-            require(state == "reserved" and binding == ctx.binding and stored == canonical(ticket)
+            require(state == "reserved" and binding == ctx.binding and stored == stored_ticket(ticket)
                     and sig is not None and secrets.compare_digest(bytes(sig), signature)
                     and ticket["issuedAt"] <= now < ticket["expiresAt"])
             cur.execute(f"UPDATE {TABLE} SET state = 'redeemed' WHERE owner = %s", [ctx.owner])
