@@ -330,3 +330,130 @@ def test_browser_pg_vault_e2e(authority,engine,scenario):
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+
+# P2a: server-side assertion verification plus HTTPS-only request boundary.
+# Signed synthetic assertions, RequestFactory HTTPS metadata (not actual TLS).
+from hashlib import sha256
+from core.d1_prf_authority_candidate import Refused
+from core.d1_prf_https_qualification_candidate import (
+    HttpsQualificationAuthority, HttpsQualificationTransport, ORIGIN as HTTPS_ORIGIN,
+    RP_ID, b64,
+)
+
+
+@pytest.fixture
+def https_candidate(authority):
+    _, issuer = authority
+    auth_key = ec.generate_private_key(ec.SECP256R1())
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    spki = auth_key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    ctx = replace(A, binding=canonical([b64(b"test-credential"), b64(spki), RP_ID, HTTPS_ORIGIN]))
+    seed(ctx)
+    adapter = HttpsQualificationTransport(HttpsQualificationAuthority(signing_key=issuer, origin=HTTPS_ORIGIN))
+    return adapter, ctx, auth_key, proof_key
+
+
+def signed_assertion(challenge, auth_key, **changes):
+    c = {"type":"webauthn.get", "challenge":challenge, "origin":HTTPS_ORIGIN, "crossOrigin":False}
+    c.update(changes.get("client", {}))
+    client = json.dumps(c,separators=(",",":")).encode()
+    data = sha256(changes.get("rp",RP_ID).encode()).digest() + bytes([changes.get("flags",5)]) + bytes(4)
+    signature = auth_key.sign(data + sha256(client).digest(),ec.ECDSA(hashes.SHA256()))
+    return dict(credential_id=changes.get("credential_id",b64(b"test-credential")),
+                client_data=client, authenticator_data=data, signature=signature)
+
+
+def https_send(adapter, sid, body, proof, **overrides):
+    headers = dict(secure=True, HTTP_HOST=RP_ID, HTTP_ORIGIN=HTTPS_ORIGIN)
+    headers.update(overrides)
+    return send(adapter,sid,body,proof,**headers)
+
+
+def test_https_verified_session_roundtrip(https_candidate):
+    adapter,ctx,auth,proof = https_candidate
+    challenge = adapter.begin(ctx,proof.public_key())
+    sid = adapter.finish(challenge,**signed_assertion(challenge,auth))
+    with pytest.raises(Refused):
+        adapter.finish(challenge,**signed_assertion(challenge,auth))
+    with pytest.raises(Refused):
+        adapter.add_verified_fixture(ctx,proof.public_key())
+    assert https_send(adapter,sid,*packet(sid,ec.generate_private_key(ec.SECP256R1())))[0] == 403
+    code,e = https_send(adapter,sid,*packet(sid,proof))
+    assert code == 200
+    assert https_send(adapter,sid,*packet(sid,proof,"redeem",e)) == (200,{"redeemed":True})
+    assert https_send(adapter,sid,*packet(sid,proof))[0] == 403
+    assert row(ctx)[0] == "redeemed"
+    restarted = HttpsQualificationTransport(adapter.authority)
+    assert https_send(restarted,sid,*packet(sid,proof))[0] == 403
+    c2 = restarted.begin(ctx,proof.public_key())
+    s2 = restarted.finish(c2,**signed_assertion(c2,auth))
+    assert https_send(restarted,s2,*packet(s2,proof))[0] == 403
+    assert row(ctx)[0] == "redeemed"
+
+
+@pytest.mark.parametrize("variant",["wrong_origin","wrong_rp","wrong_challenge","cross_origin",
+    "missing_uv","missing_up","invalid_backup","wrong_credential","wrong_signer","expired",
+    "wrong_type","top_origin"])
+def test_https_assertion_refusal_consumes_challenge(https_candidate,variant):
+    adapter,ctx,auth,proof = https_candidate
+    challenge = adapter.begin(ctx,proof.public_key())
+    changes = {}
+    if variant == "wrong_origin": changes["client"]={"origin":"https://foreign.test"}
+    elif variant == "wrong_rp": changes["rp"]="foreign.test"
+    elif variant == "wrong_challenge": changes["client"]={"challenge":b64(bytes(32))}
+    elif variant == "cross_origin": changes["client"]={"crossOrigin":True}
+    elif variant == "missing_uv": changes["flags"]=1
+    elif variant == "missing_up": changes["flags"]=4
+    elif variant == "invalid_backup": changes["flags"]=21
+    elif variant == "wrong_credential": changes["credential_id"]=b64(b"foreign")
+    elif variant == "wrong_signer": auth=ec.generate_private_key(ec.SECP256R1())
+    elif variant == "expired":
+        _,*rest=adapter.challenges[challenge]
+        adapter.challenges[challenge]=(time.monotonic()-1,*rest)
+    elif variant == "wrong_type": changes["client"]={"type":"webauthn.create"}
+    elif variant == "top_origin": changes["client"]={"topOrigin":"https://foreign.test"}
+    with pytest.raises(Refused):
+        adapter.finish(challenge,**signed_assertion(challenge,auth,**changes))
+    assert not adapter.sessions and challenge not in adapter.challenges
+    assert row(ctx) == ("fresh",None,None)
+
+
+@pytest.mark.parametrize("overrides",[
+    {"secure":False}, {"secure":False,"HTTP_X_FORWARDED_PROTO":"https"},
+    {"HTTP_FORWARDED":"proto=https"}, {"HTTP_X_FORWARDED_HOST":RP_ID},
+    {"HTTP_ORIGIN":"https://foreign.test"}, {"HTTP_HOST":"foreign.test"},
+    {"HTTP_SEC_FETCH_SITE":"cross-site"},
+])
+def test_https_transport_boundary(https_candidate,overrides):
+    adapter,ctx,auth,proof = https_candidate
+    c = adapter.begin(ctx,proof.public_key())
+    sid = adapter.finish(c,**signed_assertion(c,auth))
+    assert https_send(adapter,sid,*packet(sid,proof),**overrides) == (403,{"error":"D1_PRF_AUTHORIZATION_REFUSED"})
+    assert row(ctx) == ("fresh",None,None)
+
+
+@pytest.mark.parametrize("origin",["http://127.0.0.1:8123","https://foreign.test",
+    HTTPS_ORIGIN+"/", HTTPS_ORIGIN+":443", HTTPS_ORIGIN+"?x=1"])
+def test_https_authority_origin_exact(authority,origin):
+    _,issuer=authority
+    with pytest.raises(Refused):
+        HttpsQualificationAuthority(signing_key=issuer,origin=origin)
+
+
+def test_loopback_authority_still_rejects_https(authority):
+    _,issuer=authority
+    with pytest.raises(Refused):
+        ProvisionAuthority(signing_key=issuer,origin=HTTPS_ORIGIN)
+
+
+def test_https_authority_rejects_other_db(https_candidate,monkeypatch):
+    from django.db import connection
+    adapter,ctx,_,_=https_candidate
+    with monkeypatch.context() as patch:
+        patch.setitem(connection.settings_dict,"NAME","untrusted_db")
+        with pytest.raises(Refused):
+            adapter.authority.reserve(ctx)
+    assert row(ctx) == ("fresh",None,None)
