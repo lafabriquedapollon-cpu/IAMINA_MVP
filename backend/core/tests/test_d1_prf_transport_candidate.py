@@ -606,3 +606,94 @@ def test_https_actual_tls_rejects_peer(tls_candidate,variant):
     with pytest.raises(ssl.SSLCertVerificationError):
         tls_packet(port,tls,sid,*packet(sid,proof),host=host)
     assert state["requests"] == 0 and row(ctx) == ("fresh",None,None)
+
+
+
+# Physical E2E preparation: durable challenge and proof-bound session across
+# independent service instances; real PG16, synthetic signed assertions only.
+from core.d1_physical_lab_candidate import DurablePhysicalSessions, SESSION_TABLE, check_lab_database
+
+
+@pytest.fixture
+def durable_physical_session(https_candidate):
+    from django.db import connection
+    adapter,ctx,auth,proof=https_candidate
+    def guard():
+        assert connection.vendor=="postgresql"
+        assert connection.settings_dict["NAME"]=="test_iamina_phase1_ci"
+        assert connection.settings_dict["HOST"]=="127.0.0.1"
+    guard()
+    with connection.cursor() as cur:
+        cur.execute(f"""CREATE TABLE {SESSION_TABLE} (
+            owner bigint PRIMARY KEY CHECK(owner IN (900001,900002)),
+            context text NOT NULL, pending text, session text,
+            sign_count bigint NOT NULL DEFAULT 0 CHECK(sign_count BETWEEN 0 AND 4294967295)
+        )""")
+        cur.execute(f"INSERT INTO {SESSION_TABLE}(owner,context) VALUES(%s,%s)",[ctx.owner,canonical(ctx.fields(HTTPS_ORIGIN))])
+    try:
+        yield guard,adapter,ctx,auth,proof
+    finally:
+        with connection.cursor() as cur:
+            cur.execute(f"DROP TABLE {SESSION_TABLE}")
+
+
+def durable_begin(service,ctx,proof):
+    spki=b64(proof.public_key().public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo))
+    return service.begin(ctx.owner,spki)["challenge"]
+
+
+def durable_finish(service,ctx,c,auth,**changes):
+    a=signed_assertion(c,auth,**changes)
+    return service.finish(ctx.owner,c,a["credential_id"],a["client_data"],a["authenticator_data"],a["signature"])["sessionId"]
+
+
+def test_physical_session_survives_worker_replacement(durable_physical_session):
+    guard,adapter,ctx,auth,proof=durable_physical_session
+    a=DurablePhysicalSessions(HTTPS_ORIGIN,guard)
+    c=durable_begin(a,ctx,proof)
+    b=DurablePhysicalSessions(HTTPS_ORIGIN,guard)
+    sid=durable_finish(b,ctx,c,auth)
+    with pytest.raises(Refused):
+        durable_finish(a,ctx,c,auth)
+    body,sig=packet(sid,proof)
+    verified,data=a.claim(ctx.owner,sid,body,bytes.fromhex(sig))
+    assert verified==ctx and data["action"]=="reserve"
+    e=adapter.authority.reserve(verified)
+    with pytest.raises(Refused):
+        b.claim(ctx.owner,sid,body,bytes.fromhex(sig))
+    wrong_body,wrong_sig=packet(sid,ec.generate_private_key(ec.SECP256R1()))
+    with pytest.raises(Refused):
+        b.claim(ctx.owner,sid,wrong_body,bytes.fromhex(wrong_sig))
+    assert row(ctx)[0]=="reserved"
+    body,sig=packet(sid,proof,"redeem",{"ticket":e["ticket"],"signature":e["signature"].hex()})
+    verified,data=b.claim(ctx.owner,sid,body,bytes.fromhex(sig))
+    assert adapter.authority.redeem(verified,data["payload"]["ticket"],bytes.fromhex(data["payload"]["signature"]))
+    c2=durable_begin(a,ctx,proof)
+    sid2=durable_finish(b,ctx,c2,auth)
+    body,sig=packet(sid,proof)
+    with pytest.raises(Refused):
+        a.claim(ctx.owner,sid,body,bytes.fromhex(sig))
+    body,sig=packet(sid2,proof)
+    verified,_=b.claim(ctx.owner,sid2,body,bytes.fromhex(sig))
+    with pytest.raises(Refused):
+        adapter.authority.reserve(verified)
+    assert row(ctx)[0]=="redeemed"
+
+
+def test_physical_invalid_assertion_consumed_across_workers(durable_physical_session):
+    guard,_,ctx,auth,proof=durable_physical_session
+    a=DurablePhysicalSessions(HTTPS_ORIGIN,guard)
+    c=durable_begin(a,ctx,proof)
+    with pytest.raises(Refused):
+        durable_finish(a,ctx,c,auth,flags=1)
+    b=DurablePhysicalSessions(HTTPS_ORIGIN,guard)
+    with pytest.raises(Refused):
+        durable_finish(b,ctx,c,auth)
+    assert row(ctx)==("fresh",None,None)
+    c2=durable_begin(b,ctx,proof)
+    assert durable_finish(a,ctx,c2,auth)
+
+
+def test_physical_guard_refuses_ci_database(durable_physical_session):
+    with pytest.raises(Refused):
+        check_lab_database()
