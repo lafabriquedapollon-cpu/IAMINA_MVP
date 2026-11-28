@@ -3222,7 +3222,15 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
         page.mouse.click(bounds["x"]+bounds["width"]/2,bounds["y"]+bounds["height"]/2)
         native=page.locator("input:focus, textarea:focus")
         expect(native).to_have_count(1,timeout=10000)
-        native.press("ControlOrMeta+a",timeout=10000)
+        # Native replacement, as in H2: verify selection and clearing before typing.
+        native.select_text(timeout=10000)
+        expect(native).to_have_count(1,timeout=10000)
+        selection=native.evaluate("el=>({length:el.value.length,start:el.selectionStart,end:el.selectionEnd})")
+        print("H3_SELECTION_DIAG "+json.dumps({"engine":ENGINE,"locale":locale,"field":identifier,"selection":selection}),flush=True)
+        assert selection["start"]==0 and selection["end"]==selection["length"],selection
+        page.keyboard.press("Delete")
+        expect(native).to_have_count(1,timeout=10000)
+        expect(native).to_have_value("",timeout=10000)
         native.press_sequentially(value,delay=60,timeout=15000)
         expect(native).to_have_value(value,timeout=10000)
     def semantics():
