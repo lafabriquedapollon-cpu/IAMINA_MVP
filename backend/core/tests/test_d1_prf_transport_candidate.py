@@ -4,6 +4,7 @@ import json
 import secrets
 import threading
 import time
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from wsgiref.simple_server import make_server, WSGIRequestHandler
@@ -225,6 +226,106 @@ def test_browser_pg_transport(authority,lost_ack):
         if lost_ack:
             assert committed.is_set()
         print("D1_PRF_HTTP_BROWSER_PASS "+json.dumps({"lostAck":lost_ack,"checks":result}),flush=True)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+# E2E fixture: synthetic authenticator, real browser WebCrypto/IndexedDB and
+# real HTTP/PG16. Never claim that this qualifies a physical authenticator.
+@pytest.mark.parametrize("engine",["chromium","webkit"])
+@pytest.mark.parametrize("scenario",["normal","lost_ack","cancel_after_redeem"])
+def test_browser_pg_vault_e2e(authority,engine,scenario):
+    _,issuer_key = authority
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    authenticator = ec.generate_private_key(ec.SECP256R1())
+    root = Path(__file__).resolve().parents[3]/"frontend/tool"
+    modules = {"d1_prf_transport_candidate.mjs","d1_prf_provision_authority_candidate.mjs",
+        "d1_prf_guard_bridge_candidate.mjs","d1_prf_counter_candidate.mjs",
+        "d1_prf_possession_candidate.mjs","d1_prf_vault_candidate.mjs",
+        "d1_prf_lifecycle_candidate.mjs","d1_admission_store.mjs",
+        "d1_prf_http_vault_probe.mjs"}
+    adapter = None
+    committed = threading.Event()
+
+    def app(environ,start_response):
+        try:
+            path = environ["PATH_INFO"]
+            if path == "/" or path[1:] in modules:
+                data = (b"<!doctype html><meta charset=utf-8><title>synthetic E2E</title>"
+                        if path == "/" else (root/path[1:]).read_bytes())
+                start_response("200 OK",[("Content-Type","text/html" if path=="/" else "text/javascript"),
+                    ("Content-Length",str(len(data))),("Cache-Control","no-store")])
+                return [data]
+            res = adapter(WSGIRequest(environ))
+            if res.status_code == 200 and json.loads(res.content) == {"redeemed":True}:
+                committed.set()
+                if scenario=="lost_ack":
+                    time.sleep(1.0)
+            start_response(f"{res.status_code} {'OK' if res.status_code==200 else 'Forbidden'}",list(res.items()))
+            return [res.content]
+        finally:
+            connections.close_all()
+
+    def spki(key):
+        return key.public_key().public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo)
+    def private(key):
+        return base64.b64encode(key.private_bytes(serialization.Encoding.DER,
+            serialization.PrivateFormat.PKCS8,serialization.NoEncryption())).decode()
+    server = make_server("127.0.0.1",0,app,handler_class=QuietHandler)
+    origin = f"http://127.0.0.1:{server.server_port}"
+    credential = {"version":1,"credentialId":"DQ4PEA",
+        "publicKeySpki":base64.urlsafe_b64encode(spki(authenticator)).decode().rstrip("="),
+        "rpId":"127.0.0.1","origin":origin,"signCount":0}
+    ctx = replace(A,binding=canonical([credential[k] for k in
+        ("credentialId","publicKeySpki","rpId","origin")]))
+    seed(ctx)
+    adapter = CandidateTransport(ProvisionAuthority(signing_key=issuer_key,origin=origin),origin)
+    sid = adapter.add_verified_fixture(ctx,proof_key.public_key())
+    payload = {"credential":credential,"expected":ctx.fields(origin),"scenario":scenario,
+        "sid":sid,"proof":private(proof_key),"authenticator":private(authenticator),
+        "issuer":base64.b64encode(spki(issuer_key)).decode()}
+    thread = threading.Thread(target=server.serve_forever,daemon=True)
+    thread.start()
+    blocked=[]
+    try:
+        with tempfile.TemporaryDirectory(prefix="d1-e2e-") as profile, sync_playwright() as pw:
+            browser_type = getattr(pw,engine)
+            def launch():
+                c = browser_type.launch_persistent_context(profile,headless=True,
+                    locale="fr-FR",viewport={"width":390,"height":844},service_workers="block")
+                def guard(route):
+                    url=route.request.url
+                    if url==origin+"/" or url in {origin+"/"+m for m in modules} or (
+                            url==origin+PATH and route.request.method=="POST"):
+                        route.continue_()
+                    else:
+                        blocked.append(url.split("?")[0])
+                        route.abort()
+                c.route("**/*",guard)
+                c.route_web_socket("**/*",lambda ws: (blocked.append("websocket"),ws.close()))
+                p = c.pages[0] if c.pages else c.new_page()
+                p.goto(origin)
+                return c,p
+            browser,page=launch()
+            try:
+                initial=page.evaluate("""async p=>(await import('/d1_prf_http_vault_probe.mjs')).initial(p)""",payload)
+                assert all(v is True for v in initial["checks"].values()),initial
+                assert len(initial["checks"]) == (9 if scenario=="normal" else 7),initial
+            finally:
+                browser.close()
+            browser,page=launch()
+            try:
+                after=page.evaluate("""async p=>(await import('/d1_prf_http_vault_probe.mjs')).restart(p)""",
+                    {**payload,"operationId":initial["operationId"]})
+                assert all(v is True for v in after.values()),after
+                assert len(after)==(9 if scenario=="normal" else 5),after
+            finally:
+                browser.close()
+        assert not blocked,blocked
+        assert committed.is_set() and row(ctx)[0]=="redeemed"
+        print("D1_PRF_HTTP_VAULT_E2E_PASS "+json.dumps({"engine":engine,"scenario":scenario,
+            "initial":initial["checks"],"restart":after}),flush=True)
     finally:
         server.shutdown()
         thread.join(timeout=5)

@@ -1670,7 +1670,7 @@ jobs:
           if [[ "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             python -m pytest -q core/tests/test_d1_prf_authority_candidate.py
             python -m pip install playwright==1.55.0
-            python -m playwright install --with-deps chromium
+            python -m playwright install --with-deps chromium webkit
             python -m pytest -q -s core/tests/test_d1_prf_transport_candidate.py
           fi
 
