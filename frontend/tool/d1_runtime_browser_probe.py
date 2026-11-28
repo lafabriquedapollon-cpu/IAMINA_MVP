@@ -3329,20 +3329,32 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
         for n in range(2,7):
             next_page(n,55)
         expect(page.get_by_text("175.25 mg/dL",exact=True)).to_be_visible(timeout=20000)
-        stage="historical-insert"
+        stage="historical-open-mode"
         click("Mesure antérieure (date et heure)","قياس سابق (التاريخ والوقت)")
+        stage="historical-enter-no-offset"
         enter("evidence-time","2024-10-27T02:30:00")
+        stage="historical-enter-value"
         enter("evidence-value","7.83")
+        stage="historical-select-unit"
         control("evidence-mmoll").click(timeout=10000)
+        stage="historical-submit-no-offset"
         control("evidence-save").click(timeout=10000)
+        stage="historical-expect-refusal"
         expect(text("Saisie ou opération refusée.","تم رفض الإدخال أو العملية.")).to_be_visible(timeout=20000)
+        stage="historical-refusal-revision"
         assert page.evaluate("window.__h3Fixture.page().revision")==55
+        stage="historical-enter-explicit-offset"
         enter("evidence-time","2024-10-27T02:30:00+01:00")
+        stage="historical-submit-explicit-offset"
         control("evidence-save").click(timeout=10000)
+        stage="historical-committed-revision"
         result=journal(1,56)
+        stage="historical-committed-instant"
         past=next(r for r in result["rows"] if r["value"]==7.83)
         assert past["logged"]==1729992600 and past["created"]>past["logged"]
+        stage="historical-visible-value"
         expect(page.get_by_text("7.83 mmol/L",exact=True)).to_be_visible(timeout=20000)
+        stage="historical-visible-instant"
         time_check("visible-historical",past["logged"],visible=True)
         shot("historical-saved")
         stage="current-insert"
@@ -3414,7 +3426,8 @@ def exercise_h3_ui(browser_type, profile, locale, origin):
         except Exception:
             pass
         return {"source":os.environ["EXPECTED_SHA"],"engine":ENGINE,"locale":locale,
-                "stage":stage,"errorType":type(error).__name__,"blockedRequests":len(blocked),
+                "stage":stage,"errorType":type(error).__name__,"errorDetail":str(error)[:1500],
+                "blockedRequests":len(blocked),
                 "pageErrors":len(errors),"namedTimezoneChecks":time_checks,"result":"FAIL"}
     finally:
         secret=None
