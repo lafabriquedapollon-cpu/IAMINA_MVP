@@ -50,7 +50,11 @@ def protected(response):
 
 def boundary(request):
     require(request.is_secure() and request.get_host() == settings.PHYSICAL_LAB_ORIGIN[8:])
-    require("HTTP_FORWARDED" not in request.META and "HTTP_X_FORWARDED_HOST" not in request.META)
+    # Vercel includes x-forwarded-host at its TLS boundary. Never use it
+    # to select an origin: accept only an exact redundant match.
+    require("HTTP_FORWARDED" not in request.META
+            and request.META.get("HTTP_X_FORWARDED_HOST",request.get_host())==request.get_host()
+            and request.META.get("HTTP_X_FORWARDED_PROTO","https")=="https")
 
 
 def operator(request):

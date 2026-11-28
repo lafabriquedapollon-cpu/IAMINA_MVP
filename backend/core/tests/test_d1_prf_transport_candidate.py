@@ -741,18 +741,21 @@ def test_physical_hosted_composition(durable_physical_session,settings):
     assert row(ctx)[0]=="redeemed"
 
 
-@pytest.mark.parametrize("variant",["operator","origin","host","scheme","cross_site"])
+@pytest.mark.parametrize("variant",["operator","origin","host","scheme","cross_site","forwarded_host","forwarded_proto"])
 def test_physical_http_boundary(settings,variant):
     settings.PHYSICAL_LAB_ORIGIN=HTTPS_ORIGIN
     settings.PHYSICAL_LAB_OPERATOR_HASH=sha256(b"a"*64).hexdigest()
     settings.ALLOWED_HOSTS=[RP_ID]
     headers=dict(secure=True,HTTP_HOST=RP_ID,HTTP_ORIGIN=HTTPS_ORIGIN,
-        HTTP_SEC_FETCH_SITE="same-origin",HTTP_X_D1_OPERATOR="a"*64)
+        HTTP_SEC_FETCH_SITE="same-origin",HTTP_X_D1_OPERATOR="a"*64,
+        HTTP_X_FORWARDED_HOST=RP_ID,HTTP_X_FORWARDED_PROTO="https")
     assert post_body(RequestFactory().generic("POST","/physical/begin",b"{}",
         content_type="application/json",**headers))==b"{}"
     key,val={"operator":("HTTP_X_D1_OPERATOR","b"*64),"origin":("HTTP_ORIGIN","https://foreign.test"),
         "host":("HTTP_HOST","foreign.test"),"scheme":("secure",False),
-        "cross_site":("HTTP_SEC_FETCH_SITE","cross-site")}[variant]
+        "cross_site":("HTTP_SEC_FETCH_SITE","cross-site"),
+        "forwarded_host":("HTTP_X_FORWARDED_HOST","foreign.test"),
+        "forwarded_proto":("HTTP_X_FORWARDED_PROTO","https,http")}[variant]
     headers[key]=val
     with pytest.raises(Exception):
         post_body(RequestFactory().generic("POST","/physical/begin",b"{}",
