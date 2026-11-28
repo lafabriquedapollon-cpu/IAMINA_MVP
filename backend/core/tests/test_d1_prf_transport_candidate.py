@@ -344,7 +344,12 @@ from core.d1_prf_https_qualification_candidate import (
 
 
 @pytest.fixture
-def https_candidate(authority):
+def https_candidate(authority, settings):
+    # RequestFactory still enforces Django's ALLOWED_HOSTS through get_host().
+    # Scope the exact synthetic hostname to this fixture; no product settings change.
+    settings.ALLOWED_HOSTS = [*settings.ALLOWED_HOSTS, RP_ID]
+    request = RequestFactory().generic("POST", PATH, b"{}", secure=True, HTTP_HOST=RP_ID)
+    assert request.get_host() == RP_ID and request.is_secure()
     _, issuer = authority
     auth_key = ec.generate_private_key(ec.SECP256R1())
     proof_key = ec.generate_private_key(ec.SECP256R1())
