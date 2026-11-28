@@ -249,8 +249,8 @@ SIGNED_PRF="""async()=>{
         lifecycleChecks.foreignOwnerGrant=await no(()=>provision(pA,pending,grantB));
         const wrong=fresh.issue(900001,{...credential,credentialId:'AQIDBA'});
         lifecycleChecks.foreignCredentialGrant=await no(()=>provision(pA,pending,wrong));
-        const foreign=createFixtureFreshAuthority();
-        lifecycleChecks.foreignIssuerGrant=await no(()=>provision(pA,pending,foreign.issue(900001,credential)));
+        const foreignIssuer=createFixtureFreshAuthority();
+        lifecycleChecks.foreignIssuerGrant=await no(()=>provision(pA,pending,foreignIssuer.issue(900001,credential)));
         // A cancelled request does not consume an untouched grant.
         const cancelled=await getToken(900001);
         lifecycleChecks.cancelledFresh=await no(()=>provision(cancelled,()=>false,fresh.issue(900001,credential)));
