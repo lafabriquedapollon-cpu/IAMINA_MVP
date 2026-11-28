@@ -1669,6 +1669,9 @@ jobs:
           fi
           if [[ "$GITHUB_HEAD_REF" = phase2/d1-d5-convergence ]]; then
             python -m pytest -q core/tests/test_d1_prf_authority_candidate.py
+            python -m pip install playwright==1.55.0
+            python -m playwright install --with-deps chromium
+            python -m pytest -q -s core/tests/test_d1_prf_transport_candidate.py
           fi
 
   # Mandatory full OPFS restoration on a supporting platform; Linux must
