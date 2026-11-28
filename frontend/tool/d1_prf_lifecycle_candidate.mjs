@@ -17,12 +17,14 @@ const validBinding=b=>{
 export function assertFresh(owner,binding,record,lifecycle,fence){
   require(owners.has(owner)&&validBinding(binding)&&record===undefined&&lifecycle===undefined&&fence===undefined);
 }
-export function createLifecycle(owner,binding){
-  require(owners.has(owner)&&validBinding(binding));
-  return Object.freeze({version:1,owner,binding,state:'sealed'});
+const validOperation=id=>typeof id==='string'&&/^[0-9a-f]{64}$/.test(id);
+export function createLifecycle(owner,binding,operationId=null){
+  require(owners.has(owner)&&validBinding(binding)&&(operationId===null||validOperation(operationId)));
+  return Object.freeze({version:1,owner,binding,state:'sealed',...(operationId===null?{}:{operationId})});
 }
 export function assertExisting(owner,binding,record,lifecycle){
-  require(owners.has(owner)&&validBinding(binding)&&keys(lifecycle,['version','owner','binding','state'])&&
+  require(owners.has(owner)&&validBinding(binding)&&(keys(lifecycle,['version','owner','binding','state'])||
+    (keys(lifecycle,['version','owner','binding','state','operationId'])&&validOperation(lifecycle.operationId)))&&
     lifecycle.version===1&&lifecycle.owner===owner&&lifecycle.binding===binding&&lifecycle.state==='sealed'&&
     record&&record.owner===owner&&record.binding===binding);
 }

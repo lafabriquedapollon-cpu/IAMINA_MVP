@@ -5,7 +5,7 @@
 import {derivePrfWithDurableCounter} from './d1_prf_counter_candidate.mjs';
 import {createPrfVault} from './d1_prf_vault_candidate.mjs';
 
-export function createPrfBridge({fixtureAuthority=null}={}) {
+export function createPrfBridge({fixtureAuthority=null,signedAuthority=null}={}) {
   const keys = new WeakMap();
   const retired = new WeakMap();
   const require = value => {if(!value) throw new Error('D1_PRF_POSSESSION_REFUSED');};
@@ -37,7 +37,7 @@ export function createPrfBridge({fixtureAuthority=null}={}) {
       throw new Error('D1_PRF_POSSESSION_REFUSED');
     }
   }
-  const vault=createPrfVault({lookup:token=>keys.get(token),fixtureAuthority});
+  const vault=createPrfVault({lookup:token=>keys.get(token),fixtureAuthority,signedAuthority});
   const waitRevocation=async token=>{
     const entry=retired.get(token);
     require(entry);

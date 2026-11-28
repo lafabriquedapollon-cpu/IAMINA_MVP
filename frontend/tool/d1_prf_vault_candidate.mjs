@@ -36,7 +36,7 @@ const validEvidence=e=>sameKeys(e,['uuid','originalValue','unit','provenance'])&
   e.originalValue>0&&['mg/dL','mmol/L'].includes(e.unit)&&
   e.provenance==='userEntered'&&Number.isFinite(e.originalValue*(e.unit==='mmol/L'?18.01559:1));
 
-export function createPrfVault({lookup,fixtureAuthority=null}) {
+export function createPrfVault({lookup,fixtureAuthority=null,signedAuthority=null}) {
   const store=createAdmissionStore(DB);
   const leases=new WeakMap();
   // Browser timers bound observable waits while JS is scheduled. A suspended
@@ -68,13 +68,18 @@ export function createPrfVault({lookup,fixtureAuthority=null}) {
     } finally {plain?.fill(0);}
   }
   // Explicit synthetic setup, never present in the normal installed port.
-  async function provisionFixture(token,isPending,grant) {
+  async function provisionWork(token,isPending,grant,signed) {
     try {
-      require(typeof fixtureAuthority==='function'&&typeof isPending==='function'&&isPending()===true);
+      require(typeof isPending==='function'&&isPending()===true);
       const entry=getEntry(token);
-      require(!entry.used&&entry.acquisitionId==null&&fixtureAuthority(grant,entry.owner,entry.binding)===true);
+      require(!entry.used&&entry.acquisitionId==null);
+      const authorization=signed
+        ? (typeof signedAuthority==='function'?signedAuthority(grant,entry.owner,entry.binding):null)
+        : (typeof fixtureAuthority==='function'&&fixtureAuthority(grant,entry.owner,entry.binding)===true
+          ? {operationId:null,check:()=>true}:null);
+      require(authorization&&typeof authorization.check==='function'&&authorization.check()===true);
       entry.used=true;
-      const check=()=>require(lookup(token)===entry&&isPending()===true);
+      const check=()=>require(lookup(token)===entry&&isPending()===true&&authorization.check()===true);
       const binding=entry.binding,owner=entry.owner,revision=1;
       let temporary=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt','decrypt']);
       check();
@@ -97,11 +102,43 @@ export function createPrfVault({lookup,fixtureAuthority=null}) {
         // Either both durable writes commit or neither does. No reset/delete
         // path, including cancellation after commit.
         db.add({owner,binding,revision,wrapped,iv,cipher},'owner:'+owner);
-        db.add(createLifecycle(owner,binding),'lifecycle:'+owner);
+        db.add(createLifecycle(owner,binding,authorization.operationId),'lifecycle:'+owner);
       });
       check();
       return true;
     } catch (_) {throw fail();}
+  }
+  function provisionFixture(token,isPending,grant) {
+    return provisionWork(token,isPending,grant,false);
+  }
+  async function provisionAuthorized(token,isPending,grant){
+    let expired=false;
+    return bounded(provisionWork(token,()=>!expired&&isPending()===true,grant,true),()=>{expired=true;});
+  }
+  // No reset/retry authority. Only original PRF possession can authenticate
+  // a committed receipt, and only for the exact signed operation identifier.
+  async function inspectProvisioning(token,operationId,isPending){
+    try{
+      require(typeof signedAuthority==='function'&&typeof operationId==='string'&&/^[0-9a-f]{64}$/.test(operationId)&&
+        typeof isPending==='function'&&isPending()===true);
+      const entry=getEntry(token);
+      require(!entry.used&&entry.acquisitionId==null);
+      entry.used=true;
+      let expired=false;
+      const check=()=>require(!expired&&lookup(token)===entry&&isPending()===true);
+      const work=async()=>{
+        const read=()=>store.transactionWithLifecycle(entry.owner,false,(r,_f,_db,m)=>{
+          check();assertExisting(entry.owner,entry.binding,r,m);
+          require(m.operationId===operationId&&validRecord(r,entry.owner,entry.binding));return r;
+        });
+        const r=await read();check();
+        const key=await unwrap(r,entry);check();
+        await decode(r,key);check();
+        require(sameRecord(await read(),r));check();
+        return true;
+      };
+      return await bounded(work(),()=>{expired=true;});
+    }catch(_){throw fail();}
   }
   function retireInternal(l) {
     l.retired=true;
@@ -226,5 +263,6 @@ export function createPrfVault({lookup,fixtureAuthority=null}) {
   }
   return Object.freeze({openLease,verifyLease,readEvidence,retireLease,
     revokeEntry,waitRevocation,
-    ...(typeof fixtureAuthority==='function'?{provisionFixture}:{})});
+    ...(typeof fixtureAuthority==='function'?{provisionFixture}:{}),
+    ...(typeof signedAuthority==='function'?{provisionAuthorized,inspectProvisioning}:{})});
 }
