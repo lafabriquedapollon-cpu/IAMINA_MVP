@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -6,11 +7,128 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'app_lock_authenticator.dart';
 import 'app_lock_authenticator_factory.dart';
 import 'auth_service.dart';
+import 'd1_prf_possession.dart';
 
 typedef ProtectedLocalStateProbe = Future<bool> Function();
 
+/// Opaque, process-local preadmission capability, not a vault key or session.
+/// Only its issuing AppLockService may consume it; no public constructor.
+final class D1VaultAdmissionProof {
+  final int _owner;
+  final int _authGeneration;
+  final int _epoch;
+  final int _admissionGeneration;
+  final Duration _issuedAt;
+  final D1PrfPossession? _possession;
+  bool _possessionRevoked = false;
+
+  D1VaultAdmissionProof._(this._owner, this._authGeneration, this._epoch,
+      this._admissionGeneration, this._issuedAt, [this._possession]);
+
+  bool get _possessionLive {
+    if (_possessionRevoked) return false;
+    try { return _possession?.isLive ?? true; }
+    catch (_) { return false; }
+  }
+
+  void _revokePossession() {
+    final possession = _possession;
+    if (possession == null || _possessionRevoked) return;
+    _possessionRevoked = true;
+    try { possession.revoke(); } catch (_) { /* authority already revoked */ }
+  }
+}
+
+/// Process-local continuation of a consumed ticket. The pending phase has
+/// the original deadline; a live session still requires the same identity
+/// and lock generation. No DB/key access or durable lease is granted here.
+final class D1VaultAdmissionGuard {
+  final AppLockService _issuer;
+  final D1VaultAdmissionProof _proof;
+  bool _claimed = false;
+  bool _active = false;
+  bool _retired = false;
+  bool _possessionTaken = false;
+  VoidCallback? _onRetired;
+
+  D1VaultAdmissionGuard._(this._issuer, this._proof);
+
+  bool _context(int owner, int epoch) =>
+      !_retired && _proof._possessionLive &&
+      owner == _proof._owner && epoch == _proof._epoch &&
+      (_proof._possession != null
+          ? _issuer._d1PrfAcquirer != null : _issuer._unlocked) &&
+      _issuer._admissionGeneration == _proof._admissionGeneration &&
+      _issuer._hasAdmissionContext(owner, _proof._authGeneration, epoch);
+
+  bool _pending(int owner, int epoch) {
+    final now = _issuer._admissionElapsed;
+    return !_active && _context(owner, epoch) &&
+        now >= _proof._issuedAt &&
+        now - _proof._issuedAt < AppLockService._admissionLifetime;
+  }
+
+  bool claim(int owner, int epoch) {
+    if (_claimed) return false;
+    _claimed = true;
+    return _pending(owner, epoch);
+  }
+
+  bool checkPending(int owner, int epoch) =>
+      _claimed && _pending(owner, epoch);
+
+  // The runtime coordinator passes this one-shot capability only to its
+  // exact acquisition. The backend never receives claim/watch/activate.
+  D1PrfPossession takePrfPossession(int owner, int epoch) {
+    final possession = _proof._possession;
+    if (!checkPending(owner, epoch) || _onRetired == null ||
+        _possessionTaken || possession == null) {
+      throw const AppLockException('vault_prf_possession_refused');
+    }
+    _possessionTaken = true;
+    return possession;
+  }
+
+  void revokePrfPossession() => _proof._revokePossession();
+
+  bool activate(int owner, int epoch) {
+    if (!checkPending(owner, epoch) ||
+        (_proof._possession != null && !_possessionTaken)) return false;
+    _active = true;
+    return true;
+  }
+
+  bool checkSession(int owner, int epoch) =>
+      _active && _context(owner, epoch);
+
+  /// Register exactly one synchronous retirement callback before acquiring
+  /// the durable lease. A failed registration cannot authorize admission.
+  bool watchRetirement(int owner, int epoch, VoidCallback callback) {
+    if (!checkPending(owner, epoch) || _onRetired != null) return false;
+    _onRetired = callback;
+    return true;
+  }
+
+  void _retire() {
+    _retired = true;
+    _proof._revokePossession();
+    final callback = _onRetired;
+    _onRetired = null;
+    if (callback != null) {
+      try { callback(); }
+      catch (error, stack) {
+        FlutterError.reportError(FlutterErrorDetails(exception: error, stack: stack));
+      }
+    }
+  }
+}
+
 class AppLockService extends ChangeNotifier {
   static const _credentialKey = 'iamina_app_lock_credential_v1';
+  // Separate, explicitly provisioned D1 credential. Its signCount is a
+  // fixed provisioning floor; ONLY the IndexedDB PRF register advances it.
+  // Never copy or migrate the legacy credential into this namespace.
+  static const _d1PrfCredentialKey = 'iamina_d1_prf_credential_candidate_v1';
   static const _requiredKey = 'iamina_app_lock_required_v1';
   // New explicit choice, separate from the deprecated untrusted opt-out marker.
   static const _choiceKey = 'iamina_app_lock_initial_choice_v2';
@@ -25,16 +143,26 @@ class AppLockService extends ChangeNotifier {
 
   final FlutterSecureStorage _storage;
   final AppLockAuthenticator _authenticator;
+  final D1PrfAcquirer? _d1PrfAcquirer;
   final AuthService? _authService;
   final ProtectedLocalStateProbe? _protectedLocalStateProbe;
   final DateTime Function() _now;
   final Duration gracePeriod;
+  final Stopwatch _admissionClock = Stopwatch()..start();
+  final Duration Function()? _admissionElapsedForTesting;
+  static const _admissionLifetime = Duration(seconds: 30);
+  int _admissionGeneration = 0;
+  D1VaultAdmissionProof? _pendingAdmission;
+  D1VaultAdmissionGuard? _currentAdmissionGuard;
 
   bool _initialized = false;
   bool _configured = false;
   bool _required = false;
   bool _explicitlySkipped = false;
   int _choiceGeneration = 0;
+  int _proofGeneration = 0;
+  bool _proofInFlight = false;
+  bool _disposed = false;
   bool _unlocked = false;
   bool _recoveryRequired = false;
   AppLockCredential? _credential;
@@ -43,17 +171,24 @@ class AppLockService extends ChangeNotifier {
   AppLockService({
     FlutterSecureStorage? storage,
     AppLockAuthenticator? authenticator,
+    // Isolated composition only. Not a preference, not installed by main.
+    D1PrfAcquirer? d1PrfAcquirer,
     AuthService? authService,
     ProtectedLocalStateProbe? protectedLocalStateProbe,
     DateTime Function()? now,
+    // Test seam only. Production uses the process-local monotonic stopwatch.
+    Duration Function()? admissionElapsedForTesting,
     this.gracePeriod = defaultGracePeriod,
   })  : _storage = storage ?? const FlutterSecureStorage(),
         _authenticator =
             authenticator ?? createPlatformAppLockAuthenticator(),
+        _d1PrfAcquirer = d1PrfAcquirer,
         _authService = authService,
         _protectedLocalStateProbe = protectedLocalStateProbe,
-        _now = now ?? DateTime.now {
+        _now = now ?? DateTime.now,
+        _admissionElapsedForTesting = admissionElapsedForTesting {
     _authService?.addListener(_handleAuthChanged);
+    _authService?.addAdmissionTransitionListener(_retireAdmission);
   }
 
   bool get isInitialized => _initialized;
@@ -64,11 +199,34 @@ class AppLockService extends ChangeNotifier {
   // D1 P0: Web patient SQLite is not yet certified as encrypted at rest.
   // This is a compile-time platform refusal, NOT a browser preference,
   // feature flag, or remotely asserted claim of encryption readiness.
-  bool get canOptOutOfAppLock => !kIsWeb;
+  bool get canOptOutOfAppLock => !kIsWeb && _d1PrfAcquirer == null;
   bool get recoveryRequired => _recoveryRequired;
   bool get needsSetup => _initialized && !_configured && !_explicitlySkipped && !_recoveryRequired;
 
+  // Enrollment emits unpadded canonical base64url. Reject ambiguity
+  // before comparing identities; the old verifier accepts padded forms.
+  static bool _canonicalD1Field(String value) {
+    if (value.isEmpty || value.length > 8192 ||
+        !RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(value)) return false;
+    try {
+      return base64Url.encode(base64Url.decode(base64Url.normalize(value)))
+          .replaceAll('=', '') == value;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static bool _canonicalD1Credential(AppLockCredential credential) =>
+      _canonicalD1Field(credential.credentialId) &&
+      _canonicalD1Field(credential.publicKeySpki) &&
+      credential.signCount <= 0xffffffff;
+
   Future<void> initialize() async {
+    _retireAdmission();
+    if (_disposed || _proofInFlight) {
+      throw const AppLockException('lock_verification_in_progress');
+    }
+    _proofGeneration++;
     _configured = false;
     _required = false;
     _explicitlySkipped = false;
@@ -77,6 +235,31 @@ class AppLockService extends ChangeNotifier {
     _credential = null;
 
     try {
+      if (_d1PrfAcquirer != null) {
+        // Read only: no enrollment, migration, recovery, or mutation of the
+        // floor in this candidate. Missing/ambiguous state fails closed.
+        _required = true;
+        final raw = await _storage.read(key: _d1PrfCredentialKey);
+        final legacyRaw = await _storage.read(key: _credentialKey);
+        if (raw == null || raw.isEmpty) {
+          throw const AppLockException('vault_prf_provisioning_required');
+        }
+        final credential = AppLockCredential.decode(raw);
+        if (!_canonicalD1Credential(credential)) {
+          throw const AppLockException('vault_prf_provisioning_required');
+        }
+        if (legacyRaw != null && legacyRaw.isNotEmpty) {
+          final legacy = AppLockCredential.decode(legacyRaw);
+          if (!_canonicalD1Credential(legacy) ||
+              legacy.credentialId == credential.credentialId ||
+              legacy.publicKeySpki == credential.publicKeySpki) {
+            throw const AppLockException('vault_prf_provisioning_required');
+          }
+        }
+        _credential = credential;
+        _configured = true;
+        return;
+      }
       final requiredValue = await _storage.read(key: _requiredKey);
       final choiceValue = await _storage.read(key: _choiceKey);
       final choiceOwner = await _storage.read(key: _choiceOwnerKey);
@@ -148,9 +331,19 @@ class AppLockService extends ChangeNotifier {
     }
   }
 
-  Future<AppLockCapability> capability() => _authenticator.capability();
+  Future<AppLockCapability> capability() => _d1PrfAcquirer == null
+      ? _authenticator.capability()
+      : Future.value(AppLockCapability.unavailable);
+
+  void _requireLegacyMode() {
+    if (_d1PrfAcquirer != null) {
+      throw const AppLockException('vault_prf_only');
+    }
+  }
 
   Future<void> recoverWithVerifiedRemoteAccount() async {
+    _requireLegacyMode();
+    _retireAdmission();
     if (!_initialized) {
       throw StateError('App lock requires initialized state');
     }
@@ -180,6 +373,8 @@ class AppLockService extends ChangeNotifier {
   /// an ambiguous/recovery vault. A compromised browser profile is out of
   /// scope for device-local data when the user deliberately declines a lock.
   Future<void> continueWithoutAppLock() async {
+    _requireLegacyMode();
+    _retireAdmission();
     if (!canOptOutOfAppLock) {
       throw const AppLockException('web_encrypted_vault_required');
     }
@@ -204,6 +399,8 @@ class AppLockService extends ChangeNotifier {
   /// verification. Keep the credential for other locally saved owners.
   /// Nothing here grants backend auth or enables clinical data sync.
   Future<void> disableForCurrentVault() async {
+    _requireLegacyMode();
+    _retireAdmission();
     if (!canOptOutOfAppLock) {
       throw const AppLockException('web_encrypted_vault_required');
     }
@@ -242,6 +439,8 @@ class AppLockService extends ChangeNotifier {
   /// Re-enable protection for this owner. The device credential is never
   /// silently reused: enabling requires verification or new enrollment.
   Future<void> enableForCurrentVault() async {
+    _requireLegacyMode();
+    _retireAdmission();
     if (!_initialized || _recoveryRequired || !_explicitlySkipped) {
       throw const AppLockException('lock_preference_not_available');
     }
@@ -292,35 +491,199 @@ class AppLockService extends ChangeNotifier {
     }
   }
 
+  void _retireAdmission() {
+    final pending = _pendingAdmission;
+    _pendingAdmission = null;
+    _admissionGeneration++;
+    pending?._revokePossession();
+    final guard = _currentAdmissionGuard;
+    _currentAdmissionGuard = null;
+    guard?._retire();
+  }
+
+  Duration get _admissionElapsed =>
+      _admissionElapsedForTesting?.call() ?? _admissionClock.elapsed;
+
+  bool _hasAdmissionContext(int owner, int generation, int epoch) {
+    final auth = _authService;
+    return !_disposed && _initialized && _configured && _required &&
+        !_explicitlySkipped && !_recoveryRequired && _credential != null &&
+        _backgroundedAt == null && auth != null &&
+        auth.boundNativeAccountId == owner &&
+        auth.verifiedNativeAdmissionGeneration == generation &&
+        AuthService.authEpoch == epoch;
+  }
+
+  /// Requires a new platform assertion, even when UI lock is already open.
+  /// A successful enrollment alone is not enough. Never returns key material.
+  Future<D1VaultAdmissionProof> issueVaultAdmissionProof() async {
+    _requireLegacyMode();
+    _retireAdmission();
+    final owner = _authService?.boundNativeAccountId;
+    final generation = _authService?.verifiedNativeAdmissionGeneration;
+    final epoch = AuthService.authEpoch;
+    if (owner == null || generation == null ||
+        !_hasAdmissionContext(owner, generation, epoch) || _proofInFlight) {
+      throw const AppLockException('vault_admission_identity_required');
+    }
+    // unlock() synchronously enters _beginProof, retiring exactly one
+    // generation. A reentrant proof, lock or lifecycle transition invalidates
+    // issuance even if the legacy UI's grace period leaves it unlocked.
+    final expected = _admissionGeneration + 1;
+    final started = _admissionElapsed;
+    await unlock();
+    final now = _admissionElapsed;
+    if (_admissionGeneration != expected || !_unlocked ||
+        !_hasAdmissionContext(owner, generation, epoch) ||
+        now < started || now - started >= _admissionLifetime) {
+      throw const AppLockException('vault_admission_retired');
+    }
+    final proof = D1VaultAdmissionProof._(
+        owner, generation, epoch, expected, started);
+    _pendingAdmission = proof;
+    return proof;
+  }
+
+  /// Isolated D1 PRF path directly from locked state. A configured, dedicated
+  /// credential and the fixed acquirer are mandatory. Only the PRF CAS can
+  /// advance the counter. Legacy UI stays locked: the D1 guard, not the
+  /// historical UI flag, owns admission. No fallback or implicit provisioning.
+  Future<D1VaultAdmissionProof> issuePrfVaultAdmissionProof(
+      D1PrfAcquirer prf, {String? acquisitionId}) async {
+    _retireAdmission();
+    final owner = _authService?.boundNativeAccountId;
+    final generation = _authService?.verifiedNativeAdmissionGeneration;
+    final epoch = AuthService.authEpoch;
+    final credential = _credential;
+    if (_d1PrfAcquirer == null || !identical(prf, _d1PrfAcquirer) ||
+        owner == null || generation == null || credential == null ||
+        !_hasAdmissionContext(owner, generation, epoch) || _proofInFlight) {
+      throw const AppLockException('vault_prf_possession_refused');
+    }
+    _beginProof();
+    final expected = _admissionGeneration;
+    final proofGeneration = _proofGeneration;
+    final started = _admissionElapsed;
+    bool pending() {
+      final now = _admissionElapsed;
+      return _admissionGeneration == expected &&
+          _isCurrentProof(proofGeneration, epoch) &&
+          identical(_credential, credential) &&
+          _hasAdmissionContext(owner, generation, epoch) &&
+          now >= started && now - started < _admissionLifetime;
+    }
+    D1PrfPossession? possession;
+    try {
+      if (!pending()) throw const AppLockException('vault_prf_possession_refused');
+      possession = await prf.acquire(credential, owner, pending,
+          acquisitionId: acquisitionId);
+      if (!pending() || !possession.isLive) {
+        throw const AppLockException('vault_prf_possession_refused');
+      }
+      final proof = D1VaultAdmissionProof._(
+          owner, generation, epoch, expected, started, possession);
+      _pendingAdmission = proof;
+      possession = null; // ownership transferred to the one-shot proof
+      return proof;
+    } catch (_) {
+      try { possession?.revoke(); } catch (_) { /* never publish a ticket */ }
+      throw const AppLockException('vault_prf_possession_refused');
+    } finally {
+      _proofInFlight = false;
+    }
+  }
+
+  /// Synchronous, one-shot validation. A wrong-owner attempt burns the ticket.
+  /// This is only preadmission; an eventual async vault adapter must recheck
+  /// identity/lock and durable lease at every relevant boundary.
+  D1VaultAdmissionGuard consumeVaultAdmissionProof(D1VaultAdmissionProof proof,
+      {required int owner}) {
+    if (!identical(_pendingAdmission, proof)) {
+      throw const AppLockException('vault_admission_retired');
+    }
+    _pendingAdmission = null;
+    final now = _admissionElapsed;
+    if (owner != proof._owner ||
+        (proof._possession == null ? !_unlocked : _d1PrfAcquirer == null) ||
+        !proof._possessionLive ||
+        _admissionGeneration != proof._admissionGeneration ||
+        !_hasAdmissionContext(owner, proof._authGeneration, proof._epoch) ||
+        now < proof._issuedAt || now - proof._issuedAt >= _admissionLifetime) {
+      proof._revokePossession();
+      throw const AppLockException('vault_admission_retired');
+    }
+    final guard = D1VaultAdmissionGuard._(this, proof);
+    _currentAdmissionGuard = guard;
+    return guard;
+  }
+
+  void _beginProof() {
+    _retireAdmission();
+    if (_disposed || _proofInFlight) {
+      throw const AppLockException('lock_verification_in_progress');
+    }
+    _proofInFlight = true;
+  }
+
+  bool _isCurrentProof(int generation, int epoch) =>
+      !_disposed && generation == _proofGeneration &&
+      epoch == AuthService.authEpoch;
+
+  void _requireCurrentProof(int generation, int epoch) {
+    if (!_isCurrentProof(generation, epoch)) {
+      throw const AppLockException('lock_verification_retired');
+    }
+  }
+
   Future<void> configure() async {
+    _requireLegacyMode();
     if (!_initialized) {
       throw StateError('App lock requires initialized state');
     }
     if (_recoveryRequired) {
       throw const AppLockException('recovery_required');
     }
-    final capability = await _authenticator.capability();
-    if (capability == AppLockCapability.insecureContext) {
-      throw const AppLockException('insecure_context');
-    }
-    if (capability != AppLockCapability.supported) {
-      throw const AppLockException('strong_auth_unavailable');
-    }
+    _beginProof();
+    final generation = _proofGeneration;
+    final epoch = AuthService.authEpoch;
+    try {
+      final capability = await _authenticator.capability();
+      _requireCurrentProof(generation, epoch);
+      if (capability == AppLockCapability.insecureContext) {
+        throw const AppLockException('insecure_context');
+      }
+      if (capability != AppLockCapability.supported) {
+        throw const AppLockException('strong_auth_unavailable');
+      }
 
-    final credential = await _authenticator.enroll();
-    await _storage.write(key: _credentialKey, value: credential.encode());
-    await _storage.write(key: _requiredKey, value: _requiredValue);
+      final credential = await _authenticator.enroll();
+      _requireCurrentProof(generation, epoch);
+      // Once persistence starts, complete the device credential and marker.
+      // If retirement occurs mid-write, retain the credential but not access.
+      await _storage.write(key: _credentialKey, value: credential.encode());
+      await _storage.write(key: _requiredKey, value: _requiredValue);
 
-    _credential = credential;
-    _explicitlySkipped = false;
-    _configured = true;
-    _required = true;
-    _recoveryRequired = false;
-    _unlocked = true;
-    notifyListeners();
+      if (!_disposed) {
+        _credential = credential;
+        _explicitlySkipped = false;
+        _configured = true;
+        _required = true;
+        _recoveryRequired = false;
+        if (!_isCurrentProof(generation, epoch)) {
+          _unlocked = false;
+          notifyListeners();
+        }
+      }
+      _requireCurrentProof(generation, epoch);
+      _unlocked = true;
+      notifyListeners();
+    } finally {
+      _proofInFlight = false;
+    }
   }
 
   Future<void> unlock() async {
+    _requireLegacyMode();
     if (!_initialized) {
       throw StateError('App lock requires initialized state');
     }
@@ -331,30 +694,44 @@ class AppLockService extends ChangeNotifier {
     if (!_configured || credential == null) {
       throw const AppLockException('app_lock_not_configured');
     }
+    _beginProof();
+    final generation = _proofGeneration;
+    final epoch = AuthService.authEpoch;
+    try {
+      final assertion = await _authenticator.unlock(credential);
+      _requireCurrentProof(generation, epoch);
+      final updated = credential.copyWith(signCount: assertion.signCount);
+      await _storage.write(key: _credentialKey, value: updated.encode());
 
-    final assertion = await _authenticator.unlock(credential);
-    final updated = credential.copyWith(signCount: assertion.signCount);
-    await _storage.write(key: _credentialKey, value: updated.encode());
-
-    _credential = updated;
-    _unlocked = true;
-    notifyListeners();
+      // Preserve the persisted anti-rollback counter even if a lock arrives
+      // during the write. Never publish unlocked from a retired proof.
+      if (!_disposed) _credential = updated;
+      _requireCurrentProof(generation, epoch);
+      _unlocked = true;
+      notifyListeners();
+    } finally {
+      _proofInFlight = false;
+    }
   }
 
   void lock() {
+    _retireAdmission();
+    // Invalidate a pending verification even when already locked.
+    _proofGeneration++;
     if (!_unlocked) return;
     _unlocked = false;
     notifyListeners();
   }
 
   void noteBackgrounded() {
+    _retireAdmission();
     _backgroundedAt ??= _now();
   }
 
   void noteResumed() {
     final backgroundedAt = _backgroundedAt;
     _backgroundedAt = null;
-    if (backgroundedAt == null || !_configured || !_unlocked) return;
+    if (backgroundedAt == null || (!_unlocked && !_proofInFlight)) return;
     final elapsed = _now().difference(backgroundedAt);
     if (elapsed >= gracePeriod) lock();
   }
@@ -365,11 +742,9 @@ class AppLockService extends ChangeNotifier {
   }
 
   void _handleAuthChanged() {
-    final auth = _authService;
     final generation = ++_choiceGeneration;
-    if (auth != null && auth.isInitialized && !auth.isAuthenticated) {
-      lock();
-    }
+    // Any identity transition retires an in-flight device proof.
+    lock();
     // Revoke the prior owner's opt-out synchronously before an async scope
     // lookup. Never carry patient A's choice over to patient B.
     if (_explicitlySkipped) {
@@ -406,7 +781,12 @@ class AppLockService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    _retireAdmission();
+    _proofGeneration++;
+    _choiceGeneration++;
     _authService?.removeListener(_handleAuthChanged);
+    _authService?.removeAdmissionTransitionListener(_retireAdmission);
     super.dispose();
   }
 }

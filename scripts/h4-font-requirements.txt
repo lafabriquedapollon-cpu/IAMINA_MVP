@@ -1,0 +1,5 @@
+# Exact wheels observed in R3 (Ubuntu 24.04 CPython 3.12 x86_64).
+# https://pypi.org/project/fonttools/4.63.0/
+# https://pypi.org/project/brotli/1.2.0/
+fonttools==4.63.0 --hash=sha256:58dc6bb86a78d782f00f9190ca02c119cf5bbe2807536e361e18d42019f877d8
+brotli==1.2.0 --hash=sha256:072e7624b1fc4d601036ab3f4f27942ef772887e876beff0301d261210bca97f

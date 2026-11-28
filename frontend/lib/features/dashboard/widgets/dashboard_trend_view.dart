@@ -310,18 +310,16 @@ class DashboardTrendPlot extends StatelessWidget {
     required this.onSelect,
   });
 
-  DateTime _recordedAt(LogEntryData log) => log.loggedAt ?? log.createdAt;
-
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final plotWidth =
-            (constraints.maxWidth -
-                    DashboardTrendPainter.leftInset -
-                    DashboardTrendPainter.rightInset)
-                .clamp(1.0, double.infinity)
-                .toDouble();
+        final axis = DashboardTrendTimeAxis(
+          start: start,
+          end: end,
+          left: DashboardTrendPainter.leftInset,
+          right: constraints.maxWidth - DashboardTrendPainter.rightInset,
+        );
         return Semantics(
           label: AppLocalizations.of(
             context,
@@ -329,34 +327,10 @@ class DashboardTrendPlot extends StatelessWidget {
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTapDown: (details) {
-              final dx = details.localPosition.dx
-                  .clamp(
-                    DashboardTrendPainter.leftInset,
-                    constraints.maxWidth - DashboardTrendPainter.rightInset,
-                  )
-                  .toDouble();
-              final fraction =
-                  ((dx - DashboardTrendPainter.leftInset) / plotWidth)
-                      .clamp(0.0, 1.0)
-                      .toDouble();
-              final targetMs =
-                  start.millisecondsSinceEpoch +
-                  ((end.millisecondsSinceEpoch - start.millisecondsSinceEpoch) *
-                          fraction)
-                      .round();
-              var nearest = logs.first;
-              var distance =
-                  (_recordedAt(nearest).millisecondsSinceEpoch - targetMs)
-                      .abs();
-              for (final log in logs.skip(1)) {
-                final candidate =
-                    (_recordedAt(log).millisecondsSinceEpoch - targetMs).abs();
-                if (candidate < distance) {
-                  nearest = log;
-                  distance = candidate;
-                }
-              }
-              onSelect(nearest.id);
+              final id = axis.selectLog(
+                logs, details.localPosition.dx, daily: dailySummary,
+              );
+              if (id != null) onSelect(id);
             },
             child: CustomPaint(
               painter: DashboardTrendPainter(
@@ -519,7 +493,12 @@ class DashboardTrendSelectionCard extends StatelessWidget {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(children: [Expanded(child: value), source]),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [value, source],
+                ),
                 const SizedBox(height: 10),
                 date,
                 const SizedBox(height: 10),
@@ -536,7 +515,7 @@ class DashboardTrendSelectionCard extends StatelessWidget {
               _VerticalDivider(),
               Expanded(flex: 3, child: contextTags),
               _VerticalDivider(),
-              source,
+              Flexible(flex: 2, child: source),
             ],
           );
         },
@@ -601,8 +580,10 @@ class _SelectionValue extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.end,
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         Text(
           value,
@@ -614,7 +595,6 @@ class _SelectionValue extends StatelessWidget {
             color: AminaVisualLanguage.primaryText(context),
           ),
         ),
-        const SizedBox(width: 6),
         Padding(
           padding: const EdgeInsets.only(bottom: 2),
           child: Text(
@@ -722,13 +702,15 @@ class _SourcePill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
       decoration: BoxDecoration(
-        color: AminaVisualLanguage.mintSurface,
+        color: AminaVisualLanguage.controlSurface(context),
+        border: Border.all(color: AminaVisualLanguage.controlBorder(context)),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         label,
-        style: const TextStyle(
-          color: AminaVisualLanguage.actionGreen,
+        softWrap: true,
+        style: TextStyle(
+          color: AminaVisualLanguage.secondary(context),
           fontSize: 10.2,
           fontWeight: FontWeight.w800,
         ),
@@ -781,12 +763,12 @@ class _LegendItem extends StatelessWidget {
           Flexible(
             child: Text(
               label,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
+              softWrap: true,
               style: TextStyle(
-                fontSize: 10.2,
-                height: 1.25,
-                color: AminaVisualLanguage.secondary(context),
+                fontSize: 12,
+                height: 1.3,
+                fontWeight: FontWeight.w500,
+                color: AminaVisualLanguage.primaryText(context),
               ),
             ),
           ),

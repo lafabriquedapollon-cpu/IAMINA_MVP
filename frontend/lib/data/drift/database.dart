@@ -3,6 +3,7 @@ import 'package:drift/drift.dart';
 import 'package:drift_flutter/drift_flutter.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../services/d1_cutover_policy.dart';
 import 'patient_vault_scope.dart';
 
 part 'database.g.dart';
@@ -121,7 +122,7 @@ class AppDatabase extends _$AppDatabase {
     : patientVaultScope = null,
       super(
         driftDatabase(
-          name: 'amina',
+          name: requireD1LegacyDatabaseAllowed('amina'),
           web: DriftWebOptions(
             sqlite3Wasm: Uri.parse('sqlite3.wasm'),
             driftWorker: Uri.parse('drift_worker.js'),
@@ -137,7 +138,7 @@ class AppDatabase extends _$AppDatabase {
     : patientVaultScope = scope,
       super(
         driftDatabase(
-          name: scope.databaseName,
+          name: requireD1LegacyDatabaseAllowed(scope.databaseName),
           web: DriftWebOptions(
             sqlite3Wasm: Uri.parse('sqlite3.wasm'),
             driftWorker: Uri.parse('drift_worker.js'),

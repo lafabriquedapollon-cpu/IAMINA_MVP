@@ -1,0 +1,72 @@
+"""Scoped qualification guard. Not a production sandbox or a native network firewall."""
+from urllib.parse import unquote, urlsplit
+
+
+def static_request_allowed(request, allowed):
+    # Never permit a mutation, an API route (including encoded spelling), or
+    # an origin lookalike. Browser URLs are already normalized in most cases.
+    if request.method not in ("GET", "HEAD"):
+        return False
+    try:
+        url = urlsplit(request.url)
+        if url.scheme not in ("http", "https") or url.username or url.password:
+            return False
+        path = unquote(url.path).replace("\\", "/").lower()
+        if "%" in path or any(part in ("api", "..", ".") for part in path.split("/")):
+            return False
+        return any((url.scheme, url.netloc) == (urlsplit(o).scheme, urlsplit(o).netloc)
+                   for o in allowed)
+    except (ValueError, UnicodeError):
+        return False
+
+
+def service_worker_script_request(path, headers):
+    """Server-side backstop; independent of Playwright interception."""
+    pathname = unquote(urlsplit(path).path).replace("\\", "/").lower()
+    return (headers.get("Service-Worker", "").strip().lower() == "script"
+            or headers.get("Sec-Fetch-Dest", "").strip().lower() == "serviceworker"
+            or pathname.rsplit("/",1)[-1] in ("flutter_service_worker.js", "iamina_service_worker.js", "service-worker.js", "sw.js"))
+
+
+class NoServiceWorkerScripts:
+    def send_head(self):
+        if service_worker_script_request(self.path, self.headers):
+            print("H4_STATIC_SW_SCRIPT_REFUSED", flush=True)
+            self.send_error(403)
+            return None
+        return super().send_head()
+
+
+DIRECT_GUARD = r"""(() => {
+  const sw=globalThis.navigator?.serviceWorker;
+  if(typeof sw?.register==='function'){
+    Object.defineProperty(sw,'register',{
+      value:function(){
+        if(typeof globalThis.__h4ReportTransport==='function'){
+          Promise.resolve(globalThis.__h4ReportTransport('ServiceWorker.register')).catch(()=>{});
+        }
+        return Promise.reject(new DOMException('H4 service worker refused','SecurityError'));
+      },writable:false,configurable:false
+    });
+  }
+  const names=['RTCPeerConnection','webkitRTCPeerConnection','WebTransport'];
+  for(const name of names){
+    if(typeof globalThis[name]!=='function')continue;
+    // Do not call the native constructor; no ICE/QUIC negotiation is initiated.
+    const refuse=function(){
+      if(typeof globalThis.__h4ReportTransport==='function'){
+        Promise.resolve(globalThis.__h4ReportTransport(name)).catch(()=>{});
+      }
+      throw new DOMException('H4 transport refused','SecurityError');
+    };
+    Object.defineProperty(globalThis,name,{value:refuse,writable:false,configurable:false});
+  }
+})();"""
+
+
+def attach_direct_transport_guard(context, blocked):
+    allowed = {"RTCPeerConnection", "webkitRTCPeerConnection", "WebTransport", "ServiceWorker.register"}
+    def report(_source, name):
+        blocked.append("direct_transport:" + (name if isinstance(name,str) and name in allowed else "unknown"))
+    context.expose_binding("__h4ReportTransport", report)
+    context.add_init_script(DIRECT_GUARD)
